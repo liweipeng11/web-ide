@@ -1,0 +1,9 @@
+{
+  "name": "mini-ai-web-editor",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @mini-ai-web-editor/server --filter @mini-ai-web-editor/web dev"
+  },
+  "packageManager": "pnpm@9.15.0"
+}
