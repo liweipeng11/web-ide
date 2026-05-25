@@ -25,6 +25,11 @@ body.resizing-chat {
   user-select: none;
 }
 
+body.resizing-terminal {
+  cursor: row-resize;
+  user-select: none;
+}
+
 button,
 textarea {
   font: inherit;
@@ -114,6 +119,14 @@ button:disabled {
 .workspace-layout {
   display: grid;
   flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workbench {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
 }
@@ -284,6 +297,92 @@ body.resizing-chat .chat-resizer::after {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+.terminal-panel {
+  background: #111827;
+  border-top: 1px solid #263241;
+  color: #e5edf7;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-height: 120px;
+  position: relative;
+}
+
+.terminal-resizer {
+  cursor: row-resize;
+  height: 7px;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: -4px;
+  z-index: 3;
+}
+
+.terminal-resizer::after {
+  background: transparent;
+  content: "";
+  height: 1px;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 3px;
+}
+
+.terminal-resizer:hover::after,
+body.resizing-terminal .terminal-resizer::after {
+  background: #38bdf8;
+}
+
+.terminal-header {
+  align-items: center;
+  background: #162131;
+  border-bottom: 1px solid #263241;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 34px;
+  padding: 6px 12px;
+}
+
+.terminal-header h2 {
+  font-size: 11px;
+  margin: 0;
+}
+
+.terminal-header span {
+  color: #94a3b8;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-header strong {
+  border: 1px solid #475569;
+  border-radius: 999px;
+  color: #cbd5e1;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 18px;
+  padding: 0 8px;
+}
+
+.terminal-header strong[data-status="connected"] {
+  border-color: #16a34a;
+  color: #bbf7d0;
+}
+
+.terminal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
+}
+
+.terminal-body .xterm {
+  height: 100%;
 }
 
 .panel-title {
@@ -540,6 +639,18 @@ body.resizing-chat .chat-resizer::after {
 
   .editor-pane {
     min-height: 0;
+  }
+
+  .terminal-panel {
+    height: 180px !important;
+  }
+
+  .terminal-header {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .terminal-header strong {
+    display: none;
   }
 
   .diff-modal-backdrop {

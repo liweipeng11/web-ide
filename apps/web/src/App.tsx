@@ -23,6 +23,7 @@ import ChatPanel from "./components/ChatPanel";
 import DiffViewer from "./components/DiffViewer";
 import EditorPane from "./components/EditorPane";
 import FileTree from "./components/FileTree";
+import TerminalPanel from "./components/TerminalPanel";
 
 type AppState = {
   selectedPath: string | null;
@@ -58,20 +59,29 @@ export default function App() {
   const [files, setFiles] = useState<FileTreeNode[]>([]);
   const [state, setState] = useState<AppState>(initialState);
   const [chatWidth, setChatWidth] = useState(320);
+  const [terminalHeight, setTerminalHeight] = useState(220);
   const streamAbortController = useRef<AbortController | null>(null);
   const resizingChat = useRef(false);
+  const resizingTerminal = useRef(false);
 
   useEffect(() => {
     function handlePointerMove(event: PointerEvent) {
-      if (!resizingChat.current) return;
+      if (resizingChat.current) {
+        const nextWidth = Math.min(560, Math.max(240, window.innerWidth - event.clientX));
+        setChatWidth(nextWidth);
+      }
 
-      const nextWidth = Math.min(560, Math.max(240, window.innerWidth - event.clientX));
-      setChatWidth(nextWidth);
+      if (resizingTerminal.current) {
+        const nextHeight = Math.min(Math.floor(window.innerHeight * 0.55), Math.max(120, window.innerHeight - event.clientY));
+        setTerminalHeight(nextHeight);
+      }
     }
 
     function handlePointerUp() {
       resizingChat.current = false;
+      resizingTerminal.current = false;
       document.body.classList.remove("resizing-chat");
+      document.body.classList.remove("resizing-terminal");
     }
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -395,8 +405,9 @@ export default function App() {
 
       {state.error && <div className="error-banner">{state.error}</div>}
 
-      <section className="workspace-layout" style={{ gridTemplateColumns: `minmax(220px, 260px) minmax(360px, 1fr) ${chatWidth}px` }}>
-        <FileTree nodes={files} selectedPath={state.selectedPath} onOpenFile={handleOpenFile} />
+      <section className="workbench">
+        <section className="workspace-layout" style={{ gridTemplateColumns: `minmax(220px, 260px) minmax(360px, 1fr) ${chatWidth}px` }}>
+          <FileTree nodes={files} selectedPath={state.selectedPath} onOpenFile={handleOpenFile} />
         <EditorPane path={state.selectedPath} value={state.fileContent} onChange={(fileContent) => setState((current) => ({ ...current, fileContent }))} />
         <div className="chat-column">
           <div
@@ -433,6 +444,16 @@ export default function App() {
             onGenerate={handleGenerate}
           />
         </div>
+        </section>
+        <TerminalPanel
+          workspaceRoot={state.workspaceRoot}
+          height={terminalHeight}
+          onStartResize={(event) => {
+            event.preventDefault();
+            resizingTerminal.current = true;
+            document.body.classList.add("resizing-terminal");
+          }}
+        />
       </section>
 
       <DiffViewer patch={state.patch} loading={state.loading} onApply={handleApply} onReject={handleReject} />

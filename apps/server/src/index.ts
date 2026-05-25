@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from "express";
+import { createServer } from "node:http";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import { generateAiEdit, generateFileChatReply, streamFileChatReply } from "./aiClient.js";
@@ -7,10 +8,12 @@ import { createDiffHtml } from "./diffTools.js";
 import { listFiles, readWorkspaceFile, writeWorkspaceFile } from "./fileTools.js";
 import { createPendingPatch, deletePendingPatch, getPendingPatch, clearPendingPatches } from "./patchStore.js";
 import type { ApplyPatchRequest, FileChatRequest, GenerateEditRequest, RejectPatchRequest } from "./types.js";
+import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
 
 const app = express();
+const server = createServer(app);
 
 app.use(express.json({ limit: "5mb" }));
 
@@ -298,8 +301,9 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
 });
 
 await initializeWorkspaceRoot();
+attachTerminalServer(server);
 
-app.listen(config.serverPort, () => {
+server.listen(config.serverPort, () => {
   console.log(`Mini AI Web Editor server running on http://localhost:${config.serverPort}`);
   console.log(`Workspace root: ${getWorkspaceRoot() || "(none)"}`);
 });
