@@ -4,10 +4,11 @@ import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import { generateAiEdit, generateFileChatReply, streamFileChatReply } from "./aiClient.js";
 import { appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatMessage, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
+import { searchWorkspaceCode } from "./codeSearch.js";
 import { createDiffHtml } from "./diffTools.js";
 import { listFiles, readWorkspaceFile, writeWorkspaceFile } from "./fileTools.js";
 import { createPendingPatch, deletePendingPatch, getPendingPatch, clearPendingPatches } from "./patchStore.js";
-import type { ApplyPatchRequest, FileChatRequest, GenerateEditRequest, RejectPatchRequest } from "./types.js";
+import type { ApplyPatchRequest, FileChatRequest, GenerateEditRequest, RejectPatchRequest, SaveFileRequest } from "./types.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
@@ -79,6 +80,28 @@ app.get(
       path: filePath,
       content: await readWorkspaceFile(filePath)
     });
+  })
+);
+
+app.get(
+  "/api/search",
+  asyncRoute(async (request, response) => {
+    const query = typeof request.query.q === "string" ? request.query.q : "";
+    response.json({ results: await searchWorkspaceCode(query) });
+  })
+);
+
+app.post(
+  "/api/file",
+  asyncRoute(async (request, response) => {
+    const { path: filePath, content } = request.body as Partial<SaveFileRequest>;
+
+    if (!filePath || typeof content !== "string") {
+      throw new HttpError(400, "path and content are required");
+    }
+
+    await writeWorkspaceFile(filePath, content);
+    response.json({ success: true, path: filePath });
   })
 );
 

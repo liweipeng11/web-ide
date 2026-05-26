@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FileChatHistoryItem, FileChatMessage } from "../api";
+import Icon from "./Icon";
+import MarkdownPreview from "./MarkdownPreview";
 
 type Props = {
   value: string;
@@ -45,7 +47,6 @@ export default function ChatPanel({
   const [showHistories, setShowHistories] = useState(false);
   const historyRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const buttonText = mode === "chat" ? "发送" : "生成";
   const placeholder = mode === "chat" ? "围绕当前文件继续提问..." : "描述你想对当前文件做的修改...";
 
   useEffect(() => {
@@ -58,7 +59,7 @@ export default function ChatPanel({
 
     if (!input) return;
 
-    input.style.height = "50px";
+    input.style.height = "100px";
     input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
   }, [value, mode]);
 
@@ -84,16 +85,19 @@ export default function ChatPanel({
         <div className="chat-heading-actions">
           <button
             type="button"
+            className="icon-button"
             disabled={loading}
+            title="历史"
+            aria-label="历史"
             onClick={() => {
               onRefreshHistories();
               setShowHistories((current) => !current);
             }}
           >
-            历史
+            <Icon name="history" />
           </button>
-          <button type="button" disabled={disabled || loading || !messages.length} onClick={onClearChat}>
-            清空
+          <button type="button" className="icon-button" disabled={disabled || loading || !messages.length} title="清空" aria-label="清空" onClick={onClearChat}>
+            <Icon name="clear" />
           </button>
         </div>
       </div>
@@ -120,49 +124,41 @@ export default function ChatPanel({
           )}
         </div>
       )}
-      <div className="chat-mode">
-        <button type="button" className={mode === "chat" ? "active" : ""} disabled={loading} onClick={() => onModeChange("chat")}>
-          聊天
-        </button>
-        <button type="button" className={mode === "edit" ? "active" : ""} disabled={loading} onClick={() => onModeChange("edit")}>
-          修改
-        </button>
-      </div>
       {mode === "chat" && (
         <div ref={historyRef} className="chat-history">
           {messages.length ? (
             messages.map((message) => (
               <article key={message.id} className={`chat-message ${message.role}`}>
-                <strong>{message.role === "user" ? "你" : "AI"}</strong>
+                <strong className="chat-message-role">{message.role === "user" ? "你" : "AI"}</strong>
                 {editingMessageId === message.id ? (
                   <div className="chat-message-edit">
                     <textarea value={editingDraft} onChange={(event) => setEditingDraft(event.target.value)} />
                     <div className="chat-message-actions">
-                      <button type="button" disabled={loading || !editingDraft.trim()} onClick={() => rerunEdited(message)}>
-                        保存并重跑
+                      <button type="button" className="icon-button" disabled={loading || !editingDraft.trim()} title="保存并重跑" aria-label="保存并重跑" onClick={() => rerunEdited(message)}>
+                        <Icon name="send" />
                       </button>
-                      <button type="button" disabled={loading} onClick={() => setEditingMessageId("")}>
-                        取消
+                      <button type="button" className="icon-button" disabled={loading} title="取消" aria-label="取消" onClick={() => setEditingMessageId("")}>
+                        <Icon name="close" />
                       </button>
                     </div>
                   </div>
                 ) : (
-                  <p>{message.content}</p>
+                  message.role === "assistant" ? <MarkdownPreview content={message.content} /> : <p>{message.content}</p>
                 )}
                 <div className="chat-message-actions">
-                  <button type="button" disabled={loading} onClick={() => navigator.clipboard.writeText(message.content)}>
-                    复制
+                  <button type="button" className="icon-button" disabled={loading} title="复制" aria-label="复制" onClick={() => navigator.clipboard.writeText(message.content)}>
+                    <Icon name="copy" />
                   </button>
                   {message.role === "user" && (
-                    <button type="button" disabled={loading} onClick={() => startEdit(message)}>
-                      编辑重跑
+                    <button type="button" className="icon-button" disabled={loading} title="编辑重跑" aria-label="编辑重跑" onClick={() => startEdit(message)}>
+                      <Icon name="edit" />
                     </button>
                   )}
-                  <button type="button" disabled={loading} onClick={() => onBranchMessage(message.id)}>
-                    分支
+                  <button type="button" className="icon-button" disabled={loading} title="分支" aria-label="分支" onClick={() => onBranchMessage(message.id)}>
+                    <Icon name="branch" />
                   </button>
-                  <button type="button" disabled={loading} onClick={() => onDeleteMessage(message.id)}>
-                    删除
+                  <button type="button" className="icon-button" disabled={loading} title="删除" aria-label="删除" onClick={() => onDeleteMessage(message.id)}>
+                    <Icon name="delete" />
                   </button>
                 </div>
               </article>
@@ -173,6 +169,10 @@ export default function ChatPanel({
         </div>
       )}
       <div className="chat-composer">
+        <select className="chat-mode-select" value={mode} disabled={loading} title="选择 AI 模式" aria-label="选择 AI 模式" onChange={(event) => onModeChange(event.target.value as "chat" | "edit")}>
+          <option value="chat">聊天</option>
+          <option value="edit">修改</option>
+        </select>
         <textarea
           ref={inputRef}
           value={value}
@@ -186,12 +186,12 @@ export default function ChatPanel({
           }}
         />
         {streaming && mode === "chat" ? (
-          <button type="button" onClick={onStopChat}>
-            停止
+          <button type="button" className="icon-button" title="停止" aria-label="停止" onClick={onStopChat}>
+            <Icon name="stop" />
           </button>
         ) : (
-          <button type="button" disabled={disabled || loading || !value.trim()} onClick={onGenerate}>
-            {buttonText}
+          <button type="button" className="icon-button" disabled={disabled || loading || !value.trim()} title={mode === "chat" ? "发送" : "生成修改"} aria-label={mode === "chat" ? "发送" : "生成修改"} onClick={onGenerate}>
+            <Icon name={mode === "chat" ? "send" : "edit"} />
           </button>
         )}
       </div>

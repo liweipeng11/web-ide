@@ -2,10 +2,12 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { type PointerEvent, useEffect, useRef, useState } from "react";
+import Icon from "./Icon";
 
 type Props = {
   workspaceRoot: string;
   height: number;
+  onClose: () => void;
   onStartResize: (event: PointerEvent<HTMLDivElement>) => void;
 };
 
@@ -20,7 +22,7 @@ function getTerminalUrl() {
   return `${protocol}//${window.location.host}/terminal`;
 }
 
-export default function TerminalPanel({ workspaceRoot, height, onStartResize }: Props) {
+export default function TerminalPanel({ workspaceRoot, height, onClose, onStartResize }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -135,6 +137,9 @@ export default function TerminalPanel({ workspaceRoot, height, onStartResize }: 
         <h2>Terminal</h2>
         <span>{workspaceRoot || "Open a workspace to start a terminal"}</span>
         <strong data-status={status}>{status}</strong>
+        <button type="button" className="terminal-close icon-button" title="关闭终端 (Ctrl+`)" aria-label="关闭终端" onClick={onClose}>
+          <Icon name="close" />
+        </button>
       </div>
       <div className="terminal-body" ref={containerRef} />
     </section>

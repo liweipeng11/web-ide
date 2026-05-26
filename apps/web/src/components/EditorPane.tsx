@@ -1,8 +1,13 @@
-import Editor from "@monaco-editor/react";
+import { useEffect, useRef } from "react";
+import Editor, { type OnMount } from "@monaco-editor/react";
+import Icon from "./Icon";
 
 type Props = {
   path: string | null;
   value: string;
+  dirty: boolean;
+  saving: boolean;
+  onSave: () => void;
   onChange: (value: string) => void;
 };
 
@@ -17,18 +22,39 @@ function getLanguage(path: string | null) {
   return "plaintext";
 }
 
-export default function EditorPane({ path, value, onChange }: Props) {
+export default function EditorPane({ path, value, dirty, saving, onSave, onChange }: Props) {
+  const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+
+    if (!editor || editor.getValue() === value) return;
+
+    editor.setValue(value);
+  }, [value]);
+
   return (
     <section className="editor-pane">
       <div className="panel-title">
-        <h2>代码编辑器</h2>
-        <span>{path || "请选择文件"}</span>
+        <div>
+          <h2>代码编辑器</h2>
+          <span>{path || "请选择文件"}</span>
+        </div>
+        <div className="editor-actions">
+          <span className="save-state">{saving ? "保存中..." : dirty ? "未保存" : "已保存"}</span>
+          <button type="button" className="icon-button" disabled={!path || !dirty || saving} title="保存文件 (Ctrl+S)" aria-label="保存文件" onClick={onSave}>
+            <Icon name="save" />
+          </button>
+        </div>
       </div>
       <Editor
         height="100%"
         language={getLanguage(path)}
         path={path || "empty.txt"}
         value={value}
+        onMount={(editor) => {
+          editorRef.current = editor;
+        }}
         onChange={(nextValue) => onChange(nextValue ?? "")}
         options={{
           minimap: { enabled: false },

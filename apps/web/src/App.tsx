@@ -13,6 +13,7 @@ import {
   openWorkspace,
   pickWorkspace,
   rejectPatch,
+  saveFile,
   streamFileChatMessage,
   type FileChatMessage,
   type FileChatHistoryItem,
@@ -20,14 +21,17 @@ import {
   type GenerateEditResponse
 } from "./api";
 import ChatPanel from "./components/ChatPanel";
+import CodeSearchPanel from "./components/CodeSearchPanel";
 import DiffViewer from "./components/DiffViewer";
 import EditorPane from "./components/EditorPane";
 import FileTree from "./components/FileTree";
+import Icon from "./components/Icon";
 import TerminalPanel from "./components/TerminalPanel";
 
 type AppState = {
   selectedPath: string | null;
   fileContent: string;
+  savedFileContent: string;
   userRequest: string;
   chatMode: "chat" | "edit";
   chatMessages: FileChatMessage[];
@@ -43,6 +47,7 @@ type AppState = {
 const initialState: AppState = {
   selectedPath: null,
   fileContent: "",
+  savedFileContent: "",
   userRequest: "",
   chatMode: "chat",
   chatMessages: [],
@@ -60,6 +65,9 @@ export default function App() {
   const [state, setState] = useState<AppState>(initialState);
   const [chatWidth, setChatWidth] = useState(320);
   const [terminalHeight, setTerminalHeight] = useState(220);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [leftPanel, setLeftPanel] = useState<"files" | "search">("files");
+  const [savingFile, setSavingFile] = useState(false);
   const streamAbortController = useRef<AbortController | null>(null);
   const resizingChat = useRef(false);
   const resizingTerminal = useRef(false);
@@ -109,6 +117,41 @@ export default function App() {
       .catch((error) => setState((current) => ({ ...current, error: error.message })));
   }, []);
 
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const isTerminalShortcut = (event.ctrlKey || event.metaKey) && (event.key === "`" || event.code === "Backquote");
+
+      if (!isTerminalShortcut || event.repeat) return;
+
+      event.preventDefault();
+      resizingTerminal.current = false;
+      document.body.classList.remove("resizing-terminal");
+      setTerminalOpen((current) => !current);
+    }
+
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, { capture: true });
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const isSearchShortcut = (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f";
+
+      if (!isSearchShortcut) return;
+
+      setLeftPanel("search");
+    }
+
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, { capture: true });
+    };
+  }, []);
+
   async function handleOpenWorkspace() {
     const nextWorkspaceRoot = state.workspaceInput.trim();
 
@@ -130,6 +173,7 @@ export default function App() {
         workspaceInput: workspace.workspaceRoot || "",
         selectedPath: null,
         fileContent: "",
+        savedFileContent: "",
         chatMessages: [],
         chatHistories: [],
         patch: null,
@@ -165,6 +209,7 @@ export default function App() {
         workspaceInput: workspace.workspaceRoot || "",
         selectedPath: null,
         fileContent: "",
+        savedFileContent: "",
         chatMessages: [],
         chatHistories: [],
         patch: null,
@@ -189,6 +234,7 @@ export default function App() {
         ...current,
         selectedPath: file.path,
         fileContent: file.content,
+        savedFileContent: file.content,
         chatMessages: chat.messages,
         loading: false,
         patch: null
@@ -212,6 +258,52 @@ export default function App() {
       setState((current) => ({ ...current, error: error instanceof Error ? error.message : "加载聊天历史失败" }));
     }
   }
+
+  async function handleSaveFile() {
+    if (!state.selectedPath || savingFile || state.fileContent === state.savedFileContent) return;
+
+    const pathToSave = state.selectedPath;
+    const contentToSave = state.fileContent;
+    setSavingFile(true);
+    setState((current) => ({ ...current, error: null }));
+
+    try {
+      await saveFile(pathToSave, contentToSave);
+      setState((current) => {
+        if (current.selectedPath !== pathToSave) return current;
+
+        return {
+          ...current,
+          savedFileContent: contentToSave,
+          error: null
+        };
+      });
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "保存文件失败"
+      }));
+    } finally {
+      setSavingFile(false);
+    }
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const isSaveShortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s";
+
+      if (!isSaveShortcut || event.repeat) return;
+
+      event.preventDefault();
+      void handleSaveFile();
+    }
+
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, { capture: true });
+    };
+  }, [savingFile, state.fileContent, state.savedFileContent, state.selectedPath]);
 
   async function handleGenerate() {
     if (!state.selectedPath) {
@@ -301,13 +393,16 @@ export default function App() {
   async function handleApply() {
     if (!state.patch) return;
 
+    const patchToApply = state.patch;
+    const selectedPathToApply = state.selectedPath;
     setState((current) => ({ ...current, loading: true, error: null }));
 
     try {
-      await applyPatch(state.patch.patchId);
+      await applyPatch(patchToApply.patchId);
       setState((current) => ({
         ...current,
-        fileContent: current.patch?.newContent ?? current.fileContent,
+        fileContent: current.selectedPath === selectedPathToApply ? patchToApply.newContent : current.fileContent,
+        savedFileContent: current.selectedPath === selectedPathToApply ? patchToApply.newContent : current.savedFileContent,
         loading: false,
         patch: null
       }));
@@ -396,25 +491,52 @@ export default function App() {
             placeholder="项目文件夹绝对路径"
             onChange={(event) => setState((current) => ({ ...current, workspaceInput: event.target.value }))}
           />
-          <button type="button" disabled={state.loading} onClick={() => void handlePickWorkspace()}>
-            打开
+          <button type="button" className="icon-button" disabled={state.loading} title="选择项目" aria-label="选择项目" onClick={() => void handlePickWorkspace()}>
+            <Icon name="folder-open" />
           </button>
         </form>
+        <button
+          type="button"
+          className="terminal-toggle icon-button"
+          title="切换终端 (Ctrl+`)"
+          aria-label="切换终端"
+          aria-pressed={terminalOpen}
+          onClick={() => setTerminalOpen((current) => !current)}
+        >
+          <Icon name="terminal" />
+        </button>
         {state.loading && <strong>处理中...</strong>}
       </header>
 
       {state.error && <div className="error-banner">{state.error}</div>}
 
       <section className="workbench">
-        <section className="workspace-layout" style={{ gridTemplateColumns: `minmax(220px, 260px) minmax(360px, 1fr) ${chatWidth}px` }}>
-          <FileTree nodes={files} selectedPath={state.selectedPath} onOpenFile={handleOpenFile} />
-        <EditorPane path={state.selectedPath} value={state.fileContent} onChange={(fileContent) => setState((current) => ({ ...current, fileContent }))} />
+        <section className="workspace-layout" style={{ gridTemplateColumns: `48px minmax(220px, 260px) minmax(360px, 1fr) ${chatWidth}px` }}>
+          <nav className="activity-bar" aria-label="Primary">
+            <button type="button" className={leftPanel === "files" ? "active" : ""} title="文件树" aria-label="文件树" aria-pressed={leftPanel === "files"} onClick={() => setLeftPanel("files")}>
+              <Icon name="folder-open" />
+            </button>
+            <button type="button" className={leftPanel === "search" ? "active" : ""} title="代码搜索 (Ctrl+Shift+F)" aria-label="代码搜索" aria-pressed={leftPanel === "search"} onClick={() => setLeftPanel("search")}>
+              <Icon name="search" />
+            </button>
+          </nav>
+          <aside className="left-sidebar">
+            {leftPanel === "files" ? <FileTree nodes={files} selectedPath={state.selectedPath} onOpenFile={handleOpenFile} /> : <CodeSearchPanel disabled={!state.workspaceRoot} onOpenFile={handleOpenFile} />}
+          </aside>
+        <EditorPane
+          path={state.selectedPath}
+          value={state.fileContent}
+          dirty={state.fileContent !== state.savedFileContent}
+          saving={savingFile}
+          onSave={() => void handleSaveFile()}
+          onChange={(fileContent) => setState((current) => ({ ...current, fileContent }))}
+        />
         <div className="chat-column">
           <div
             className="chat-resizer"
             role="separator"
             aria-orientation="vertical"
-            title="调整 AI 聊天宽度"
+            title="璋冩暣 AI 鑱婂ぉ瀹藉害"
             onPointerDown={(event) => {
               event.preventDefault();
               resizingChat.current = true;
@@ -445,18 +567,28 @@ export default function App() {
           />
         </div>
         </section>
-        <TerminalPanel
-          workspaceRoot={state.workspaceRoot}
-          height={terminalHeight}
-          onStartResize={(event) => {
-            event.preventDefault();
-            resizingTerminal.current = true;
-            document.body.classList.add("resizing-terminal");
-          }}
-        />
+        {terminalOpen && (
+          <TerminalPanel
+            workspaceRoot={state.workspaceRoot}
+            height={terminalHeight}
+            onClose={() => {
+              resizingTerminal.current = false;
+              document.body.classList.remove("resizing-terminal");
+              setTerminalOpen(false);
+            }}
+            onStartResize={(event) => {
+              event.preventDefault();
+              resizingTerminal.current = true;
+              document.body.classList.add("resizing-terminal");
+            }}
+          />
+        )}
       </section>
 
       <DiffViewer patch={state.patch} loading={state.loading} onApply={handleApply} onReject={handleReject} />
     </main>
   );
 }
+
+
+

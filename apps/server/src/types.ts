@@ -15,6 +15,19 @@ export type GenerateEditRequest = {
   userRequest: string;
 };
 
+export type SaveFileRequest = {
+  path: string;
+  content: string;
+};
+
+export type CodeSearchResult = {
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+  match: string;
+};
+
 export type FileChatMessage = {
   id: string;
   role: "user" | "assistant";

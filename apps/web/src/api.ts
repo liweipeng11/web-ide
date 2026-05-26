@@ -40,6 +40,18 @@ export type FileChatHistoriesResponse = {
   histories: FileChatHistoryItem[];
 };
 
+export type CodeSearchResult = {
+  path: string;
+  line: number;
+  column: number;
+  text: string;
+  match: string;
+};
+
+export type CodeSearchResponse = {
+  results: CodeSearchResult[];
+};
+
 export type FileChatStreamEvent =
   | { event: "user"; data: { message: FileChatMessage } }
   | { event: "assistant_start"; data: { message: FileChatMessage } }
@@ -97,6 +109,17 @@ export function pickWorkspace() {
 
 export function fetchFile(path: string) {
   return request<ReadFileResponse>(`/api/file?path=${encodeURIComponent(path)}`);
+}
+
+export function searchCode(query: string) {
+  return request<CodeSearchResponse>(`/api/search?q=${encodeURIComponent(query)}`);
+}
+
+export function saveFile(path: string, content: string) {
+  return request<{ success: boolean; path: string }>("/api/file", {
+    method: "POST",
+    body: JSON.stringify({ path, content })
+  });
 }
 
 export function generateEdit(path: string, userRequest: string) {
