@@ -4,7 +4,9 @@ import type { FileTreeNode } from "../api";
 type Props = {
   nodes: FileTreeNode[];
   selectedPath: string | null;
+  showIgnored: boolean;
   onOpenFile: (path: string) => void;
+  onToggleShowIgnored: (showIgnored: boolean) => void;
 };
 
 function FileIcon() {
@@ -82,7 +84,7 @@ function TreeNode({ node, selectedPath, onOpenFile }: { node: FileTreeNode; sele
   );
 }
 
-export default function FileTree({ nodes, selectedPath, onOpenFile }: Props) {
+export default function FileTree({ nodes, selectedPath, showIgnored, onOpenFile, onToggleShowIgnored }: Props) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
   const allFiles = useMemo(() => collectFiles(nodes), [nodes]);
@@ -115,10 +117,14 @@ export default function FileTree({ nodes, selectedPath, onOpenFile }: Props) {
   return (
     <section className="file-tree">
       <div className="file-tree-heading">
-        <h2>文件树</h2>
+        <h2>Files</h2>
         <kbd>Ctrl+P</kbd>
       </div>
-      <input ref={inputRef} className="file-search-input" value={query} placeholder="搜索文件" onChange={(event) => setQuery(event.target.value)} />
+      <label className="file-tree-ignored-toggle">
+        <input type="checkbox" checked={showIgnored} onChange={(event) => onToggleShowIgnored(event.target.checked)} />
+        <span>Show dependencies/generated</span>
+      </label>
+      <input ref={inputRef} className="file-search-input" value={query} placeholder="Search files" onChange={(event) => setQuery(event.target.value)} />
       {query.trim() ? (
         <div className="file-search-results">
           {searchResults.length > 0 ? (
@@ -129,7 +135,7 @@ export default function FileTree({ nodes, selectedPath, onOpenFile }: Props) {
               </button>
             ))
           ) : (
-            <p>无匹配文件</p>
+            <p>No matching files</p>
           )}
         </div>
       ) : (

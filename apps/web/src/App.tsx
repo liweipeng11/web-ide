@@ -3,6 +3,7 @@ import {
   applyPatch,
   branchFileChatMessage,
   clearFileChat,
+  deleteFileChatHistory,
   deleteFileChatMessage,
   fetchFile,
   fetchFileChat,
@@ -13,8 +14,10 @@ import {
   openWorkspace,
   pickWorkspace,
   rejectPatch,
+  runProjectCommand,
   saveFile,
   streamFileChatMessage,
+  type CommandResult,
   type FileChatMessage,
   type FileChatHistoryItem,
   type FileTreeNode,
@@ -33,31 +36,51 @@ type AppState = {
   fileContent: string;
   savedFileContent: string;
   userRequest: string;
+  chatId: string;
   chatMode: "chat" | "edit";
   chatMessages: FileChatMessage[];
   chatHistories: FileChatHistoryItem[];
+  chatContextPaths: string[];
   loading: boolean;
   streaming: boolean;
   error: string | null;
   patch: null | GenerateEditResponse;
   workspaceRoot: string;
   workspaceInput: string;
+  showIgnoredFiles: boolean;
 };
+
+type CommandSuggestion = {
+  command: string;
+  reason?: string;
+  risk?: string;
+};
+
+function collectFilePaths(nodes: FileTreeNode[]): string[] {
+  return nodes.flatMap((node) => (node.type === "file" ? [node.path] : collectFilePaths(node.children || [])));
+}
+
+function createChatId() {
+  return `chat:${crypto.randomUUID()}`;
+}
 
 const initialState: AppState = {
   selectedPath: null,
   fileContent: "",
   savedFileContent: "",
   userRequest: "",
+  chatId: createChatId(),
   chatMode: "chat",
   chatMessages: [],
   chatHistories: [],
+  chatContextPaths: [],
   loading: false,
   streaming: false,
   error: null,
   patch: null,
   workspaceRoot: "",
-  workspaceInput: ""
+  workspaceInput: "",
+  showIgnoredFiles: false
 };
 
 export default function App() {
@@ -104,14 +127,15 @@ export default function App() {
   useEffect(() => {
     fetchWorkspace()
       .then(async (workspace) => {
-        const [nodes, histories] = workspace.workspaceRoot ? await Promise.all([fetchFiles(), fetchFileChatHistories()]) : [[], { histories: [] }];
+        const [nodes, histories] = workspace.workspaceRoot ? await Promise.all([fetchFiles("", false), fetchFileChatHistories()]) : [[], { histories: [] }];
 
         setFiles(nodes);
         setState((current) => ({
           ...current,
           workspaceRoot: workspace.workspaceRoot || "",
           workspaceInput: workspace.workspaceRoot || "",
-          chatHistories: histories.histories
+          chatHistories: histories.histories,
+          chatMessages: []
         }));
       })
       .catch((error) => setState((current) => ({ ...current, error: error.message })));
@@ -164,7 +188,7 @@ export default function App() {
 
     try {
       const workspace = await openWorkspace(nextWorkspaceRoot);
-      const nodes = await fetchFiles();
+      const [nodes, histories] = await Promise.all([fetchFiles("", state.showIgnoredFiles), fetchFileChatHistories()]);
 
       setFiles(nodes);
       setState((current) => ({
@@ -174,8 +198,10 @@ export default function App() {
         selectedPath: null,
         fileContent: "",
         savedFileContent: "",
+        chatId: createChatId(),
         chatMessages: [],
-        chatHistories: [],
+        chatHistories: histories.histories,
+        chatContextPaths: [],
         patch: null,
         loading: false,
         error: null
@@ -200,7 +226,7 @@ export default function App() {
         return;
       }
 
-      const nodes = await fetchFiles();
+      const [nodes, histories] = await Promise.all([fetchFiles("", state.showIgnoredFiles), fetchFileChatHistories()]);
 
       setFiles(nodes);
       setState((current) => ({
@@ -210,8 +236,10 @@ export default function App() {
         selectedPath: null,
         fileContent: "",
         savedFileContent: "",
+        chatId: createChatId(),
         chatMessages: [],
-        chatHistories: [],
+        chatHistories: histories.histories,
+        chatContextPaths: [],
         patch: null,
         loading: false,
         error: null
@@ -229,13 +257,12 @@ export default function App() {
     setState((current) => ({ ...current, loading: true, error: null, patch: null }));
 
     try {
-      const [file, chat] = await Promise.all([fetchFile(path), fetchFileChat(path)]);
+      const file = await fetchFile(path, state.showIgnoredFiles);
       setState((current) => ({
         ...current,
         selectedPath: file.path,
         fileContent: file.content,
         savedFileContent: file.content,
-        chatMessages: chat.messages,
         loading: false,
         patch: null
       }));
@@ -256,6 +283,80 @@ export default function App() {
       setState((current) => ({ ...current, chatHistories: data.histories }));
     } catch (error) {
       setState((current) => ({ ...current, error: error instanceof Error ? error.message : "加载聊天历史失败" }));
+    }
+  }
+
+  async function handleToggleShowIgnored(showIgnoredFiles: boolean) {
+    if (!state.workspaceRoot) {
+      setState((current) => ({ ...current, showIgnoredFiles }));
+      return;
+    }
+
+    setState((current) => ({ ...current, loading: true, error: null, showIgnoredFiles }));
+
+    try {
+      const nodes = await fetchFiles("", showIgnoredFiles);
+      setFiles(nodes);
+      setState((current) => ({ ...current, loading: false }));
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : "加载文件树失败"
+      }));
+    }
+  }
+
+  async function handleOpenChatHistory(chatId: string) {
+    if (!state.workspaceRoot) return;
+
+    setState((current) => ({ ...current, loading: true, error: null }));
+
+    try {
+      const chat = await fetchFileChat(chatId);
+      setState((current) => ({
+        ...current,
+        chatId,
+        chatMessages: chat.messages,
+        loading: false,
+        error: null
+      }));
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : "加载聊天历史失败"
+      }));
+    }
+  }
+
+  function handleNewChat() {
+    streamAbortController.current?.abort();
+    setState((current) => ({
+      ...current,
+      chatId: createChatId(),
+      chatMessages: [],
+      chatContextPaths: [],
+      userRequest: "",
+      patch: null,
+      error: null
+    }));
+  }
+
+  async function handleDeleteChatHistory(path: string) {
+    if (!state.workspaceRoot || state.loading) return;
+
+    setState((current) => ({ ...current, error: null }));
+
+    try {
+      const data = await deleteFileChatHistory(path);
+      setState((current) => ({
+        ...current,
+        chatHistories: data.histories,
+        chatMessages: path === current.chatId ? [] : current.chatMessages
+      }));
+    } catch (error) {
+      setState((current) => ({ ...current, error: error instanceof Error ? error.message : "删除聊天历史失败" }));
     }
   }
 
@@ -306,7 +407,7 @@ export default function App() {
   }, [savingFile, state.fileContent, state.savedFileContent, state.selectedPath]);
 
   async function handleGenerate() {
-    if (!state.selectedPath) {
+    if (state.chatMode === "edit" && !state.selectedPath) {
       setState((current) => ({ ...current, error: "请先选择一个文件。" }));
       return;
     }
@@ -321,10 +422,13 @@ export default function App() {
       return;
     }
 
+    const pathToEdit = state.selectedPath;
+
+    if (!pathToEdit) return;
     setState((current) => ({ ...current, loading: true, error: null, patch: null }));
 
     try {
-      const patch = await generateEdit(state.selectedPath, state.userRequest);
+      const patch = await generateEdit(pathToEdit, state.userRequest);
       setState((current) => ({ ...current, loading: false, patch }));
     } catch (error) {
       setState((current) => ({
@@ -336,7 +440,7 @@ export default function App() {
   }
 
   async function handleSendChatMessage(content: string, replayFromMessageId?: string) {
-    if (!state.selectedPath || !content.trim() || state.streaming) return;
+    if (!state.workspaceRoot || !content.trim() || state.streaming) return;
 
     const controller = new AbortController();
     streamAbortController.current = controller;
@@ -344,8 +448,9 @@ export default function App() {
 
     try {
       await streamFileChatMessage(
-        state.selectedPath,
         content.trim(),
+        state.chatContextPaths,
+        state.chatId,
         (streamEvent) => {
           if (streamEvent.event === "user") {
             setState((current) => ({ ...current, chatMessages: [...current.chatMessages.filter((message) => message.id !== streamEvent.data.message.id), streamEvent.data.message] }));
@@ -433,12 +538,12 @@ export default function App() {
   }
 
   async function handleClearChat() {
-    if (!state.selectedPath) return;
+    if (!state.workspaceRoot) return;
 
     setState((current) => ({ ...current, loading: true, error: null }));
 
     try {
-      const chat = await clearFileChat(state.selectedPath);
+      const chat = await clearFileChat(state.chatId);
       setState((current) => ({ ...current, loading: false, chatMessages: chat.messages }));
     } catch (error) {
       setState((current) => ({
@@ -450,10 +555,10 @@ export default function App() {
   }
 
   async function handleDeleteChatMessage(messageId: string) {
-    if (!state.selectedPath || state.streaming) return;
+    if (!state.workspaceRoot || state.streaming) return;
 
     try {
-      const chat = await deleteFileChatMessage(state.selectedPath, messageId);
+      const chat = await deleteFileChatMessage(state.chatId, messageId);
       setState((current) => ({ ...current, chatMessages: chat.messages }));
     } catch (error) {
       setState((current) => ({ ...current, error: error instanceof Error ? error.message : "删除消息失败" }));
@@ -461,13 +566,48 @@ export default function App() {
   }
 
   async function handleBranchChatMessage(messageId: string) {
-    if (!state.selectedPath || state.streaming) return;
+    if (!state.workspaceRoot || state.streaming) return;
 
     try {
-      const chat = await branchFileChatMessage(state.selectedPath, messageId);
+      const chat = await branchFileChatMessage(state.chatId, messageId);
       setState((current) => ({ ...current, chatMessages: chat.messages }));
     } catch (error) {
       setState((current) => ({ ...current, error: error instanceof Error ? error.message : "创建分支失败" }));
+    }
+  }
+
+  function formatCommandResultForAi(result: CommandResult) {
+    const output = [result.stderr && `stderr:\n${result.stderr}`, result.stdout && `stdout:\n${result.stdout}`].filter(Boolean).join("\n\n");
+
+    return [
+      "命令已由用户确认并执行，请分析结果并给出下一步建议。",
+      "",
+      `命令：${result.command}`,
+      `工作目录：${result.cwd}`,
+      `退出码：${result.exitCode ?? "null"}`,
+      "",
+      "输出：",
+      output || "(无输出)"
+    ].join("\n");
+  }
+
+  async function handleRunCommandSuggestion(suggestion: CommandSuggestion) {
+    if (!state.workspaceRoot || state.loading || state.streaming) return null;
+
+    setState((current) => ({ ...current, loading: true, error: null }));
+
+    try {
+      const { result } = await runProjectCommand(suggestion.command, undefined, state.chatId);
+      setState((current) => ({ ...current, loading: false }));
+      await handleSendChatMessage(formatCommandResultForAi(result));
+      return result;
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : "命令执行失败"
+      }));
+      return null;
     }
   }
 
@@ -521,16 +661,44 @@ export default function App() {
             </button>
           </nav>
           <aside className="left-sidebar">
-            {leftPanel === "files" ? <FileTree nodes={files} selectedPath={state.selectedPath} onOpenFile={handleOpenFile} /> : <CodeSearchPanel disabled={!state.workspaceRoot} onOpenFile={handleOpenFile} />}
+            {leftPanel === "files" ? (
+              <FileTree
+                nodes={files}
+                selectedPath={state.selectedPath}
+                showIgnored={state.showIgnoredFiles}
+                onOpenFile={handleOpenFile}
+                onToggleShowIgnored={(showIgnored) => void handleToggleShowIgnored(showIgnored)}
+              />
+            ) : (
+              <CodeSearchPanel disabled={!state.workspaceRoot} onOpenFile={handleOpenFile} />
+            )}
           </aside>
-        <EditorPane
-          path={state.selectedPath}
-          value={state.fileContent}
-          dirty={state.fileContent !== state.savedFileContent}
-          saving={savingFile}
-          onSave={() => void handleSaveFile()}
-          onChange={(fileContent) => setState((current) => ({ ...current, fileContent }))}
-        />
+        <div className="editor-column">
+          <EditorPane
+            path={state.selectedPath}
+            value={state.fileContent}
+            dirty={state.fileContent !== state.savedFileContent}
+            saving={savingFile}
+            onSave={() => void handleSaveFile()}
+            onChange={(fileContent) => setState((current) => ({ ...current, fileContent }))}
+          />
+          {terminalOpen && (
+            <TerminalPanel
+              workspaceRoot={state.workspaceRoot}
+              height={terminalHeight}
+              onClose={() => {
+                resizingTerminal.current = false;
+                document.body.classList.remove("resizing-terminal");
+                setTerminalOpen(false);
+              }}
+              onStartResize={(event) => {
+                event.preventDefault();
+                resizingTerminal.current = true;
+                document.body.classList.add("resizing-terminal");
+              }}
+            />
+          )}
+        </div>
         <div className="chat-column">
           <div
             className="chat-resizer"
@@ -545,20 +713,38 @@ export default function App() {
           />
           <ChatPanel
             value={state.userRequest}
+            chatId={state.chatId}
             mode={state.chatMode}
             messages={state.chatMessages}
             histories={state.chatHistories}
+            availableFiles={collectFilePaths(files)}
+            contextPaths={state.chatContextPaths}
             loading={state.loading}
             streaming={state.streaming}
-            disabled={!state.selectedPath}
+            disabled={!state.workspaceRoot}
             onChange={(userRequest) => setState((current) => ({ ...current, userRequest }))}
             onModeChange={(chatMode) => setState((current) => ({ ...current, chatMode, error: null }))}
             onClearChat={handleClearChat}
-            onOpenHistory={(path) => void handleOpenFile(path)}
+            onOpenHistory={(path) => void handleOpenChatHistory(path)}
             onRefreshHistories={() => void handleRefreshChatHistories()}
+            onNewChat={handleNewChat}
+            onDeleteHistory={(path) => void handleDeleteChatHistory(path)}
+            onAddContextPath={(path) =>
+              setState((current) => ({
+                ...current,
+                chatContextPaths: current.chatContextPaths.includes(path) ? current.chatContextPaths : [...current.chatContextPaths, path]
+              }))
+            }
+            onRemoveContextPath={(path) =>
+              setState((current) => ({
+                ...current,
+                chatContextPaths: current.chatContextPaths.filter((item) => item !== path)
+              }))
+            }
             onStopChat={handleStopChat}
             onDeleteMessage={handleDeleteChatMessage}
             onBranchMessage={handleBranchChatMessage}
+            onRunCommandSuggestion={(suggestion) => handleRunCommandSuggestion(suggestion)}
             onRerunMessage={(message) => {
               setState((current) => ({ ...current, userRequest: message.content }));
               void handleSendChatMessage(message.content, message.id);
@@ -567,22 +753,6 @@ export default function App() {
           />
         </div>
         </section>
-        {terminalOpen && (
-          <TerminalPanel
-            workspaceRoot={state.workspaceRoot}
-            height={terminalHeight}
-            onClose={() => {
-              resizingTerminal.current = false;
-              document.body.classList.remove("resizing-terminal");
-              setTerminalOpen(false);
-            }}
-            onStartResize={(event) => {
-              event.preventDefault();
-              resizingTerminal.current = true;
-              document.body.classList.add("resizing-terminal");
-            }}
-          />
-        )}
       </section>
 
       <DiffViewer patch={state.patch} loading={state.loading} onApply={handleApply} onReject={handleReject} />

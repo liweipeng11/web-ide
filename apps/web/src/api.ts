@@ -52,9 +52,35 @@ export type CodeSearchResponse = {
   results: CodeSearchResult[];
 };
 
+export type ProjectCommand = {
+  name: string;
+  command: string;
+  source: string;
+  language: string;
+  packageManager?: string;
+  dependencyState?: "installed" | "missing" | "unknown";
+};
+
+export type CommandResult = {
+  command: string;
+  chatId?: string;
+  cwd: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  startedAt: string;
+  finishedAt: string;
+};
+
+export type CommandsResponse = {
+  commands: ProjectCommand[];
+  results: CommandResult[];
+};
+
 export type FileChatStreamEvent =
   | { event: "user"; data: { message: FileChatMessage } }
   | { event: "assistant_start"; data: { message: FileChatMessage } }
+  | { event: "chat"; data: { chatId: string; historyCount: number } }
   | { event: "delta"; data: { id: string; delta: string } }
   | { event: "done"; data: { messages: FileChatMessage[] } }
   | { event: "error"; data: { error: string } };
@@ -85,8 +111,8 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return data as T;
 }
 
-export function fetchFiles(dir = "") {
-  return request<FileTreeNode[]>(`/api/files?dir=${encodeURIComponent(dir)}`);
+export function fetchFiles(dir = "", includeIgnored = false) {
+  return request<FileTreeNode[]>(`/api/files?dir=${encodeURIComponent(dir)}&includeIgnored=${includeIgnored ? "true" : "false"}`);
 }
 
 export function fetchWorkspace() {
@@ -107,12 +133,23 @@ export function pickWorkspace() {
   });
 }
 
-export function fetchFile(path: string) {
-  return request<ReadFileResponse>(`/api/file?path=${encodeURIComponent(path)}`);
+export function fetchFile(path: string, includeIgnored = false) {
+  return request<ReadFileResponse>(`/api/file?path=${encodeURIComponent(path)}&includeIgnored=${includeIgnored ? "true" : "false"}`);
 }
 
 export function searchCode(query: string) {
   return request<CodeSearchResponse>(`/api/search?q=${encodeURIComponent(query)}`);
+}
+
+export function fetchProjectCommands() {
+  return request<CommandsResponse>("/api/commands");
+}
+
+export function runProjectCommand(command: string, cwd?: string, chatId?: string) {
+  return request<{ result: CommandResult }>("/api/commands/run", {
+    method: "POST",
+    body: JSON.stringify({ command, cwd, chatId })
+  });
 }
 
 export function saveFile(path: string, content: string) {
@@ -129,29 +166,36 @@ export function generateEdit(path: string, userRequest: string) {
   });
 }
 
-export function fetchFileChat(path: string) {
-  return request<FileChatResponse>(`/api/ai/file-chat?path=${encodeURIComponent(path)}`);
+export function fetchFileChat(chatId?: string) {
+  const query = chatId ? `?chatId=${encodeURIComponent(chatId)}` : "";
+  return request<FileChatResponse>(`/api/ai/file-chat${query}`);
 }
 
 export function fetchFileChatHistories() {
   return request<FileChatHistoriesResponse>("/api/ai/file-chat/histories");
 }
 
-export function sendFileChatMessage(path: string, userRequest: string) {
-  return request<FileChatResponse>("/api/ai/file-chat", {
-    method: "POST",
-    body: JSON.stringify({ path, userRequest })
+export function deleteFileChatHistory(path: string) {
+  return request<FileChatHistoriesResponse>(`/api/ai/file-chat/histories?path=${encodeURIComponent(path)}`, {
+    method: "DELETE"
   });
 }
 
-export async function streamFileChatMessage(path: string, userRequest: string, onEvent: (event: FileChatStreamEvent) => void, signal?: AbortSignal, replayFromMessageId?: string) {
+export function sendFileChatMessage(userRequest: string, paths: string[] = [], chatId?: string) {
+  return request<FileChatResponse>("/api/ai/file-chat", {
+    method: "POST",
+    body: JSON.stringify({ chatId, paths, userRequest })
+  });
+}
+
+export async function streamFileChatMessage(userRequest: string, paths: string[], chatId: string, onEvent: (event: FileChatStreamEvent) => void, signal?: AbortSignal, replayFromMessageId?: string) {
   const response = await fetch("/api/ai/file-chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     signal,
-    body: JSON.stringify({ path, userRequest, replayFromMessageId })
+    body: JSON.stringify({ chatId, paths, userRequest, replayFromMessageId })
   });
 
   if (!response.ok || !response.body) {
@@ -183,22 +227,22 @@ export async function streamFileChatMessage(path: string, userRequest: string, o
   }
 }
 
-export function clearFileChat(path: string) {
-  return request<FileChatResponse>(`/api/ai/file-chat?path=${encodeURIComponent(path)}`, {
+export function clearFileChat(chatId: string) {
+  return request<FileChatResponse>(`/api/ai/file-chat?chatId=${encodeURIComponent(chatId)}`, {
     method: "DELETE"
   });
 }
 
-export function deleteFileChatMessage(path: string, messageId: string) {
-  return request<FileChatResponse>(`/api/ai/file-chat/messages/${encodeURIComponent(messageId)}?path=${encodeURIComponent(path)}`, {
+export function deleteFileChatMessage(chatId: string, messageId: string) {
+  return request<FileChatResponse>(`/api/ai/file-chat/messages/${encodeURIComponent(messageId)}?chatId=${encodeURIComponent(chatId)}`, {
     method: "DELETE"
   });
 }
 
-export function branchFileChatMessage(path: string, messageId: string) {
+export function branchFileChatMessage(chatId: string, messageId: string) {
   return request<FileChatResponse>(`/api/ai/file-chat/messages/${encodeURIComponent(messageId)}/branch`, {
     method: "POST",
-    body: JSON.stringify({ path })
+    body: JSON.stringify({ chatId })
   });
 }
 

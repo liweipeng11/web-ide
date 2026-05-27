@@ -1,7 +1,10 @@
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import { buildUserPrompt, AI_FILE_CHAT_SYSTEM_PROMPT, AI_SYSTEM_PROMPT } from "./prompts.js";
-import type { AiEditResult, FileChatMessage } from "./types.js";
+import { discoverProjectCommands } from "./commandDiscovery.js";
+import { formatCommandFailureForPrompt, getLastFailedCommandResultForChat } from "./commandResults.js";
+import type { AiEditResult, ChatContextFile, FileChatMessage } from "./types.js";
+import { getWorkspaceRoot } from "./workspaceStore.js";
 
 type ChatCompletionResponse = {
   choices?: Array<{
@@ -49,6 +52,16 @@ function extractJsonContent(rawContent: string) {
   }
 
   return trimmed;
+}
+
+async function getAvailableCommandsForPrompt() {
+  const workspaceRoot = getWorkspaceRoot();
+
+  if (!workspaceRoot) {
+    return [];
+  }
+
+  return discoverProjectCommands(workspaceRoot);
 }
 
 async function requestChatCompletion(body: unknown) {
@@ -168,12 +181,14 @@ export async function generateAiEdit(filePath: string, content: string, userRequ
     throw new HttpError(400, "AI_API_KEY is required to generate edits");
   }
 
+  const [availableCommands, recentFailedCommand] = await Promise.all([getAvailableCommandsForPrompt(), Promise.resolve(null).then(formatCommandFailureForPrompt)]);
+
   const data = await requestChatCompletion({
     model: config.aiModel,
     temperature: 0,
     messages: [
       { role: "system", content: AI_SYSTEM_PROMPT },
-      { role: "user", content: buildUserPrompt(filePath, content, userRequest) }
+      { role: "user", content: buildUserPrompt(filePath, content, userRequest, availableCommands, recentFailedCommand) }
     ]
   });
 
@@ -211,7 +226,7 @@ export async function generateAiEdit(filePath: string, content: string, userRequ
   };
 }
 
-export async function generateFileChatReply(filePath: string, content: string, history: FileChatMessage[], userRequest: string) {
+export async function generateFileChatReply(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string) {
   if (!config.aiApiKey) {
     return [
       `Received: ${userRequest}`,
@@ -224,6 +239,7 @@ export async function generateFileChatReply(filePath: string, content: string, h
     role: message.role,
     content: message.content
   }));
+  const [availableCommands, recentFailedCommand] = await Promise.all([getAvailableCommandsForPrompt(), getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt)]);
 
   const data = await requestChatCompletion({
     model: config.aiModel,
@@ -234,8 +250,9 @@ export async function generateFileChatReply(filePath: string, content: string, h
         role: "user",
         content: JSON.stringify(
           {
-            filePath,
-            currentFileContent: content
+            contextFiles,
+            availableCommands,
+            recentFailedCommand
           },
           null,
           2
@@ -255,11 +272,12 @@ export async function generateFileChatReply(filePath: string, content: string, h
   return rawContent;
 }
 
-function buildFileChatMessages(filePath: string, content: string, history: FileChatMessage[], userRequest: string): ChatMessage[] {
+async function buildFileChatMessages(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string): Promise<ChatMessage[]> {
   const recentHistory = history.slice(-16).map((message) => ({
     role: message.role,
     content: message.content
   }));
+  const [availableCommands, recentFailedCommand] = await Promise.all([getAvailableCommandsForPrompt(), getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt)]);
 
   return [
     { role: "system", content: AI_FILE_CHAT_SYSTEM_PROMPT },
@@ -267,8 +285,9 @@ function buildFileChatMessages(filePath: string, content: string, history: FileC
       role: "user",
       content: JSON.stringify(
         {
-          filePath,
-          currentFileContent: content
+          contextFiles,
+          availableCommands,
+          recentFailedCommand
         },
         null,
         2
@@ -279,7 +298,7 @@ function buildFileChatMessages(filePath: string, content: string, history: FileC
   ];
 }
 
-export async function streamFileChatReply(filePath: string, content: string, history: FileChatMessage[], userRequest: string, onDelta: (delta: string) => void, signal?: AbortSignal) {
+export async function streamFileChatReply(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, onDelta: (delta: string) => void, signal?: AbortSignal, chatId?: string) {
   if (!config.aiApiKey) {
     const text = [
       `Received: ${userRequest}`,
@@ -301,7 +320,7 @@ export async function streamFileChatReply(filePath: string, content: string, his
       model: config.aiModel,
       temperature: 0.3,
       stream: true,
-      messages: buildFileChatMessages(filePath, content, history, userRequest)
+      messages: await buildFileChatMessages(contextFiles, history, userRequest, chatId)
     },
     onDelta,
     signal

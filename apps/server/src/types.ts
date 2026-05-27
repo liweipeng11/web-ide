@@ -28,6 +28,35 @@ export type CodeSearchResult = {
   match: string;
 };
 
+export type PackageScript = {
+  name: string;
+  command: string;
+};
+
+export type ProjectCommand = PackageScript & {
+  source: string;
+  language: string;
+  packageManager?: string;
+  dependencyState?: "installed" | "missing" | "unknown";
+};
+
+export type CommandResult = {
+  command: string;
+  chatId?: string;
+  cwd: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  startedAt: string;
+  finishedAt: string;
+};
+
+export type RunCommandRequest = {
+  command: string;
+  chatId?: string;
+  cwd?: string;
+};
+
 export type FileChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -42,8 +71,15 @@ export type FileChatHistoryItem = {
   preview: string;
 };
 
-export type FileChatRequest = {
+export type ChatContextFile = {
   path: string;
+  content: string;
+};
+
+export type FileChatRequest = {
+  chatId?: string;
+  path?: string;
+  paths?: string[];
   userRequest: string;
   replayFromMessageId?: string;
 };

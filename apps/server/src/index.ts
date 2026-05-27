@@ -3,18 +3,24 @@ import { createServer } from "node:http";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import { generateAiEdit, generateFileChatReply, streamFileChatReply } from "./aiClient.js";
-import { appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatMessage, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
+import { appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
+import { discoverProjectCommands } from "./commandDiscovery.js";
+import { getRecentCommandResults } from "./commandResults.js";
+import { runProjectCommand } from "./commandRunner.js";
 import { createDiffHtml } from "./diffTools.js";
 import { listFiles, readWorkspaceFile, writeWorkspaceFile } from "./fileTools.js";
 import { createPendingPatch, deletePendingPatch, getPendingPatch, clearPendingPatches } from "./patchStore.js";
-import type { ApplyPatchRequest, FileChatRequest, GenerateEditRequest, RejectPatchRequest, SaveFileRequest } from "./types.js";
+import type { ApplyPatchRequest, FileChatRequest, GenerateEditRequest, RejectPatchRequest, RunCommandRequest, SaveFileRequest } from "./types.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
 
 const app = express();
 const server = createServer(app);
+const workspaceChatKey = "__workspace_chat__";
+const maxChatContextFiles = 8;
+const maxChatContextCharsPerFile = 20_000;
 
 app.use(express.json({ limit: "5mb" }));
 
@@ -22,6 +28,41 @@ function asyncRoute(handler: (request: Request, response: Response) => Promise<v
   return (request: Request, response: Response, next: NextFunction) => {
     handler(request, response).catch(next);
   };
+}
+
+function getRequestedContextPaths(requestBody: Partial<FileChatRequest>) {
+  const paths = Array.isArray(requestBody.paths) ? requestBody.paths : [];
+  const legacyPath = typeof requestBody.path === "string" && requestBody.path.trim() ? [requestBody.path] : [];
+
+  return [...new Set([...paths, ...legacyPath].filter((filePath): filePath is string => typeof filePath === "string" && Boolean(filePath.trim())))].slice(0, maxChatContextFiles);
+}
+
+function getChatKey(requestBody?: Partial<FileChatRequest>, query?: Request["query"]) {
+  const bodyChatId = typeof requestBody?.chatId === "string" && requestBody.chatId.trim() ? requestBody.chatId.trim() : "";
+  const queryChatId = typeof query?.chatId === "string" && query.chatId.trim() ? query.chatId.trim() : "";
+
+  return bodyChatId || queryChatId || workspaceChatKey;
+}
+
+function requireChatKey(requestBody?: Partial<FileChatRequest>, query?: Request["query"]) {
+  const bodyChatId = typeof requestBody?.chatId === "string" && requestBody.chatId.trim() ? requestBody.chatId.trim() : "";
+  const queryChatId = typeof query?.chatId === "string" && query.chatId.trim() ? query.chatId.trim() : "";
+  const chatKey = bodyChatId || queryChatId;
+
+  if (!chatKey) {
+    throw new HttpError(400, "chatId is required");
+  }
+
+  return chatKey;
+}
+
+async function readChatContextFiles(paths: string[]) {
+  return Promise.all(
+    paths.map(async (filePath) => ({
+      path: filePath,
+      content: (await readWorkspaceFile(filePath)).slice(0, maxChatContextCharsPerFile)
+    }))
+  );
 }
 
 app.get(
@@ -63,7 +104,8 @@ app.get(
   "/api/files",
   asyncRoute(async (request, response) => {
     const dir = typeof request.query.dir === "string" ? request.query.dir : "";
-    response.json(await listFiles(dir));
+    const includeIgnored = request.query.includeIgnored === "true";
+    response.json(await listFiles(dir, includeIgnored));
   })
 );
 
@@ -76,9 +118,10 @@ app.get(
       throw new HttpError(400, "path is required");
     }
 
+    const includeIgnored = request.query.includeIgnored === "true";
     response.json({
       path: filePath,
-      content: await readWorkspaceFile(filePath)
+      content: await readWorkspaceFile(filePath, { allowIgnored: includeIgnored })
     });
   })
 );
@@ -88,6 +131,30 @@ app.get(
   asyncRoute(async (request, response) => {
     const query = typeof request.query.q === "string" ? request.query.q : "";
     response.json({ results: await searchWorkspaceCode(query) });
+  })
+);
+
+app.get(
+  "/api/commands",
+  asyncRoute(async (_request, response) => {
+    const workspaceRoot = getWorkspaceRoot();
+    const commands = workspaceRoot ? await discoverProjectCommands(workspaceRoot) : [];
+    const results = await getRecentCommandResults();
+
+    response.json({ commands, results });
+  })
+);
+
+app.post(
+  "/api/commands/run",
+  asyncRoute(async (request, response) => {
+    const { command, cwd, chatId } = request.body as Partial<RunCommandRequest>;
+
+    if (!command?.trim()) {
+      throw new HttpError(400, "command is required");
+    }
+
+    response.json({ result: await runProjectCommand(command, cwd, chatId) });
   })
 );
 
@@ -137,14 +204,7 @@ app.post(
 app.get(
   "/api/ai/file-chat",
   asyncRoute(async (request, response) => {
-    const filePath = typeof request.query.path === "string" ? request.query.path : "";
-
-    if (!filePath) {
-      throw new HttpError(400, "path is required");
-    }
-
-    await readWorkspaceFile(filePath);
-    response.json({ messages: await getFileChatMessages(filePath) });
+    response.json({ messages: await getFileChatMessages(getChatKey(undefined, request.query)) });
   })
 );
 
@@ -155,19 +215,33 @@ app.get(
   })
 );
 
+app.delete(
+  "/api/ai/file-chat/histories",
+  asyncRoute(async (request, response) => {
+    const pathToDelete = typeof request.query.path === "string" && request.query.path.trim() ? request.query.path : "";
+
+    if (!pathToDelete) {
+      throw new HttpError(400, "path is required");
+    }
+
+    response.json({ histories: await deleteFileChatHistory(pathToDelete) });
+  })
+);
+
 app.post(
   "/api/ai/file-chat",
   asyncRoute(async (request, response) => {
-    const { path: filePath, userRequest } = request.body as Partial<FileChatRequest>;
+    const { userRequest } = request.body as Partial<FileChatRequest>;
+    const chatKey = requireChatKey(request.body as Partial<FileChatRequest>);
 
-    if (!filePath || !userRequest?.trim()) {
-      throw new HttpError(400, "path and userRequest are required");
+    if (!userRequest?.trim()) {
+      throw new HttpError(400, "userRequest is required");
     }
 
-    const content = await readWorkspaceFile(filePath);
-    const history = await getFileChatMessages(filePath);
-    const answer = await generateFileChatReply(filePath, content, history, userRequest.trim());
-    const messages = await appendFileChatTurn(filePath, userRequest.trim(), answer);
+    const contextFiles = await readChatContextFiles(getRequestedContextPaths(request.body as Partial<FileChatRequest>));
+    const history = await getFileChatMessages(chatKey);
+    const answer = await generateFileChatReply(contextFiles, history, userRequest.trim(), chatKey);
+    const messages = await appendFileChatTurn(chatKey, userRequest.trim(), answer);
 
     response.json({ messages });
   })
@@ -191,14 +265,15 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
   };
 
   try {
-    const { path: filePath, userRequest, replayFromMessageId } = request.body as Partial<FileChatRequest>;
+    const { userRequest, replayFromMessageId } = request.body as Partial<FileChatRequest>;
+    const chatKey = requireChatKey(request.body as Partial<FileChatRequest>);
 
-    if (!filePath || !userRequest?.trim()) {
-      throw new HttpError(400, "path and userRequest are required");
+    if (!userRequest?.trim()) {
+      throw new HttpError(400, "userRequest is required");
     }
 
-    const content = await readWorkspaceFile(filePath);
-    const turn = await startFileChatTurn(filePath, userRequest.trim(), replayFromMessageId);
+    const contextFiles = await readChatContextFiles(getRequestedContextPaths(request.body as Partial<FileChatRequest>));
+    const turn = await startFileChatTurn(chatKey, userRequest.trim(), replayFromMessageId);
 
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -209,9 +284,10 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
 
     sendEvent("user", { message: turn.userMessage });
     sendEvent("assistant_start", { message: turn.assistantMessage });
+    sendEvent("chat", { chatId: chatKey, historyCount: turn.history.length });
 
-    const answer = await streamFileChatReply(filePath, content, turn.history, userRequest.trim(), (delta) => sendEvent("delta", { id: turn.assistantMessage.id, delta }), controller.signal);
-    const messages = await finishFileChatTurn(filePath, turn.assistantMessage.id, answer);
+    const answer = await streamFileChatReply(contextFiles, turn.history, userRequest.trim(), (delta) => sendEvent("delta", { id: turn.assistantMessage.id, delta }), controller.signal, chatKey);
+    const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
 
     completed = true;
     sendEvent("done", { messages });
@@ -234,41 +310,23 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
 app.delete(
   "/api/ai/file-chat/messages/:messageId",
   asyncRoute(async (request, response) => {
-    const filePath = typeof request.query.path === "string" ? request.query.path : "";
-
-    if (!filePath) {
-      throw new HttpError(400, "path is required");
-    }
-
     const messageId = String(request.params.messageId || "");
-    response.json({ messages: await deleteFileChatMessage(filePath, messageId) });
+    response.json({ messages: await deleteFileChatMessage(getChatKey(undefined, request.query), messageId) });
   })
 );
 
 app.post(
   "/api/ai/file-chat/messages/:messageId/branch",
   asyncRoute(async (request, response) => {
-    const filePath = typeof request.body?.path === "string" ? request.body.path : "";
-
-    if (!filePath) {
-      throw new HttpError(400, "path is required");
-    }
-
     const messageId = String(request.params.messageId || "");
-    response.json({ messages: await branchFileChatMessages(filePath, messageId) });
+    response.json({ messages: await branchFileChatMessages(getChatKey(request.body as Partial<FileChatRequest>), messageId) });
   })
 );
 
 app.delete(
   "/api/ai/file-chat",
   asyncRoute(async (request, response) => {
-    const filePath = typeof request.query.path === "string" ? request.query.path : "";
-
-    if (!filePath) {
-      throw new HttpError(400, "path is required");
-    }
-
-    await clearFileChatMessages(filePath);
+    await clearFileChatMessages(getChatKey(undefined, request.query));
     response.json({ messages: [] });
   })
 );

@@ -1,7 +1,8 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { type PointerEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, type PointerEvent, useEffect, useRef, useState } from "react";
+import { runProjectCommand } from "../api";
 import Icon from "./Icon";
 
 type Props = {
@@ -28,6 +29,8 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
   const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<"connecting" | "connected" | "closed">("closed");
+  const [commandInput, setCommandInput] = useState("");
+  const [runningCommand, setRunningCommand] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || !workspaceRoot) {
@@ -130,6 +133,40 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
     }, 0);
   }, [height]);
 
+  async function handleRunCommand(command: string) {
+    const trimmedCommand = command.trim();
+
+    if (!trimmedCommand || runningCommand) return;
+
+    const terminal = terminalRef.current;
+    setRunningCommand(true);
+    terminal?.writeln(`\r\n$ ${trimmedCommand}`);
+
+    try {
+      const { result } = await runProjectCommand(trimmedCommand);
+
+      if (result.stdout) {
+        terminal?.write(result.stdout.replace(/\n/g, "\r\n"));
+      }
+
+      if (result.stderr) {
+        terminal?.write(result.stderr.replace(/\n/g, "\r\n"));
+      }
+
+      terminal?.writeln(`\r\n[recorded] exit code ${result.exitCode ?? "null"}`);
+      setCommandInput("");
+    } catch (error) {
+      terminal?.writeln(`\r\n[command error] ${error instanceof Error ? error.message : "Failed to run command"}`);
+    } finally {
+      setRunningCommand(false);
+    }
+  }
+
+  function handleSubmitCommand(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void handleRunCommand(commandInput);
+  }
+
   return (
     <section className="terminal-panel" style={{ height }}>
       <div className="terminal-resizer" role="separator" aria-orientation="horizontal" title="Resize terminal" onPointerDown={onStartResize} />
@@ -140,6 +177,14 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
         <button type="button" className="terminal-close icon-button" title="关闭终端 (Ctrl+`)" aria-label="关闭终端" onClick={onClose}>
           <Icon name="close" />
         </button>
+      </div>
+      <div className="terminal-command-bar">
+        <form className="terminal-command-form" onSubmit={handleSubmitCommand}>
+          <input value={commandInput} disabled={runningCommand || !workspaceRoot} placeholder="Run and record a project command" onChange={(event) => setCommandInput(event.target.value)} />
+          <button type="submit" className="icon-button" disabled={runningCommand || !commandInput.trim()} title="Run command" aria-label="Run command">
+            <Icon name="send" />
+          </button>
+        </form>
       </div>
       <div className="terminal-body" ref={containerRef} />
     </section>

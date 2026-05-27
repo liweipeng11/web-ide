@@ -63,7 +63,7 @@ export async function listFileChatHistories() {
     .flatMap(([key, messages]) => {
       const filePath = parseConversationKey(key);
 
-      if (!filePath || !messages.length) {
+      if (!filePath || !messages.length || !filePath.startsWith("chat:")) {
         return [];
       }
 
@@ -194,4 +194,9 @@ export async function clearFileChatMessages(filePath: string) {
   const store = await readChatStore();
   delete store.conversations[conversationKey(filePath)];
   await writeChatStore(store);
+}
+
+export async function deleteFileChatHistory(filePath: string) {
+  await clearFileChatMessages(filePath);
+  return listFileChatHistories();
 }

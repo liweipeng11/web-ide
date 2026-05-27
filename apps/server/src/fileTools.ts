@@ -6,6 +6,10 @@ import { getWorkspaceRoot } from "./workspaceStore.js";
 
 const IGNORED_NAMES = new Set(["node_modules", ".git", "dist", "build", ".next"]);
 
+type ResolveOptions = {
+  allowIgnored?: boolean;
+};
+
 function toComparablePath(value: string) {
   return process.platform === "win32" ? value.toLowerCase() : value;
 }
@@ -17,7 +21,7 @@ function hasIgnoredSegment(relativePath: string) {
     .some((segment) => IGNORED_NAMES.has(segment));
 }
 
-export function safeResolve(relativePath = "") {
+export function safeResolve(relativePath = "", options: ResolveOptions = {}) {
   const workspaceRoot = getWorkspaceRoot();
 
   if (!workspaceRoot) {
@@ -28,7 +32,7 @@ export function safeResolve(relativePath = "") {
     throw new HttpError(403, "Absolute paths are not allowed");
   }
 
-  if (hasIgnoredSegment(relativePath)) {
+  if (!options.allowIgnored && hasIgnoredSegment(relativePath)) {
     throw new HttpError(403, "Path is ignored");
   }
 
@@ -54,8 +58,8 @@ function toWorkspaceRelative(absolutePath: string) {
   return path.relative(workspaceRoot, absolutePath).split(path.sep).join("/");
 }
 
-export async function listFiles(dir = ""): Promise<FileTreeNode[]> {
-  const absoluteDir = safeResolve(dir);
+export async function listFiles(dir = "", includeIgnored = false): Promise<FileTreeNode[]> {
+  const absoluteDir = safeResolve(dir, { allowIgnored: includeIgnored });
   const entries = await fs.readdir(absoluteDir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {
       throw new HttpError(404, "Directory not found");
@@ -64,7 +68,7 @@ export async function listFiles(dir = ""): Promise<FileTreeNode[]> {
   });
 
   const visibleEntries = entries
-    .filter((entry) => !IGNORED_NAMES.has(entry.name))
+    .filter((entry) => includeIgnored || !IGNORED_NAMES.has(entry.name))
     .sort((a, b) => {
       if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
       return a.name.localeCompare(b.name);
@@ -76,11 +80,13 @@ export async function listFiles(dir = ""): Promise<FileTreeNode[]> {
       const relativePath = toWorkspaceRelative(absolutePath);
 
       if (entry.isDirectory()) {
+        const shouldSkipChildren = includeIgnored && IGNORED_NAMES.has(entry.name);
+
         return {
           name: entry.name,
           path: relativePath,
           type: "directory" as const,
-          children: await listFiles(relativePath)
+          children: shouldSkipChildren ? [] : await listFiles(relativePath, includeIgnored)
         };
       }
 
@@ -95,8 +101,8 @@ export async function listFiles(dir = ""): Promise<FileTreeNode[]> {
   return nodes;
 }
 
-export async function readWorkspaceFile(filePath: string) {
-  const absolutePath = safeResolve(filePath);
+export async function readWorkspaceFile(filePath: string, options: ResolveOptions = {}) {
+  const absolutePath = safeResolve(filePath, options);
   const stat = await fs.stat(absolutePath).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {
       throw new HttpError(404, "File not found");
