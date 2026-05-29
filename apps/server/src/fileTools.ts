@@ -132,3 +132,33 @@ export async function writeWorkspaceFile(filePath: string, content: string) {
 
   await fs.writeFile(absolutePath, content, "utf8");
 }
+
+export async function createWorkspaceFile(filePath: string, content: string) {
+  const absolutePath = safeResolve(filePath);
+  const existing = await fs.stat(absolutePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  });
+
+  if (existing) {
+    throw new HttpError(409, "File already exists");
+  }
+
+  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+  await fs.writeFile(absolutePath, content, "utf8");
+}
+
+export async function workspacePathExists(filePath: string) {
+  const absolutePath = safeResolve(filePath);
+  return fs
+    .stat(absolutePath)
+    .then(() => true)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    });
+}

@@ -1,15 +1,29 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { type FormEvent, type PointerEvent, useEffect, useRef, useState } from "react";
-import { runProjectCommand } from "../api";
+import { type PointerEvent, useEffect, useRef, useState } from "react";
+import type { CommandResult } from "../api";
 import Icon from "./Icon";
 
 type Props = {
   workspaceRoot: string;
   height: number;
+  commandRequest?: TerminalCommandRequest | null;
   onClose: () => void;
   onStartResize: (event: PointerEvent<HTMLDivElement>) => void;
+  onCommandComplete?: (completion: TerminalCommandCompletion) => void;
+};
+
+export type TerminalCommandRequest = {
+  id: string;
+  command: string;
+  chatId?: string;
+};
+
+export type TerminalCommandCompletion = {
+  id: string;
+  result: CommandResult | null;
+  error?: string;
 };
 
 type ServerMessage =
@@ -18,19 +32,182 @@ type ServerMessage =
   | { type: "exit"; exitCode: number; signal?: number }
   | { type: "error"; error: string };
 
+type ActiveCommand = {
+  id: string;
+  command: string;
+  marker: string;
+  output: string;
+  startedAt: string;
+  timeoutId: number;
+  settleTimeoutId: number | null;
+  longRunning: boolean;
+  reportedSnapshot: boolean;
+};
+
+const maxCapturedOutputLength = 80_000;
+const commandTimeoutMs = 120_000;
+const longRunningSettleMs = 3_000;
+
 function getTerminalUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/terminal`;
 }
 
-export default function TerminalPanel({ workspaceRoot, height, onClose, onStartResize }: Props) {
+function appendCapturedOutput(current: string, chunk: string) {
+  const next = current + chunk;
+
+  if (next.length <= maxCapturedOutputLength) {
+    return next;
+  }
+
+  return next.slice(next.length - maxCapturedOutputLength);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripAnsi(value: string) {
+  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function commandLooksLongRunning(command: string) {
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b|(?:^|\s)(?:vite|next\s+dev|webpack-dev-server)(?:\s|$)/i.test(command);
+}
+
+function shellLooksLikePowerShell(shell: string) {
+  return /powershell|pwsh/i.test(shell);
+}
+
+function shellLooksLikeCmd(shell: string) {
+  return /^cmd$/i.test(shell);
+}
+
+function wrapCommandForCompletion(command: string, requestId: string, shell: string) {
+  const markerPrefix = "__AI_CMD_DONE_";
+  const marker = `${markerPrefix}${requestId}:`;
+
+  if (shellLooksLikePowerShell(shell)) {
+    return {
+      marker,
+      input: `${command}; $codexStatus = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }; $codexM = '${markerPrefix}'; Write-Output ($codexM + '${requestId}' + ':' + $codexStatus)\r`
+    };
+  }
+
+  if (shellLooksLikeCmd(shell)) {
+    return {
+      marker,
+      input: `set __codex_m=${markerPrefix} & ${command} & echo %__codex_m%${requestId}:%ERRORLEVEL%\r`
+    };
+  }
+
+  return {
+    marker,
+    input: `{ ${command}; }; __codex_status=$?; __codex_m=${markerPrefix}; printf '\\n%s%s:%s\\n' "$__codex_m" "${requestId}" "$__codex_status"\r`
+  };
+}
+
+export default function TerminalPanel({ workspaceRoot, height, commandRequest, onClose, onStartResize, onCommandComplete }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const lastCommandRequestIdRef = useRef("");
+  const activeCommandRef = useRef<ActiveCommand | null>(null);
+  const terminalCwdRef = useRef("");
+  const terminalShellRef = useRef("");
   const [status, setStatus] = useState<"connecting" | "connected" | "closed">("closed");
-  const [commandInput, setCommandInput] = useState("");
+  const [terminalReady, setTerminalReady] = useState(false);
   const [runningCommand, setRunningCommand] = useState(false);
+
+  function completeActiveCommand(exitCode: number | null, output: string) {
+    const activeCommand = activeCommandRef.current;
+
+    if (!activeCommand) return;
+
+    window.clearTimeout(activeCommand.timeoutId);
+    if (activeCommand.settleTimeoutId) {
+      window.clearTimeout(activeCommand.settleTimeoutId);
+    }
+    activeCommandRef.current = null;
+    setRunningCommand(false);
+    onCommandComplete?.({
+      id: activeCommand.id,
+      result: {
+        command: activeCommand.command,
+        cwd: terminalCwdRef.current || workspaceRoot,
+        exitCode,
+        stdout: stripAnsi(output).trim(),
+        stderr: "",
+        startedAt: activeCommand.startedAt,
+        finishedAt: new Date().toISOString()
+      }
+    });
+  }
+
+  function failActiveCommand(message: string) {
+    const activeCommand = activeCommandRef.current;
+
+    if (!activeCommand) return;
+
+    window.clearTimeout(activeCommand.timeoutId);
+    if (activeCommand.settleTimeoutId) {
+      window.clearTimeout(activeCommand.settleTimeoutId);
+    }
+    activeCommandRef.current = null;
+    setRunningCommand(false);
+    onCommandComplete?.({ id: activeCommand.id, result: null, error: message });
+  }
+
+  function reportLongRunningSnapshot() {
+    const activeCommand = activeCommandRef.current;
+
+    if (!activeCommand || !activeCommand.longRunning || activeCommand.reportedSnapshot || !activeCommand.output.trim()) return;
+
+    activeCommand.reportedSnapshot = true;
+    onCommandComplete?.({
+      id: activeCommand.id,
+      result: {
+        command: activeCommand.command,
+        cwd: terminalCwdRef.current || workspaceRoot,
+        exitCode: null,
+        stdout: stripAnsi(activeCommand.output).trim(),
+        stderr: "",
+        startedAt: activeCommand.startedAt,
+        finishedAt: new Date().toISOString()
+      }
+    });
+  }
+
+  function scheduleLongRunningSnapshot() {
+    const activeCommand = activeCommandRef.current;
+
+    if (!activeCommand?.longRunning || activeCommand.reportedSnapshot) return;
+
+    if (activeCommand.settleTimeoutId) {
+      window.clearTimeout(activeCommand.settleTimeoutId);
+    }
+
+    activeCommand.settleTimeoutId = window.setTimeout(reportLongRunningSnapshot, longRunningSettleMs);
+  }
+
+  function captureTerminalOutput(data: string) {
+    const activeCommand = activeCommandRef.current;
+
+    if (!activeCommand) return;
+
+    const nextOutput = appendCapturedOutput(activeCommand.output, data);
+    const markerMatch = nextOutput.match(new RegExp(`\\r?\\n?${escapeRegExp(activeCommand.marker)}(-?\\d+)`));
+
+    if (!markerMatch || markerMatch.index === undefined) {
+      activeCommand.output = nextOutput;
+      scheduleLongRunningSnapshot();
+      return;
+    }
+
+    const exitCode = Number.parseInt(markerMatch[1], 10);
+    completeActiveCommand(Number.isFinite(exitCode) ? exitCode : null, nextOutput.slice(0, markerMatch.index));
+  }
 
   useEffect(() => {
     if (!containerRef.current || !workspaceRoot) {
@@ -58,7 +235,10 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
     socketRef.current = socket;
+    terminalCwdRef.current = "";
+    terminalShellRef.current = "";
     setStatus("connecting");
+    setTerminalReady(false);
 
     const fit = () => {
       fitAddon.fit();
@@ -85,11 +265,15 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
       const message = JSON.parse(event.data) as ServerMessage;
 
       if (message.type === "ready") {
+        terminalCwdRef.current = message.cwd;
+        terminalShellRef.current = message.shell;
+        setTerminalReady(true);
         terminal.writeln(`Connected to ${message.shell} in ${message.cwd}`);
         return;
       }
 
       if (message.type === "output") {
+        captureTerminalOutput(message.data);
         terminal.write(message.data);
         return;
       }
@@ -104,6 +288,7 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
 
     socket.addEventListener("close", () => {
       setStatus("closed");
+      setTerminalReady(false);
     });
 
     const resizeObserver = new ResizeObserver(fitSoon);
@@ -112,6 +297,13 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
     return () => {
       resizeObserver.disconnect();
       inputDisposable.dispose();
+      if (activeCommandRef.current) {
+        window.clearTimeout(activeCommandRef.current.timeoutId);
+        if (activeCommandRef.current.settleTimeoutId) {
+          window.clearTimeout(activeCommandRef.current.settleTimeoutId);
+        }
+        activeCommandRef.current = null;
+      }
       socket.close();
       terminal.dispose();
       terminalRef.current = null;
@@ -133,39 +325,85 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
     }, 0);
   }, [height]);
 
-  async function handleRunCommand(command: string) {
+  async function handleRunCommand(command: string, request?: TerminalCommandRequest) {
     const trimmedCommand = command.trim();
 
-    if (!trimmedCommand || runningCommand) return;
+    if (!trimmedCommand || runningCommand) return false;
 
+    if (activeCommandRef.current?.reportedSnapshot) {
+      activeCommandRef.current = null;
+      setRunningCommand(false);
+    }
+
+    if (activeCommandRef.current) return false;
+
+    const socket = socketRef.current;
     const terminal = terminalRef.current;
+
+    if (!terminal || socket?.readyState !== WebSocket.OPEN || !terminalReady || !terminalShellRef.current) {
+      if (request) {
+        onCommandComplete?.({ id: request.id, result: null, error: "Terminal is not ready yet." });
+      }
+      return false;
+    }
+
     setRunningCommand(true);
-    terminal?.writeln(`\r\n$ ${trimmedCommand}`);
 
     try {
-      const { result } = await runProjectCommand(trimmedCommand);
+      if (request) {
+        const wrappedCommand = wrapCommandForCompletion(trimmedCommand, request.id, terminalShellRef.current);
+        const timeoutId = window.setTimeout(() => {
+          if (activeCommandRef.current?.reportedSnapshot) {
+            activeCommandRef.current = null;
+            setRunningCommand(false);
+            return;
+          }
 
-      if (result.stdout) {
-        terminal?.write(result.stdout.replace(/\n/g, "\r\n"));
+          terminal.writeln(`\r\n[command error] Command timed out after ${commandTimeoutMs / 1000} seconds while waiting for completion marker.`);
+          failActiveCommand("Command timed out while waiting for terminal completion.");
+        }, commandTimeoutMs);
+
+        activeCommandRef.current = {
+          id: request.id,
+          command: trimmedCommand,
+          marker: wrappedCommand.marker,
+          output: "",
+          startedAt: new Date().toISOString(),
+          timeoutId,
+          settleTimeoutId: null,
+          longRunning: commandLooksLongRunning(trimmedCommand),
+          reportedSnapshot: false
+        };
+        socket.send(JSON.stringify({ type: "input", data: wrappedCommand.input }));
+      } else {
+        socket.send(JSON.stringify({ type: "input", data: `${trimmedCommand}\r` }));
+        setRunningCommand(false);
       }
-
-      if (result.stderr) {
-        terminal?.write(result.stderr.replace(/\n/g, "\r\n"));
-      }
-
-      terminal?.writeln(`\r\n[recorded] exit code ${result.exitCode ?? "null"}`);
-      setCommandInput("");
+      return true;
     } catch (error) {
-      terminal?.writeln(`\r\n[command error] ${error instanceof Error ? error.message : "Failed to run command"}`);
-    } finally {
+      const message = error instanceof Error ? error.message : "Failed to run command";
+      terminal.writeln(`\r\n[command error] ${message}`);
+      if (request) {
+        onCommandComplete?.({ id: request.id, result: null, error: message });
+      }
       setRunningCommand(false);
+      activeCommandRef.current = null;
+      return false;
     }
   }
 
-  function handleSubmitCommand(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    void handleRunCommand(commandInput);
-  }
+  useEffect(() => {
+    const socket = socketRef.current;
+
+    if (!commandRequest || !workspaceRoot || runningCommand || !terminalReady || !terminalRef.current || socket?.readyState !== WebSocket.OPEN) return;
+    if (lastCommandRequestIdRef.current === commandRequest.id) return;
+
+    void handleRunCommand(commandRequest.command, commandRequest).then((started) => {
+      if (started) {
+        lastCommandRequestIdRef.current = commandRequest.id;
+      }
+    });
+  }, [commandRequest, runningCommand, status, terminalReady, workspaceRoot]);
 
   return (
     <section className="terminal-panel" style={{ height }}>
@@ -177,14 +415,6 @@ export default function TerminalPanel({ workspaceRoot, height, onClose, onStartR
         <button type="button" className="terminal-close icon-button" title="关闭终端 (Ctrl+`)" aria-label="关闭终端" onClick={onClose}>
           <Icon name="close" />
         </button>
-      </div>
-      <div className="terminal-command-bar">
-        <form className="terminal-command-form" onSubmit={handleSubmitCommand}>
-          <input value={commandInput} disabled={runningCommand || !workspaceRoot} placeholder="Run and record a project command" onChange={(event) => setCommandInput(event.target.value)} />
-          <button type="submit" className="icon-button" disabled={runningCommand || !commandInput.trim()} title="Run command" aria-label="Run command">
-            <Icon name="send" />
-          </button>
-        </form>
       </div>
       <div className="terminal-body" ref={containerRef} />
     </section>

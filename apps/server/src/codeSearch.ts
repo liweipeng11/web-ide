@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { HttpError } from "./errors.js";
@@ -6,7 +7,8 @@ import type { CodeSearchResult } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
 const execFileAsync = promisify(execFile);
-const MAX_RESULTS = 200;
+const MAX_RESULTS = 50;
+const IGNORED_DIRECTORIES = new Set(["node_modules", "dist", "build", ".git"]);
 
 type RipgrepJsonMessage =
   | {
@@ -44,9 +46,11 @@ function parseRipgrepOutput(stdout: string): CodeSearchResult[] {
     if (!firstMatch) continue;
 
     results.push({
+      filePath: normalizeRelativePath(message.data.path.text),
       path: normalizeRelativePath(message.data.path.text),
       line: message.data.line_number,
       column: firstMatch.start + 1,
+      content: message.data.lines.text.trimEnd(),
       text: message.data.lines.text.trimEnd(),
       match: firstMatch.match.text
     });
@@ -54,6 +58,70 @@ function parseRipgrepOutput(stdout: string): CodeSearchResult[] {
     if (results.length >= MAX_RESULTS) break;
   }
 
+  return results;
+}
+
+async function getRipgrepCommand() {
+  try {
+    const ripgrep = await import("@vscode/ripgrep");
+    return ripgrep.rgPath;
+  } catch {
+    return "rg";
+  }
+}
+
+async function searchWorkspaceCodeWithNode(workspaceRoot: string, needle: string): Promise<CodeSearchResult[]> {
+  const results: CodeSearchResult[] = [];
+
+  async function walk(directory: string) {
+    if (results.length >= MAX_RESULTS) return;
+
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (results.length >= MAX_RESULTS) return;
+
+      if (entry.isDirectory()) {
+        if (IGNORED_DIRECTORIES.has(entry.name)) continue;
+        await walk(path.join(directory, entry.name));
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+
+      const absolutePath = path.join(directory, entry.name);
+      let content = "";
+
+      try {
+        content = await fs.readFile(absolutePath, "utf8");
+      } catch {
+        continue;
+      }
+
+      const relativePath = normalizeRelativePath(path.relative(workspaceRoot, absolutePath));
+      const lines = content.split(/\r?\n/);
+
+      for (let index = 0; index < lines.length; index += 1) {
+        const column = lines[index].indexOf(needle);
+
+        if (column === -1) continue;
+
+        results.push({
+          filePath: relativePath,
+          path: relativePath,
+          line: index + 1,
+          column: column + 1,
+          content: lines[index],
+          text: lines[index],
+          match: needle
+        });
+
+        if (results.length >= MAX_RESULTS) return;
+      }
+    }
+  }
+
+  await walk(workspaceRoot);
   return results;
 }
 
@@ -71,8 +139,8 @@ export async function searchWorkspaceCode(query: string): Promise<CodeSearchResu
 
   try {
     const { stdout } = await execFileAsync(
-      "rg",
-      ["--json", "--line-number", "--column", "--color", "never", "--glob", "!node_modules", "--glob", "!.git", "-F", needle, "."],
+      await getRipgrepCommand(),
+      ["--json", "--line-number", "--column", "--color", "never", "--glob", "!node_modules", "--glob", "!dist", "--glob", "!build", "--glob", "!.git", "-F", needle, "."],
       {
         cwd: workspaceRoot,
         maxBuffer: 1024 * 1024 * 8,
@@ -89,7 +157,7 @@ export async function searchWorkspaceCode(query: string): Promise<CodeSearchResu
     }
 
     if (execError.code === "ENOENT") {
-      throw new HttpError(500, "ripgrep (rg) is not installed or not available in PATH");
+      return searchWorkspaceCodeWithNode(workspaceRoot, needle);
     }
 
     throw error;

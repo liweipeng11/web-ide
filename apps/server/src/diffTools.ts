@@ -1,4 +1,5 @@
 import { diffLines } from "diff";
+import type { PatchFileChange } from "./types.js";
 
 function escapeHtml(value: string) {
   return value
@@ -23,4 +24,8 @@ export function createDiffHtml(oldContent: string, newContent: string) {
       return lines.map((line) => `<span class="diff-line ${className}">${escapeHtml(prefix + line)}</span>`);
     })
     .join("");
+}
+
+export function createMultiFileDiffHtml(files: PatchFileChange[]) {
+  return files.map((file) => `<div class="diff-file-header">${escapeHtml(file.status === "create" ? `${file.path} (new file)` : file.path)}</div>${file.diffHtml}`).join("");
 }

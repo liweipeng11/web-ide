@@ -10,13 +10,13 @@ import {
   fetchFileChatHistories,
   fetchFiles,
   fetchWorkspace,
-  generateEdit,
   openWorkspace,
   pickWorkspace,
   rejectPatch,
-  runProjectCommand,
   saveFile,
+  streamGenerateEdit,
   streamFileChatMessage,
+  type AgentStep,
   type CommandResult,
   type FileChatMessage,
   type FileChatHistoryItem,
@@ -29,7 +29,7 @@ import DiffViewer from "./components/DiffViewer";
 import EditorPane from "./components/EditorPane";
 import FileTree from "./components/FileTree";
 import Icon from "./components/Icon";
-import TerminalPanel from "./components/TerminalPanel";
+import TerminalPanel, { type TerminalCommandCompletion, type TerminalCommandRequest } from "./components/TerminalPanel";
 
 type AppState = {
   selectedPath: string | null;
@@ -39,6 +39,7 @@ type AppState = {
   chatId: string;
   chatMode: "chat" | "edit";
   chatMessages: FileChatMessage[];
+  agentSteps: AgentStep[];
   chatHistories: FileChatHistoryItem[];
   chatContextPaths: string[];
   loading: boolean;
@@ -72,6 +73,7 @@ const initialState: AppState = {
   chatId: createChatId(),
   chatMode: "chat",
   chatMessages: [],
+  agentSteps: [],
   chatHistories: [],
   chatContextPaths: [],
   loading: false,
@@ -89,9 +91,11 @@ export default function App() {
   const [chatWidth, setChatWidth] = useState(320);
   const [terminalHeight, setTerminalHeight] = useState(220);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalCommandRequest, setTerminalCommandRequest] = useState<TerminalCommandRequest | null>(null);
   const [leftPanel, setLeftPanel] = useState<"files" | "search">("files");
   const [savingFile, setSavingFile] = useState(false);
   const streamAbortController = useRef<AbortController | null>(null);
+  const terminalCommandResolvers = useRef<Record<string, (result: CommandResult | null) => void>>({});
   const resizingChat = useRef(false);
   const resizingTerminal = useRef(false);
 
@@ -135,7 +139,8 @@ export default function App() {
           workspaceRoot: workspace.workspaceRoot || "",
           workspaceInput: workspace.workspaceRoot || "",
           chatHistories: histories.histories,
-          chatMessages: []
+          chatMessages: [],
+          agentSteps: []
         }));
       })
       .catch((error) => setState((current) => ({ ...current, error: error.message })));
@@ -200,6 +205,7 @@ export default function App() {
         savedFileContent: "",
         chatId: createChatId(),
         chatMessages: [],
+        agentSteps: [],
         chatHistories: histories.histories,
         chatContextPaths: [],
         patch: null,
@@ -238,6 +244,7 @@ export default function App() {
         savedFileContent: "",
         chatId: createChatId(),
         chatMessages: [],
+        agentSteps: [],
         chatHistories: histories.histories,
         chatContextPaths: [],
         patch: null,
@@ -318,6 +325,7 @@ export default function App() {
         ...current,
         chatId,
         chatMessages: chat.messages,
+        agentSteps: [],
         loading: false,
         error: null
       }));
@@ -336,6 +344,7 @@ export default function App() {
       ...current,
       chatId: createChatId(),
       chatMessages: [],
+      agentSteps: [],
       chatContextPaths: [],
       userRequest: "",
       patch: null,
@@ -407,11 +416,6 @@ export default function App() {
   }, [savingFile, state.fileContent, state.savedFileContent, state.selectedPath]);
 
   async function handleGenerate() {
-    if (state.chatMode === "edit" && !state.selectedPath) {
-      setState((current) => ({ ...current, error: "请先选择一个文件。" }));
-      return;
-    }
-
     if (!state.userRequest.trim()) {
       setState((current) => ({ ...current, error: state.chatMode === "chat" ? "请先输入消息。" : "请先输入修改需求。" }));
       return;
@@ -424,18 +428,45 @@ export default function App() {
 
     const pathToEdit = state.selectedPath;
 
-    if (!pathToEdit) return;
-    setState((current) => ({ ...current, loading: true, error: null, patch: null }));
+    setState((current) => ({ ...current, loading: true, error: null, patch: null, agentSteps: [] }));
 
     try {
-      const patch = await generateEdit(pathToEdit, state.userRequest);
-      setState((current) => ({ ...current, loading: false, patch }));
+      const controller = new AbortController();
+      streamAbortController.current = controller;
+
+      await streamGenerateEdit(
+        pathToEdit,
+        state.userRequest,
+        (streamEvent) => {
+          if (streamEvent.event === "agent_step") {
+            setState((current) => ({
+              ...current,
+              agentSteps: [...current.agentSteps.filter((step) => step.id !== streamEvent.data.step.id), streamEvent.data.step]
+            }));
+          }
+
+          if (streamEvent.event === "done") {
+            setState((current) => ({ ...current, patch: streamEvent.data.patch, agentSteps: streamEvent.data.patch.agentSteps || current.agentSteps }));
+          }
+
+          if (streamEvent.event === "error") {
+            throw new Error(streamEvent.data.error);
+          }
+        },
+        controller.signal
+      );
+      setState((current) => ({ ...current, loading: false }));
     } catch (error) {
-      setState((current) => ({
-        ...current,
-        loading: false,
-        error: error instanceof Error ? error.message : "AI 请求失败"
-      }));
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setState((current) => ({
+          ...current,
+          loading: false,
+          error: error instanceof Error ? error.message : "AI 请求失败"
+        }));
+      }
+    } finally {
+      streamAbortController.current = null;
+      setState((current) => ({ ...current, loading: false }));
     }
   }
 
@@ -444,7 +475,7 @@ export default function App() {
 
     const controller = new AbortController();
     streamAbortController.current = controller;
-    setState((current) => ({ ...current, loading: true, streaming: true, error: null, patch: null, userRequest: replayFromMessageId ? current.userRequest : "" }));
+    setState((current) => ({ ...current, loading: true, streaming: true, error: null, patch: null, agentSteps: [], userRequest: replayFromMessageId ? current.userRequest : "" }));
 
     try {
       await streamFileChatMessage(
@@ -464,6 +495,13 @@ export default function App() {
             setState((current) => ({
               ...current,
               chatMessages: current.chatMessages.map((message) => (message.id === streamEvent.data.id ? { ...message, content: message.content + streamEvent.data.delta } : message))
+            }));
+          }
+
+          if (streamEvent.event === "agent_step") {
+            setState((current) => ({
+              ...current,
+              agentSteps: [...current.agentSteps.filter((step) => step.id !== streamEvent.data.step.id), streamEvent.data.step]
             }));
           }
 
@@ -504,10 +542,14 @@ export default function App() {
 
     try {
       await applyPatch(patchToApply.patchId);
+      const nodes = patchToApply.files.some((file) => file.status === "create") ? await fetchFiles("", state.showIgnoredFiles) : null;
+      if (nodes) {
+        setFiles(nodes);
+      }
       setState((current) => ({
         ...current,
-        fileContent: current.selectedPath === selectedPathToApply ? patchToApply.newContent : current.fileContent,
-        savedFileContent: current.selectedPath === selectedPathToApply ? patchToApply.newContent : current.savedFileContent,
+        fileContent: patchToApply.files.find((file) => file.path === current.selectedPath)?.newContent ?? (current.selectedPath === selectedPathToApply ? patchToApply.newContent : current.fileContent),
+        savedFileContent: patchToApply.files.find((file) => file.path === current.selectedPath)?.newContent ?? (current.selectedPath === selectedPathToApply ? patchToApply.newContent : current.savedFileContent),
         loading: false,
         patch: null
       }));
@@ -544,7 +586,7 @@ export default function App() {
 
     try {
       const chat = await clearFileChat(state.chatId);
-      setState((current) => ({ ...current, loading: false, chatMessages: chat.messages }));
+      setState((current) => ({ ...current, loading: false, chatMessages: chat.messages, agentSteps: [] }));
     } catch (error) {
       setState((current) => ({
         ...current,
@@ -559,7 +601,7 @@ export default function App() {
 
     try {
       const chat = await deleteFileChatMessage(state.chatId, messageId);
-      setState((current) => ({ ...current, chatMessages: chat.messages }));
+      setState((current) => ({ ...current, chatMessages: chat.messages, agentSteps: [] }));
     } catch (error) {
       setState((current) => ({ ...current, error: error instanceof Error ? error.message : "删除消息失败" }));
     }
@@ -570,7 +612,7 @@ export default function App() {
 
     try {
       const chat = await branchFileChatMessage(state.chatId, messageId);
-      setState((current) => ({ ...current, chatMessages: chat.messages }));
+      setState((current) => ({ ...current, chatMessages: chat.messages, agentSteps: [] }));
     } catch (error) {
       setState((current) => ({ ...current, error: error instanceof Error ? error.message : "创建分支失败" }));
     }
@@ -595,11 +637,22 @@ export default function App() {
     if (!state.workspaceRoot || state.loading || state.streaming) return null;
 
     setState((current) => ({ ...current, loading: true, error: null }));
+    setTerminalOpen(true);
 
     try {
-      const { result } = await runProjectCommand(suggestion.command, undefined, state.chatId);
+      const requestId = crypto.randomUUID();
+      const result = await new Promise<CommandResult | null>((resolve) => {
+        terminalCommandResolvers.current[requestId] = resolve;
+        setTerminalCommandRequest({ id: requestId, command: suggestion.command, chatId: state.chatId });
+      });
+
       setState((current) => ({ ...current, loading: false }));
-      await handleSendChatMessage(formatCommandResultForAi(result));
+
+      if (!result) {
+        return null;
+      }
+
+      void handleSendChatMessage(formatCommandResultForAi(result));
       return result;
     } catch (error) {
       setState((current) => ({
@@ -608,6 +661,19 @@ export default function App() {
         error: error instanceof Error ? error.message : "命令执行失败"
       }));
       return null;
+    }
+  }
+
+  function handleTerminalCommandComplete(completion: TerminalCommandCompletion) {
+    const resolve = terminalCommandResolvers.current[completion.id];
+
+    if (resolve) {
+      resolve(completion.result);
+      delete terminalCommandResolvers.current[completion.id];
+    }
+
+    if (completion.error) {
+      setState((current) => ({ ...current, loading: false, error: completion.error || null }));
     }
   }
 
@@ -686,6 +752,8 @@ export default function App() {
             <TerminalPanel
               workspaceRoot={state.workspaceRoot}
               height={terminalHeight}
+              commandRequest={terminalCommandRequest}
+              onCommandComplete={handleTerminalCommandComplete}
               onClose={() => {
                 resizingTerminal.current = false;
                 document.body.classList.remove("resizing-terminal");
@@ -716,6 +784,7 @@ export default function App() {
             chatId={state.chatId}
             mode={state.chatMode}
             messages={state.chatMessages}
+            agentSteps={state.agentSteps}
             histories={state.chatHistories}
             availableFiles={collectFilePaths(files)}
             contextPaths={state.chatContextPaths}

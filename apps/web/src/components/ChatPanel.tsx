@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CommandResult, FileChatHistoryItem, FileChatMessage } from "../api";
+import type { AgentStep, CommandResult, FileChatHistoryItem, FileChatMessage } from "../api";
 import Icon from "./Icon";
 import MarkdownPreview from "./MarkdownPreview";
 
@@ -12,7 +12,6 @@ type CommandSuggestion = {
 type CommandRunState = {
   status: "running" | "done" | "error";
   command: string;
-  result?: CommandResult;
   error?: string;
 };
 
@@ -21,6 +20,7 @@ type Props = {
   value: string;
   mode: "chat" | "edit";
   messages: FileChatMessage[];
+  agentSteps: AgentStep[];
   histories: FileChatHistoryItem[];
   availableFiles: string[];
   contextPaths: string[];
@@ -76,6 +76,7 @@ export default function ChatPanel({
   value,
   mode,
   messages,
+  agentSteps,
   histories,
   availableFiles,
   contextPaths,
@@ -125,7 +126,7 @@ export default function ChatPanel({
   useEffect(() => {
     if (!historyRef.current) return;
     historyRef.current.scrollTop = historyRef.current.scrollHeight;
-  }, [messages]);
+  }, [messages, agentSteps]);
 
   useLayoutEffect(() => {
     const input = inputRef.current;
@@ -167,9 +168,8 @@ export default function ChatPanel({
         setCommandRuns((current) => ({
           ...current,
           [message.id]: {
-            status: "error",
-            command: suggestion.command,
-            error: "Command did not return a result."
+            status: "done",
+            command: suggestion.command
           }
         }));
         return;
@@ -179,8 +179,7 @@ export default function ChatPanel({
         ...current,
         [message.id]: {
           status: "done",
-          command: suggestion.command,
-          result
+          command: suggestion.command
         }
       }));
     } catch (error) {
@@ -196,18 +195,37 @@ export default function ChatPanel({
   }
 
   function renderCommandTerminal(runState: CommandRunState) {
-    const output = runState.result ? [runState.result.stderr, runState.result.stdout].filter(Boolean).join("\n") : "";
-
     return (
       <div className="chat-command-terminal" aria-live="polite">
         <div className="chat-command-terminal-header">
-          <span>{runState.status === "running" ? "Running" : runState.status === "done" ? "Finished" : "Failed"}</span>
-          {runState.result && <strong>exit {runState.result.exitCode ?? "null"}</strong>}
+          <span>{runState.status === "running" ? "Running" : runState.status === "done" ? "Sent" : "Failed"}</span>
+          <strong>Terminal</strong>
         </div>
         <pre>
-          <code>{[`$ ${runState.command}`, runState.status === "running" ? "Running command..." : "", output, runState.error || ""].filter(Boolean).join("\n\n")}</code>
+          <code>{[`$ ${runState.command}`, runState.status === "running" ? "Running in Terminal..." : "Output is shown in Terminal.", runState.error || ""].filter(Boolean).join("\n\n")}</code>
         </pre>
       </div>
+    );
+  }
+
+  function renderAgentSteps() {
+    if (!agentSteps.length) return null;
+
+    return (
+      <section className="agent-steps" aria-label="Agent steps">
+        <strong>Agent Steps</strong>
+        <ol>
+          {agentSteps.map((step) => (
+            <li key={step.id}>
+              <span>{step.type === "search" ? "Search" : "Read"}</span>
+              <div>
+                <b>{step.title}</b>
+                <small>{step.detail}</small>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </section>
     );
   }
 
@@ -269,6 +287,7 @@ export default function ChatPanel({
       )}
       {mode === "chat" && (
         <div ref={historyRef} className="chat-history">
+          {renderAgentSteps()}
           {messages.length ? (
             messages.map((message) => {
               const parsedSuggestion = message.role === "assistant" ? parseCommandSuggestion(message.content) : { suggestion: null, visibleContent: message.content };
@@ -334,6 +353,7 @@ export default function ChatPanel({
           )}
         </div>
       )}
+      {mode === "edit" && renderAgentSteps()}
       <div className="chat-composer">
         <div className="chat-context-bar">
           <button

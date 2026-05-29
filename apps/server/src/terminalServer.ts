@@ -20,7 +20,7 @@ function getShell() {
     return process.env.SHELL || "bash";
   }
 
-  return process.env.PSModulePath ? "powershell.exe" : process.env.ComSpec || "cmd.exe";
+  return process.env.ComSpec || "cmd.exe";
 }
 
 function parseMessage(data: RawData): TerminalClientMessage | null {

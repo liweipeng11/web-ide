@@ -11,7 +11,7 @@ export type ReadFileResponse = {
 };
 
 export type GenerateEditRequest = {
-  path: string;
+  path?: string | null;
   userRequest: string;
 };
 
@@ -21,11 +21,19 @@ export type SaveFileRequest = {
 };
 
 export type CodeSearchResult = {
+  filePath: string;
   path: string;
   line: number;
   column: number;
+  content: string;
   text: string;
   match: string;
+};
+
+export type SearchResult = {
+  filePath: string;
+  line: number;
+  content: string;
 };
 
 export type PackageScript = {
@@ -91,9 +99,16 @@ export type FileChatResponse = {
 export type GenerateEditResponse = {
   patchId: string;
   summary: string;
+  files: PatchFileChange[];
+  diffHtml: string;
   oldContent: string;
   newContent: string;
-  diffHtml: string;
+  agentSteps?: Array<{
+    id: string;
+    type: "search" | "read";
+    title: string;
+    detail: string;
+  }>;
 };
 
 export type ApplyPatchRequest = {
@@ -110,13 +125,22 @@ export type RejectPatchRequest = {
 
 export type AiEditResult = {
   summary: string;
-  newContent: string | null;
+  files: Array<{
+    path: string;
+    newContent: string;
+  }> | null;
+};
+
+export type PatchFileChange = {
+  path: string;
+  status: "create" | "modify";
+  oldContent: string;
+  newContent: string;
+  diffHtml: string;
 };
 
 export type PendingPatch = {
   patchId: string;
-  filePath: string;
-  oldContent: string;
-  newContent: string;
+  files: PatchFileChange[];
   createdAt: number;
 };

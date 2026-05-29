@@ -13,6 +13,16 @@ export type ReadFileResponse = {
 export type GenerateEditResponse = {
   patchId: string;
   summary: string;
+  files: PatchFileChange[];
+  oldContent: string;
+  newContent: string;
+  diffHtml: string;
+  agentSteps?: AgentStep[];
+};
+
+export type PatchFileChange = {
+  path: string;
+  status: "create" | "modify";
   oldContent: string;
   newContent: string;
   diffHtml: string;
@@ -23,6 +33,13 @@ export type FileChatMessage = {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+};
+
+export type AgentStep = {
+  id: string;
+  type: "search" | "read";
+  title: string;
+  detail: string;
 };
 
 export type FileChatHistoryItem = {
@@ -41,9 +58,11 @@ export type FileChatHistoriesResponse = {
 };
 
 export type CodeSearchResult = {
+  filePath: string;
   path: string;
   line: number;
   column: number;
+  content: string;
   text: string;
   match: string;
 };
@@ -81,8 +100,14 @@ export type FileChatStreamEvent =
   | { event: "user"; data: { message: FileChatMessage } }
   | { event: "assistant_start"; data: { message: FileChatMessage } }
   | { event: "chat"; data: { chatId: string; historyCount: number } }
+  | { event: "agent_step"; data: { step: AgentStep } }
   | { event: "delta"; data: { id: string; delta: string } }
   | { event: "done"; data: { messages: FileChatMessage[] } }
+  | { event: "error"; data: { error: string } };
+
+export type GenerateEditStreamEvent =
+  | { event: "agent_step"; data: { step: AgentStep } }
+  | { event: "done"; data: { patch: GenerateEditResponse } }
   | { event: "error"; data: { error: string } };
 
 export type WorkspaceResponse = {
@@ -159,11 +184,50 @@ export function saveFile(path: string, content: string) {
   });
 }
 
-export function generateEdit(path: string, userRequest: string) {
+export function generateEdit(path: string | null, userRequest: string) {
   return request<GenerateEditResponse>("/api/ai/generate-edit", {
     method: "POST",
     body: JSON.stringify({ path, userRequest })
   });
+}
+
+export async function streamGenerateEdit(path: string | null, userRequest: string, onEvent: (event: GenerateEditStreamEvent) => void, signal?: AbortSignal) {
+  const response = await fetch("/api/ai/generate-edit/stream", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    signal,
+    body: JSON.stringify({ path, userRequest })
+  });
+
+  if (!response.ok || !response.body) {
+    const data = await response.json().catch(() => null);
+    throw new Error(data?.error || `璇锋眰澶辫触锛岀姸鎬佺爜 ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const packets = buffer.split("\n\n");
+    buffer = packets.pop() || "";
+
+    for (const packet of packets) {
+      const event = packet.match(/^event:\s*(.+)$/m)?.[1]?.trim() as GenerateEditStreamEvent["event"] | undefined;
+      const dataLine = packet.match(/^data:\s*(.+)$/m)?.[1];
+
+      if (!event || !dataLine) continue;
+
+      onEvent({ event, data: JSON.parse(dataLine) } as GenerateEditStreamEvent);
+    }
+  }
 }
 
 export function fetchFileChat(chatId?: string) {

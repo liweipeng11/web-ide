@@ -81,12 +81,12 @@ export default function CodeSearchPanel({ disabled, onOpenFile }: Props) {
       {results.length > 0 && (
         <div className="code-search-results">
           {results.map((result) => (
-            <button key={`${result.path}:${result.line}:${result.column}`} type="button" onClick={() => onOpenFile(result.path)}>
-              <strong>{result.path}</strong>
+            <button key={`${result.filePath}:${result.line}:${result.column}`} type="button" onClick={() => onOpenFile(result.filePath)}>
+              <strong>{result.filePath}</strong>
               <span>
                 {result.line}:{result.column}
               </span>
-              <code>{result.text}</code>
+              <code>{result.content}</code>
             </button>
           ))}
         </div>

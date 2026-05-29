@@ -102,7 +102,8 @@ button:disabled {
 
 .app-header span,
 .panel-title span,
-.diff-header span {
+.diff-header span,
+.diff-header small {
   color: #647181;
   display: block;
   font-size: 10px;
@@ -988,6 +989,71 @@ body.resizing-terminal .terminal-resizer::after {
   margin: 0;
 }
 
+.agent-steps {
+  background: #f8fafc;
+  border: 1px solid #d8dee5;
+  border-radius: 6px;
+  max-height: 500px;
+  margin-bottom: 10px;
+  overflow: auto;
+  padding: 8px;
+}
+
+.agent-steps > strong {
+  color: #334155;
+  display: block;
+  font-size: 10px;
+  margin-bottom: 6px;
+}
+
+.agent-steps ol {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.agent-steps li {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-steps li > span {
+  background: #e8f1fb;
+  border-radius: 4px;
+  color: #155aa8;
+  flex: 0 0 auto;
+  font-size: 9px;
+  line-height: 18px;
+  padding: 0 6px;
+}
+
+.agent-steps li > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-steps b,
+.agent-steps small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-steps b {
+  color: #1f2d3d;
+  font-size: 10px;
+}
+
+.agent-steps small {
+  color: #647181;
+  font-size: 10px;
+}
+
 .chat-message {
   border-bottom: 1px solid #edf1f5;
   padding: 8px 0;
@@ -1329,6 +1395,18 @@ body.resizing-terminal .terminal-resizer::after {
   padding: 0 18px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.diff-file-header {
+  background: #eef2f7;
+  border-bottom: 1px solid #d8dee5;
+  border-top: 1px solid #d8dee5;
+  color: #1f2d3d;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 28px;
+  padding: 0 18px;
 }
 
 .diff-line.added {

@@ -1,14 +1,12 @@
 import crypto from "node:crypto";
-import type { PendingPatch } from "./types.js";
+import type { PatchFileChange, PendingPatch } from "./types.js";
 
 const patches = new Map<string, PendingPatch>();
 
-export function createPendingPatch(filePath: string, oldContent: string, newContent: string) {
+export function createPendingPatch(files: PatchFileChange[]) {
   const patch: PendingPatch = {
     patchId: crypto.randomUUID(),
-    filePath,
-    oldContent,
-    newContent,
+    files,
     createdAt: Date.now()
   };
 

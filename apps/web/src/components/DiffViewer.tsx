@@ -28,6 +28,7 @@ export default function DiffViewer({ patch, loading, onApply, onReject }: Props)
               <div>
                 <h2 id="diff-modal-title">Diff 预览</h2>
                 <span>{patch.summary}</span>
+                <small>{patch.files.length} file{patch.files.length === 1 ? "" : "s"} changed</small>
               </div>
               <div className="diff-actions">
                 <button type="button" className="icon-button" title="关闭" aria-label="关闭" onClick={() => setOpen(false)}>
