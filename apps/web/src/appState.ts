@@ -27,6 +27,7 @@ export type AppState = {
   patch: null | GenerateEditResponse;
   autoFix: AutoFixState | null;
   lastCheckpoint: Checkpoint | null;
+  dismissedCheckpointId: string | null;
   workspaceRoot: string;
   workspaceInput: string;
   showIgnoredFiles: boolean;
@@ -96,6 +97,7 @@ export const initialState: AppState = {
   patch: null,
   autoFix: null,
   lastCheckpoint: null,
+  dismissedCheckpointId: null,
   workspaceRoot: "",
   workspaceInput: "",
   showIgnoredFiles: false

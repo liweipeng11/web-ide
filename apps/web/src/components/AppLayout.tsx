@@ -2,6 +2,7 @@ import type { Dispatch, PointerEvent, SetStateAction } from "react";
 import type { CommandResult, FileTreeNode, TaskPlanItemStatus } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
+import GitWorkflowPanel from "../gitWorkflow/GitWorkflowPanel";
 import ChatPanel from "./ChatPanel";
 import CodeSearchPanel from "./CodeSearchPanel";
 import DiffViewer from "./DiffViewer";
@@ -10,7 +11,6 @@ import FileTree from "./FileTree";
 import Icon from "./Icon";
 import ProjectRulesPanel from "./ProjectRulesPanel";
 import TerminalPanel, { type TerminalCommandCompletion, type TerminalCommandRequest } from "./TerminalPanel";
-import GitWorkflowPanel from "../gitWorkflow/GitWorkflowPanel";
 
 type Props = {
   files: FileTreeNode[];
@@ -111,6 +111,7 @@ export default function AppLayout({
 }: Props) {
   // 优先展示当前正在运行的任务计划，历史任务详情仍在展开面板里维护。
   const activeTaskSession = state.taskSessions.find((session) => session.id === state.currentTaskSessionId) || state.selectedTaskSession || null;
+  const visibleCheckpoint = state.lastCheckpoint && state.lastCheckpoint.id !== state.dismissedCheckpointId ? state.lastCheckpoint : null;
 
   return (
     <main className="app-shell">
@@ -136,29 +137,40 @@ export default function AppLayout({
             <Icon name="folder-open" />
           </button>
         </form>
-        <button
-          type="button"
-          className="terminal-toggle icon-button"
-          title="切换终端 (Ctrl+`)"
-          aria-label="切换终端"
-          aria-pressed={terminalOpen}
-          onClick={() => setTerminalOpen((current) => !current)}
-        >
+        <button type="button" className="terminal-toggle icon-button" title="切换终端 (Ctrl+`)" aria-label="切换终端" onClick={() => setTerminalOpen((current) => !current)}>
           <Icon name="terminal" />
         </button>
         {state.loading && <strong>处理中...</strong>}
       </header>
 
       {state.error && <div className="error-banner">{state.error}</div>}
-      {state.lastCheckpoint && (
+
+      {visibleCheckpoint && (
         <div className="checkpoint-banner">
-          <div>
+          <div className="checkpoint-banner-content">
             <strong>智能体修改已应用</strong>
-            <span>{state.lastCheckpoint.files.length} 个文件可恢复到修改前状态</span>
+            <span>{visibleCheckpoint.files.length} 个文件可恢复到修改前状态</span>
           </div>
-          <button type="button" disabled={state.loading} onClick={() => void onRollbackLastCheckpoint()}>
-            撤销本次修改
-          </button>
+          <div className="checkpoint-banner-actions">
+            <button type="button" disabled={state.loading} onClick={() => void onRollbackLastCheckpoint()}>
+              撤销本次修改
+            </button>
+            <button
+              type="button"
+              className="icon-button checkpoint-banner-close"
+              title="关闭提示"
+              aria-label="关闭提示"
+              onClick={() => {
+                // 只隐藏当前提示，不清空 checkpoint，方便后续需要时继续撤销。
+                setState((current) => ({
+                  ...current,
+                  dismissedCheckpointId: current.lastCheckpoint?.id || current.dismissedCheckpointId
+                }));
+              }}
+            >
+              <Icon name="close" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -171,20 +183,14 @@ export default function AppLayout({
             <button type="button" className={leftPanel === "rules" ? "active" : ""} title="Project Rules" aria-label="Project Rules" aria-pressed={leftPanel === "rules"} onClick={() => setLeftPanel("rules")}>
               <Icon name="rules" />
             </button>
-            <button
-              type="button"
-              className={leftPanel === "search" ? "active" : ""}
-              title="代码搜索 (Ctrl+Shift+F)"
-              aria-label="代码搜索"
-              aria-pressed={leftPanel === "search"}
-              onClick={() => setLeftPanel("search")}
-            >
+            <button type="button" className={leftPanel === "search" ? "active" : ""} title="代码搜索 (Ctrl+Shift+F)" aria-label="代码搜索" aria-pressed={leftPanel === "search"} onClick={() => setLeftPanel("search")}>
               <Icon name="search" />
             </button>
             <button type="button" className={leftPanel === "git" ? "active" : ""} title="Git 工作流" aria-label="Git 工作流" aria-pressed={leftPanel === "git"} onClick={() => setLeftPanel("git")}>
               <Icon name="branch" />
             </button>
           </nav>
+
           <aside className="left-sidebar">
             {leftPanel === "files" ? (
               <FileTree
@@ -199,9 +205,15 @@ export default function AppLayout({
             ) : leftPanel === "rules" ? (
               <ProjectRulesPanel disabled={!state.workspaceRoot} rules={state.projectRules} onRefresh={() => void onRefreshProjectRules()} />
             ) : (
-              <GitWorkflowPanel disabled={!state.workspaceRoot} taskSessionId={state.currentTaskSessionId || state.selectedTaskSession?.id || null} taskSessions={state.taskSessions} onRefreshTaskSessions={onRefreshTaskSessions} />
+              <GitWorkflowPanel
+                disabled={!state.workspaceRoot}
+                taskSessionId={state.currentTaskSessionId || state.selectedTaskSession?.id || null}
+                taskSessions={state.taskSessions}
+                onRefreshTaskSessions={onRefreshTaskSessions}
+              />
             )}
           </aside>
+
           <div className="editor-column">
             <EditorPane
               path={state.selectedPath}
@@ -231,6 +243,7 @@ export default function AppLayout({
               />
             )}
           </div>
+
           <div className="chat-column">
             <div className="chat-resizer" role="separator" aria-orientation="vertical" title="调整智能体面板宽度" onPointerDown={onStartChatResize} />
             <ChatPanel

@@ -167,6 +167,17 @@ button:disabled {
   padding: 10px 18px;
 }
 
+.checkpoint-banner-content {
+  min-width: 0;
+}
+
+.checkpoint-banner-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .checkpoint-banner strong,
 .checkpoint-banner span {
   display: block;
@@ -182,6 +193,11 @@ button:disabled {
   border-color: #8ac49a;
   color: #1f5d2e;
   flex: 0 0 auto;
+}
+
+.checkpoint-banner-close {
+  height: 28px;
+  padding: 0 6px;
 }
 
 .workspace-layout {
