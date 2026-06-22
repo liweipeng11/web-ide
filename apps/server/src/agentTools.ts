@@ -1,0 +1,296 @@
+import { logAi } from "./aiHttp.js";
+import { searchWorkspaceCode } from "./codeSearch.js";
+import { readWorkspaceFile } from "./fileTools.js";
+import { inspectCurrentProject } from "./projectInspector.js";
+import { createAgentStep } from "./routeAgentSteps.js";
+import type { AgentStep } from "./types.js";
+
+export type AgentContext = {
+  userGoal: string;
+  filesRead: string[];
+  searchQueries: string[];
+  searchResultFiles: string[];
+  relevantFiles: string[];
+};
+
+export type AgentToolCall = {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+};
+
+export type AgentToolMessage = {
+  role: "tool";
+  tool_call_id: string;
+  content: string;
+};
+
+type JsonSchema = Record<string, unknown>;
+
+type AgentToolDefinition = {
+  name: string;
+  description: string;
+  parameters: JsonSchema;
+  execute: (args: Record<string, unknown>, runtime: AgentToolRuntime) => Promise<unknown>;
+  summarize: (result: unknown, cached: boolean, args: Record<string, unknown>) => unknown;
+};
+
+export type AgentToolRuntime = {
+  agentContext: AgentContext;
+  runId: string;
+  cache: Map<string, unknown>;
+  onAgentStep?: (step: AgentStep) => void;
+};
+
+const MAX_AUTO_READ_FILES = 5;
+const MAX_READ_FILE_LINES = 240;
+const MAX_READ_FILE_CHARS = 20_000;
+
+function uniquePush(values: string[], value: string) {
+  if (value && !values.includes(value)) values.push(value);
+}
+
+function requiredString(args: Record<string, unknown>, name: string) {
+  const value = typeof args[name] === "string" ? args[name].trim() : "";
+
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+
+  return value;
+}
+
+function truncateFileForPrompt(content: string) {
+  const lines = content.split(/\r?\n/);
+  const byLines = lines.slice(0, MAX_READ_FILE_LINES).join("\n");
+  const truncatedContent = byLines.length > MAX_READ_FILE_CHARS ? byLines.slice(0, MAX_READ_FILE_CHARS) : byLines;
+
+  return {
+    content: truncatedContent,
+    truncated: lines.length > MAX_READ_FILE_LINES || byLines.length > MAX_READ_FILE_CHARS || content.length > truncatedContent.length,
+    linesRead: Math.min(lines.length, MAX_READ_FILE_LINES),
+    totalLines: lines.length
+  };
+}
+
+const definitions: AgentToolDefinition[] = [
+  {
+    name: "inspectProject",
+    description: "Inspect package.json and project metadata, including scripts, dependencies, devDependencies, package manager, and framework hints.",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    async execute() {
+      return inspectCurrentProject();
+    },
+    summarize(result, cached) {
+      const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+      const dependencies = value.dependencies && typeof value.dependencies === "object" && !Array.isArray(value.dependencies) ? Object.keys(value.dependencies) : [];
+      const devDependencies = value.devDependencies && typeof value.devDependencies === "object" && !Array.isArray(value.devDependencies) ? Object.keys(value.devDependencies) : [];
+
+      return {
+        cached,
+        packageManager: value.packageManager,
+        packageName: value.packageName,
+        frameworkHints: value.frameworkHints,
+        dependencies: dependencies.slice(0, 20),
+        devDependencies: devDependencies.slice(0, 20)
+      };
+    }
+  },
+  {
+    name: "searchCode",
+    description: "Search the current workspace code with ripgrep and return up to 50 matching lines.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The literal text to search for in the workspace."
+        }
+      },
+      required: ["query"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const query = requiredString(args, "query");
+      uniquePush(runtime.agentContext.searchQueries, query);
+      const results = (await searchWorkspaceCode(query)).map((result) => ({
+        filePath: result.filePath,
+        line: result.line,
+        content: result.content
+      }));
+
+      for (const result of results) {
+        uniquePush(runtime.agentContext.searchResultFiles, result.filePath);
+        uniquePush(runtime.agentContext.relevantFiles, result.filePath);
+      }
+
+      return results;
+    },
+    summarize(result, cached, args) {
+      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown }>) : [];
+      return {
+        query: args.query,
+        cached,
+        resultCount: results.length,
+        files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10)
+      };
+    }
+  },
+  {
+    name: "readFile",
+    description: "Read a relevant file from the current workspace. The path must be relative to the workspace. At most 5 files can be read automatically.",
+    parameters: {
+      type: "object",
+      properties: {
+        filePath: {
+          type: "string",
+          description: "Workspace-relative file path to read."
+        }
+      },
+      required: ["filePath"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const filePath = requiredString(args, "filePath");
+
+      if (!runtime.agentContext.filesRead.includes(filePath) && runtime.agentContext.filesRead.length >= MAX_AUTO_READ_FILES) {
+        throw new Error(`Automatic file read limit reached. You may read at most ${MAX_AUTO_READ_FILES} files.`);
+      }
+
+      const content = await readWorkspaceFile(filePath);
+      const truncated = truncateFileForPrompt(content);
+      uniquePush(runtime.agentContext.filesRead, filePath);
+      uniquePush(runtime.agentContext.relevantFiles, filePath);
+
+      return { filePath, ...truncated };
+    },
+    summarize(result, cached) {
+      const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+      return {
+        filePath: value.filePath,
+        cached,
+        linesRead: value.linesRead,
+        totalLines: value.totalLines,
+        truncated: value.truncated
+      };
+    }
+  }
+];
+
+const registry = new Map(definitions.map((definition) => [definition.name, definition]));
+
+export const agentToolSchemas = definitions.map((definition) => ({
+  type: "function" as const,
+  function: {
+    name: definition.name,
+    description: definition.description,
+    parameters: definition.parameters
+  }
+}));
+
+function parseArguments(rawArguments: string) {
+  try {
+    const value = JSON.parse(rawArguments);
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function getCacheKey(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "inspectProject") return toolName;
+  if (toolName === "searchCode") return `${toolName}:${String(args.query || "").trim().toLowerCase()}`;
+  if (toolName === "readFile") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}`;
+  return `${toolName}:${JSON.stringify(args)}`;
+}
+
+function getToolPurpose(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "inspectProject") {
+    return "Use inspectProject to verify package manager, framework, and dependency versions before choosing APIs.";
+  }
+
+  if (toolName === "searchCode") {
+    return `Use searchCode to search workspace code with keyword "${String(args.query || "").trim()}".`;
+  }
+
+  if (toolName === "readFile") {
+    return `Use readFile to load workspace file "${String(args.filePath || "").trim()}" as context.`;
+  }
+
+  return `Use ${toolName}.`;
+}
+
+export function createAgentToolRuntime(options: Omit<AgentToolRuntime, "cache">): AgentToolRuntime {
+  return { ...options, cache: new Map<string, unknown>() };
+}
+
+export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: AgentToolRuntime): Promise<AgentToolMessage> {
+  const toolName = toolCall.function.name;
+  const args = parseArguments(toolCall.function.arguments);
+  const definition = registry.get(toolName);
+  logAi(runtime.runId, "tool.call", { name: toolName, arguments: args });
+  runtime.onAgentStep?.(
+    createAgentStep({
+      type: "tool_call",
+      toolName,
+      input: {
+        ...args,
+        purpose: getToolPurpose(toolName, args),
+        toolDescription: definition?.description || `Unknown tool: ${toolName}`
+      }
+    })
+  );
+
+  if (!definition) {
+    const error = `Unknown tool: ${toolName}`;
+    logAi(runtime.runId, "tool.unknown", toolName);
+    runtime.onAgentStep?.(createAgentStep({ type: "error", message: error }));
+    return { role: "tool", tool_call_id: toolCall.id, content: JSON.stringify({ error }) };
+  }
+
+  const cacheKey = getCacheKey(toolName, args);
+
+  try {
+    const cached = runtime.cache.has(cacheKey);
+    const result = cached ? runtime.cache.get(cacheKey) : await definition.execute(args, runtime);
+
+    if (!cached) runtime.cache.set(cacheKey, result);
+
+    const summary = definition.summarize(result, cached, args);
+    logAi(runtime.runId, `tool.${toolName}.${cached ? "cacheHit" : "ok"}`, summary);
+    runtime.onAgentStep?.(
+      createAgentStep({
+        type: "tool_result",
+        toolName,
+        output: {
+          ...(summary && typeof summary === "object" && !Array.isArray(summary) ? summary : { summary }),
+          toolDescription: definition.description
+        }
+      })
+    );
+
+    return {
+      role: "tool",
+      tool_call_id: toolCall.id,
+      content: JSON.stringify(
+        cached && result && typeof result === "object" && !Array.isArray(result)
+          ? { note: `${toolName} was already called with these arguments.`, ...result }
+          : cached
+            ? { note: `${toolName} was already called with these arguments.`, results: result }
+            : result
+      )
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : `${toolName} failed`;
+    logAi(runtime.runId, `tool.${toolName}.error`, { args, error: message });
+    runtime.onAgentStep?.(createAgentStep({ type: "error", message: `${toolName} failed: ${message}` }));
+    return { role: "tool", tool_call_id: toolCall.id, content: JSON.stringify({ error: message, ...args }) };
+  }
+}

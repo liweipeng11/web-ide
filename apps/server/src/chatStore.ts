@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { config } from "./config.js";
+import { appStatePath, legacyAppStatePath, readTextWithLegacyFallback } from "./statePaths.js";
 import type { FileChatMessage } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
@@ -9,7 +9,8 @@ type ChatStore = {
   conversations: Record<string, FileChatMessage[]>;
 };
 
-const chatStorePath = path.join(path.dirname(config.stateFilePath), "chat-store.json");
+const chatStorePath = appStatePath("chat-store.json");
+const legacyChatStorePath = legacyAppStatePath("chat-store.json");
 
 function conversationKey(filePath: string) {
   return `${getWorkspaceRoot() || "none"}::${filePath}`;
@@ -27,12 +28,7 @@ function parseConversationKey(key: string) {
 }
 
 async function readChatStore(): Promise<ChatStore> {
-  const raw = await fs.readFile(chatStorePath, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  });
+  const raw = await readTextWithLegacyFallback(chatStorePath, legacyChatStorePath);
 
   if (!raw) {
     return { conversations: {} };

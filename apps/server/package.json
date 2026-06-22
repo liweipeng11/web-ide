@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "tsx --test src/validationCommand.test.ts src/autoValidationService.test.ts src/gitWorkflow/gitService.test.ts src/agentIntent.test.ts src/aiClient.test.ts src/patchStore.test.ts src/projectInspector.test.ts src/projectRules.test.ts src/taskSessionStore.test.ts src/workspaceStore.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@vscode/ripgrep": "^1.18.0",

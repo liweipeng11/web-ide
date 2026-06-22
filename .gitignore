@@ -1,7 +1,9 @@
 node_modules/
 apps/*/node_modules/
 .env
+.mini-ai/state/
 .mini-ai-web-editor/
+.ai-agent/
 *.log
 dist/
 build/

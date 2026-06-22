@@ -1,169 +1,290 @@
-import { config } from "./config.js";
+﻿import { config } from "./config.js";
 import { HttpError } from "./errors.js";
-import { buildUserPrompt, AI_FILE_CHAT_SYSTEM_PROMPT, AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, AI_SYSTEM_PROMPT } from "./prompts.js";
+import {
+  createAiRunId,
+  logAi,
+  requestChatCompletion,
+  requestChatCompletionStream,
+  requestChatCompletionWithToolChoiceFallback,
+  requestJsonChatCompletion,
+  requestJsonChatCompletionWithToolChoiceFallback
+} from "./aiHttp.js";
+import { buildUserPrompt, AI_AGENT_INTENT_SYSTEM_PROMPT, AI_FILE_CHAT_SYSTEM_PROMPT, AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, AI_SEARCH_KEYWORDS_SYSTEM_PROMPT, AI_SYSTEM_PROMPT } from "./prompts.js";
 import { discoverProjectCommands } from "./commandDiscovery.js";
 import { formatCommandFailureForPrompt, getLastFailedCommandResultForChat } from "./commandResults.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
 import { readWorkspaceFile } from "./fileTools.js";
-import type { AiEditResult, ChatContextFile, FileChatMessage } from "./types.js";
+import { inspectCurrentProject } from "./projectInspector.js";
+import { discoverProjectRules } from "./projectRules.js";
+import type { AiEditResult, ChatContextFile, CommandPolicyResult, CommandResult, FileChatMessage, FilePatch } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
-
-type ChatCompletionResponse = {
-  choices?: Array<{
-    message?: {
-      role?: "assistant";
-      content?: string | null;
-      tool_calls?: ToolCall[];
-    };
-  }>;
-};
+import { agentToolSchemas, createAgentToolRuntime, executeAgentToolCall, type AgentContext, type AgentToolCall } from "./agentTools.js";
 
 type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
   tool_call_id?: string;
-  tool_calls?: ToolCall[];
+  tool_calls?: AgentToolCall[];
 };
 
-type ToolCall = {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-};
+type FileChatToolLoopResult =
+  | {
+      finalContent: string;
+      messages: ChatMessage[];
+    }
+  | {
+      finalContent: null;
+      messages: ChatMessage[];
+    };
 
-export type AgentContext = {
-  userGoal: string;
-  filesRead: string[];
-  searchQueries: string[];
-  relevantFiles: string[];
-};
+export type { AgentContext } from "./agentTools.js";
+
+type AgentStepPayload =
+  | {
+      type: "message";
+      content: string;
+    }
+  | {
+      type: "tool_call";
+      toolName: string;
+      input: unknown;
+    }
+  | {
+      type: "tool_result";
+      toolName: string;
+      output: unknown;
+    }
+  | {
+      type: "edit";
+      files: string[];
+    }
+  | {
+      type: "command";
+      command: string;
+      policy?: CommandPolicyResult;
+      status?: "suggested" | "running" | "success" | "failed" | "blocked" | "cancelled";
+      result?: CommandResult | null;
+    }
+  | {
+      type: "error";
+      message: string;
+    };
 
 export type AgentStep = {
   id: string;
-  type: "search" | "read";
-  title: string;
-  detail: string;
-};
+  createdAt: number;
+} & AgentStepPayload;
 
 export type EditPathRetryContext = {
   invalidFilePaths: string[];
   validFilePaths: string[];
+  reason?: "invalid_paths" | "no_file_changes";
+  previousSummary?: string;
 };
-
-type FileChatToolName = "searchCode" | "readFile";
 
 const MAX_AUTO_READ_FILES = 5;
 const MAX_READ_FILE_LINES = 240;
 const MAX_READ_FILE_CHARS = 20_000;
 const AI_LOG_PREVIEW_CHARS = 500;
 const AI_FETCH_ATTEMPTS_PER_URL = 2;
+const MAX_PREFLIGHT_EDIT_SEARCH_QUERIES = 4;
+const MAX_PREFLIGHT_EDIT_SEARCH_RESULTS = 30;
+const MAX_AUTO_EDIT_CONTEXT_FILES = 3;
+const MAX_PLAN_EDIT_SEARCH_QUERIES = 6;
 
-const fileChatTools = [
-  {
-    type: "function",
-    function: {
-      name: "searchCode",
-      description: "Search the current workspace code with ripgrep and return up to 50 matching lines.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "The literal text to search for in the workspace."
-          }
-        },
-        required: ["query"],
-        additionalProperties: false
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "readFile",
-      description: "Read a relevant file from the current workspace. The path must be relative to the workspace. At most 5 files can be read automatically.",
-      parameters: {
-        type: "object",
-        properties: {
-          filePath: {
-            type: "string",
-            description: "Workspace-relative file path to read."
-          }
-        },
-        required: ["filePath"],
-        additionalProperties: false
-      }
-    }
-  }
-];
 const MAX_FILE_CHAT_TOOL_STEPS = 8;
+const MAX_NULL_PATCH_RECOVERY_ATTEMPTS = 3;
 
-function getChatCompletionUrls() {
-  const normalizedBaseUrl = config.aiBaseUrl.replace(/\/$/, "");
-  const urls = [`${normalizedBaseUrl}/chat/completions`];
+export type AgentIntent = "chat" | "inspect" | "edit" | "diagnose_then_edit" | "command";
+
+export type AgentRequestClassification = {
+  intent: AgentIntent;
+  confidence: number;
+  normalizedGoal: string;
+  reason: string;
+};
+
+const explicitEditPatterns = [
+  /(?:\u8bf7|\u5e2e\u6211|\u76f4\u63a5|\u73b0\u5728)?(?:\u4fee\u6539|\u6539\u4e00\u4e0b|\u6539\u6210|\u4fee\u590d|\u5b9e\u73b0|\u65b0\u589e|\u6dfb\u52a0|\u5220\u9664|\u79fb\u9664|\u91cd\u6784|\u91cd\u547d\u540d|\u66ff\u6362|\u521b\u5efa|\u751f\u6210|\u914d\u7f6e|\u5347\u7ea7|\u8fc1\u79fb|\u4f18\u5316)(?:\u4ee3\u7801|\u6587\u4ef6|\u9879\u76ee|\u529f\u80fd|\u9875\u9762|\u7ec4\u4ef6|\u63a5\u53e3|\u6837\u5f0f|\u903b\u8f91)?/,
+  /\b(?:fix|implement|add|remove|delete|rename|refactor|change|update|create|replace|configure|upgrade|migrate)\b/
+];
+
+function isCommandExecutionRequest(userRequest: string) {
+  const normalized = userRequest.trim().toLowerCase();
+  const commandPatterns = [
+    /(?:\u8fd0\u884c|\u542f\u52a8|\u8dd1\u8d77\u6765|\u6253\u5f00|\u9884\u89c8|\u6784\u5efa|\u6d4b\u8bd5|\u68c0\u67e5|\u6267\u884c)(?:\u8fd9\u4e2a|\u4e00\u4e0b|\u9879\u76ee|\u5e94\u7528|\u670d\u52a1|\u547d\u4ee4)?/,
+    /\b(?:run|start|serve|preview|build|test|lint|check|open)\b/
+  ];
+
+  return commandPatterns.some((pattern) => pattern.test(normalized));
+}
+
+function isDiagnosticRequest(userRequest: string) {
+  const normalized = userRequest.trim().toLowerCase();
+  return /(?:\u8b66\u544a|\u62a5\u9519|\u9519\u8bef|\u5f02\u5e38|\u5931\u8d25|\u4e0d\u751f\u6548|\u65e0\u6cd5|\u4e0d\u80fd|warning|error|failed|failure|exception|not found)/i.test(normalized);
+}
+
+function hasExplicitEditRequest(userRequest: string) {
+  const normalized = userRequest.trim().toLowerCase();
+  return explicitEditPatterns.some((pattern) => pattern.test(normalized));
+}
+
+export function inferAgentRequestClassification(userRequest: string): AgentRequestClassification {
+  const hasEditIntent = hasExplicitEditRequest(userRequest);
+  const hasCommandIntent = isCommandExecutionRequest(userRequest);
+  const hasDiagnosticIntent = isDiagnosticRequest(userRequest);
+  let intent: AgentIntent = "chat";
+
+  if (hasEditIntent && hasDiagnosticIntent) {
+    intent = "diagnose_then_edit";
+  } else if (hasEditIntent) {
+    intent = "edit";
+  } else if (hasCommandIntent) {
+    intent = "command";
+  } else if (hasDiagnosticIntent) {
+    intent = "inspect";
+  }
+
+  return {
+    intent,
+    confidence: intent === "chat" ? 0.55 : 0.7,
+    normalizedGoal: userRequest.trim(),
+    reason: "Local heuristic fallback"
+  };
+}
+
+function isAgentIntent(value: unknown): value is AgentIntent {
+  return value === "chat" || value === "inspect" || value === "edit" || value === "diagnose_then_edit" || value === "command";
+}
+
+function normalizeConfidence(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : fallback;
+}
+
+function protectExplicitEditIntent(userRequest: string, classification: AgentRequestClassification): AgentRequestClassification {
+  if (!hasExplicitEditRequest(userRequest)) {
+    return classification;
+  }
+
+  if (classification.intent === "command" || classification.intent === "chat") {
+    return {
+      ...classification,
+      intent: isDiagnosticRequest(userRequest) ? "diagnose_then_edit" : "edit",
+      reason: `${classification.reason || "Model route"}; explicit edit wording preserved`
+    };
+  }
+
+  return classification;
+}
+
+export function shouldGeneratePatchForIntent(intent: AgentIntent) {
+  return intent === "edit" || intent === "diagnose_then_edit";
+}
+
+export async function classifyAgentRequest(history: FileChatMessage[], userRequest: string): Promise<AgentRequestClassification> {
+  const inferred = inferAgentRequestClassification(userRequest);
+
+  if (!config.aiApiKey) {
+    return inferred;
+  }
+
+  const runId = createAiRunId("intent");
 
   try {
-    const parsed = new URL(normalizedBaseUrl);
+    const data = await requestJsonChatCompletion({
+      model: config.aiModel,
+      temperature: 0,
+      messages: [
+        { role: "system", content: AI_AGENT_INTENT_SYSTEM_PROMPT },
+        ...history.slice(-6).map((message) => ({ role: message.role, content: message.content })),
+        { role: "user", content: userRequest }
+      ]
+    });
+    const rawContent = data.choices?.[0]?.message?.content;
+    const parsed = rawContent ? (JSON.parse(extractJsonContent(rawContent)) as { intent?: unknown; confidence?: unknown; normalizedGoal?: unknown; reason?: unknown }) : null;
 
-    if (parsed.pathname === "" || parsed.pathname === "/") {
-      urls.push(`${normalizedBaseUrl}/v1/chat/completions`);
+    if (isAgentIntent(parsed?.intent)) {
+      const classification = protectExplicitEditIntent(userRequest, {
+        intent: parsed.intent,
+        confidence: normalizeConfidence(parsed.confidence, inferred.confidence),
+        normalizedGoal: typeof parsed.normalizedGoal === "string" && parsed.normalizedGoal.trim() ? parsed.normalizedGoal.trim() : inferred.normalizedGoal,
+        reason: typeof parsed.reason === "string" ? parsed.reason : ""
+      });
+
+      logAi(runId, "done", classification);
+      return classification;
     }
-  } catch {
-    // Let fetch surface the invalid URL error with a useful message.
+  } catch (error) {
+    logAi(runId, "fallback", { error: error instanceof Error ? error.message : String(error) });
   }
 
-  return urls;
+  return inferred;
 }
 
-function createAiRunId(prefix: string) {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+export async function classifyAgentIntent(history: FileChatMessage[], userRequest: string): Promise<AgentIntent> {
+  return (await classifyAgentRequest(history, userRequest)).intent;
 }
 
-function previewForLog(value: unknown, maxLength = AI_LOG_PREVIEW_CHARS) {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
-  return text.length > maxLength ? `${text.slice(0, maxLength)}...<truncated ${text.length - maxLength} chars>` : text;
+function isShortEditFollowUp(userRequest: string) {
+  const normalized = userRequest.trim().toLowerCase();
+
+  if (normalized.length > 30) return false;
+
+  return [
+    "进行修复",
+    "修复",
+    "按你说的改",
+    "按上面改",
+    "照你说的改",
+    "照做",
+    "继续",
+    "继续修复",
+    "修复它",
+    "应用这个修改",
+    "do it",
+    "fix it",
+    "continue"
+  ].some((phrase) => normalized === phrase || normalized.includes(phrase));
 }
 
-function logAi(runId: string, event: string, detail?: unknown) {
-  const suffix = detail === undefined ? "" : ` ${previewForLog(detail)}`;
-  console.log(`[ai:${runId}] ${event}${suffix}`);
+function latestMessageContent(history: FileChatMessage[], role: FileChatMessage["role"]) {
+  return [...history].reverse().find((message) => message.role === role && message.content.trim())?.content.trim() || "";
 }
 
-function formatFetchError(error: unknown) {
-  if (!(error instanceof Error)) {
-    return "AI request failed";
+export function buildContextualEditRequest(history: FileChatMessage[], userRequest: string, normalizedGoal?: string) {
+  const currentRequest = userRequest.trim();
+  const normalized = normalizedGoal?.trim();
+
+  if (!isShortEditFollowUp(currentRequest)) {
+    return normalized || currentRequest;
   }
 
-  const cause = (error as Error & { cause?: unknown }).cause;
+  const previousUserRequest = latestMessageContent(history, "user");
+  const previousAssistantAnswer = latestMessageContent(history, "assistant");
 
-  if (cause instanceof Error) {
-    const code = (cause as Error & { code?: string }).code;
-    return [error.message, cause.message, code ? `code=${code}` : ""].filter(Boolean).join("; ");
+  if (!previousUserRequest && !previousAssistantAnswer) {
+    return currentRequest;
   }
 
-  if (cause && typeof cause === "object") {
-    const detail = cause as { message?: unknown; code?: unknown; errno?: unknown; syscall?: unknown; address?: unknown; port?: unknown };
-    return [
-      error.message,
-      typeof detail.message === "string" ? detail.message : "",
-      typeof detail.code === "string" ? `code=${detail.code}` : "",
-      typeof detail.errno === "string" || typeof detail.errno === "number" ? `errno=${detail.errno}` : "",
-      typeof detail.syscall === "string" ? `syscall=${detail.syscall}` : "",
-      typeof detail.address === "string" ? `address=${detail.address}` : "",
-      typeof detail.port === "number" ? `port=${detail.port}` : ""
-    ]
-      .filter(Boolean)
-      .join("; ");
-  }
-
-  return error.message;
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return [
+    "The user is confirming a follow-up edit request based on the previous conversation.",
+    "",
+    "Current user request:",
+    currentRequest,
+    "",
+    normalized ? "Normalized edit goal from intent router:" : "",
+    normalized || "",
+    "",
+    previousUserRequest ? "Previous user problem/request:" : "",
+    previousUserRequest,
+    "",
+    previousAssistantAnswer ? "Previous assistant analysis or proposed fix:" : "",
+    previousAssistantAnswer,
+    "",
+    "Generate the actual code patch for the previous problem. Do not treat the current short follow-up as an isolated request."
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
 }
 
 function extractJsonContent(rawContent: string) {
@@ -194,78 +315,17 @@ async function getAvailableCommandsForPrompt() {
   return discoverProjectCommands(workspaceRoot);
 }
 
-async function requestChatCompletion(body: unknown) {
-  let lastErrorText = "";
-
-  for (const url of getChatCompletionUrls()) {
-    let response: Response | null = null;
-
-    for (let attempt = 1; attempt <= AI_FETCH_ATTEMPTS_PER_URL; attempt += 1) {
-      try {
-        logAi("http", "request", { url, attempt, model: typeof body === "object" && body && "model" in body ? (body as { model?: unknown }).model : undefined });
-        response = await fetch(url, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${config.aiApiKey}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(body)
-        });
-        break;
-      } catch (error) {
-        const message = formatFetchError(error);
-        lastErrorText = message;
-        logAi("http", "fetch.error", { url, attempt, error: message });
-
-        if (attempt < AI_FETCH_ATTEMPTS_PER_URL) {
-          await delay(400 * attempt);
-          continue;
-        }
-
-        throw new HttpError(502, `AI request failed: ${message}`);
-      }
-    }
-
-    if (!response) {
-      continue;
-    }
-
-    if (response.ok) {
-      return (await response.json()) as ChatCompletionResponse;
-    }
-
-    lastErrorText = await response.text();
-
-    if (response.status !== 404 && response.status !== 405) {
-      throw new HttpError(response.status, lastErrorText || `AI request failed with status ${response.status}`);
-    }
-  }
-
-  throw new HttpError(502, lastErrorText || "AI request failed");
+async function getProjectFactsForPrompt() {
+  return inspectCurrentProject().catch(() => null);
 }
 
-async function requestJsonChatCompletion(body: Record<string, unknown>) {
-  try {
-    return await requestChatCompletion({
-      ...body,
-      response_format: { type: "json_object" }
-    });
-  } catch (error) {
-    if (error instanceof HttpError && (error.status === 400 || error.status === 422)) {
-      return requestChatCompletion(body);
-    }
-
-    throw error;
-  }
-}
-
-function parseToolArguments(rawArguments: string) {
-  try {
-    const parsed = JSON.parse(rawArguments);
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
+async function getProjectRulesForPrompt(contextPaths: string[] = []) {
+  return discoverProjectRules(contextPaths)
+    .then((snapshot) => ({
+      activeRulePaths: snapshot.rules.filter((rule) => rule.active).map((rule) => `${rule.scope}:${rule.path}`),
+      instructions: snapshot.combinedInstructions
+    }))
+    .catch(() => null);
 }
 
 function uniquePush(target: string[], value: string) {
@@ -274,13 +334,289 @@ function uniquePush(target: string[], value: string) {
   }
 }
 
-function createAgentStep(type: AgentStep["type"], title: string, detail: string): AgentStep {
+function createAgentStep(step: AgentStepPayload): AgentStep {
   return {
-    id: `${type}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    type,
-    title,
-    detail
+    id: `${step.type}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+    createdAt: Date.now(),
+    ...step
   };
+}
+
+function normalizeSearchKeyword(value: string) {
+  return value.trim().replace(/\s+/g, " ").slice(0, 80);
+}
+
+export function isIntermediateEditPlanSummary(summary: string) {
+  const normalized = summary.trim();
+
+  if (!normalized) {
+    return false;
+  }
+
+  const hasPlanningLanguage = [
+    /(?:\u5148|\u9996\u5148|\u63a5\u4e0b\u6765|\u4e0b\u4e00\u6b65|\u7136\u540e|\u518d|\u7ee7\u7eed|\u540e\u7eed)/,
+    /\b(?:first|next|then|continue|after that)\b/i
+  ].some((pattern) => pattern.test(normalized));
+  const hasActionLanguage = [
+    /(?:\u641c\u7d22|\u67e5\u627e|\u67e5\u770b|\u8bfb\u53d6|\u5206\u6790|\u521b\u5efa|\u65b0\u589e|\u4fee\u6539|\u96c6\u6210|\u751f\u6210|\u5b9e\u73b0|\u5f15\u5165|\u6ce8\u518c)/,
+    /\b(?:search|inspect|read|analy[sz]e|create|add|modify|integrate|implement|generate|import|register)\b/i
+  ].some((pattern) => pattern.test(normalized));
+
+  return hasPlanningLanguage && hasActionLanguage;
+}
+
+export function isIntermediateEditStatus(status: AiEditResult["status"]) {
+  return status === "plan" || status === "needs_context";
+}
+
+function parseEditStatus(value: unknown, patches: FilePatch[] | null): AiEditResult["status"] {
+  if (value === "patch" || value === "needs_context" || value === "plan" || value === "blocked") {
+    return value;
+  }
+
+  return patches === null ? undefined : "patch";
+}
+
+function parseNextSearchKeywords(value: unknown) {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const keywords = value.filter((keyword): keyword is string => typeof keyword === "string").map(normalizeSearchKeyword).filter(Boolean);
+  return keywords.length ? [...new Set(keywords)].slice(0, MAX_PLAN_EDIT_SEARCH_QUERIES) : undefined;
+}
+
+export function derivePlanSearchKeywords(userRequest: string, summary: string) {
+  const source = `${userRequest}\n${summary}`;
+  const keywords: string[] = [];
+  const addKeyword = (keyword: string) => {
+    const normalized = normalizeSearchKeyword(keyword);
+
+    if (normalized && !keywords.some((item) => item.toLowerCase() === normalized.toLowerCase())) {
+      keywords.push(normalized);
+    }
+  };
+
+  // 将常见中文任务意图映射成项目里更容易命中的英文文件名或标识符。
+  const mappings: Array<[RegExp, string[]]> = [
+    [/(?:\u8def\u7531|\u83dc\u5355|\u8df3\u8f6c|route|router)/i, ["router", "routes"]],
+    [/(?:\u9996\u9875|\u4e3b\u9875|home)/i, ["HomeView", "home"]],
+    [/(?:header|\u5bfc\u822a|\u9875\u5934|\u9876\u90e8)/i, ["Header", "header"]],
+    [/(?:\u7ec4\u4ef6|component)/i, ["components"]]
+  ];
+
+  for (const [pattern, values] of mappings) {
+    if (pattern.test(source)) {
+      values.forEach(addKeyword);
+    }
+  }
+
+  for (const token of source.match(/[A-Za-z_][A-Za-z0-9_-]{2,}/g) || []) {
+    addKeyword(token);
+  }
+
+  return keywords.slice(0, MAX_PLAN_EDIT_SEARCH_QUERIES);
+}
+
+function deriveFallbackSearchKeywords(userRequest: string, filePath: string | null) {
+  const queries: string[] = [];
+  const addQuery = (query: string) => {
+    const normalized = normalizeSearchKeyword(query);
+
+    if (normalized && !queries.some((item) => item.toLowerCase() === normalized.toLowerCase())) {
+      queries.push(normalized);
+    }
+  };
+
+  for (const token of userRequest.match(/[A-Za-z_][A-Za-z0-9_-]{2,}/g) || []) {
+    addQuery(token);
+  }
+
+  for (const keyword of derivePlanSearchKeywords(userRequest, "")) {
+    addQuery(keyword);
+  }
+
+  const commonTerms = ["login", "鐧诲綍", "auth", "mock", "api", "鎺ュ彛", "user", "鐢ㄦ埛", "route", "router", "store", "鑿滃崟", "鏉冮檺", "琛ㄦ牸", "鍒楄〃", "璇︽儏", "閰嶇疆"];
+
+  for (const term of commonTerms) {
+    if (userRequest.toLowerCase().includes(term.toLowerCase())) {
+      addQuery(term);
+    }
+  }
+
+  if (filePath) {
+    const baseName = filePath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") || "";
+    addQuery(baseName);
+  }
+
+  return queries.slice(0, MAX_PREFLIGHT_EDIT_SEARCH_QUERIES);
+}
+
+async function generateSearchKeywords(userRequest: string, filePath: string | null, runId: string, onAgentStep?: (step: AgentStep) => void) {
+  const fallbackKeywords = deriveFallbackSearchKeywords(userRequest, filePath);
+
+  if (!config.aiApiKey) {
+    return fallbackKeywords;
+  }
+
+  try {
+    const data = await requestJsonChatCompletion({
+      model: config.aiModel,
+      temperature: 0,
+      messages: [
+        { role: "system", content: AI_SEARCH_KEYWORDS_SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: JSON.stringify(
+            {
+              selectedFilePath: filePath,
+              userRequest
+            },
+            null,
+            2
+          )
+        }
+      ]
+    });
+    const rawContent = data.choices?.[0]?.message?.content;
+    const parsed = rawContent ? (JSON.parse(extractJsonContent(rawContent)) as { keywords?: unknown }) : null;
+    const keywords = Array.isArray(parsed?.keywords)
+      ? parsed.keywords.filter((keyword): keyword is string => typeof keyword === "string").map(normalizeSearchKeyword).filter(Boolean)
+      : [];
+    const uniqueKeywords = [...new Set(keywords.map((keyword) => keyword.toLowerCase()))]
+      .map((lowercase) => keywords.find((keyword) => keyword.toLowerCase() === lowercase) || lowercase)
+      .slice(0, MAX_PREFLIGHT_EDIT_SEARCH_QUERIES);
+
+    if (uniqueKeywords.length) {
+      logAi(runId, "searchKeywords.generated", { keywords: uniqueKeywords });
+      onAgentStep?.(createAgentStep({ type: "message", content: `Generated search keywords: ${uniqueKeywords.join(", ")}` }));
+      return uniqueKeywords;
+    }
+  } catch (error) {
+    logAi(runId, "searchKeywords.fallback", { error: error instanceof Error ? error.message : String(error) });
+  }
+
+  return fallbackKeywords;
+}
+
+async function runMandatoryEditPreflightSearch(userRequest: string, filePath: string | null, agentContext: AgentContext, runId: string, onAgentStep?: (step: AgentStep) => void) {
+  const queries = await generateSearchKeywords(userRequest, filePath, runId, onAgentStep);
+  const resultsByQuery: Array<{ query: string; results: Array<{ filePath: string; line: number; content: string }> }> = [];
+
+  for (const query of queries) {
+    uniquePush(agentContext.searchQueries, query);
+    onAgentStep?.(
+      createAgentStep({
+        type: "tool_call",
+        toolName: "searchCode",
+        input: {
+          query,
+          purpose: `Use searchCode to search workspace code with the model-generated keyword "${query}".`,
+          toolDescription: "Search the current workspace code with ripgrep and return matching lines."
+        }
+      })
+    );
+
+    const results = (await searchWorkspaceCode(query))
+      .slice(0, MAX_PREFLIGHT_EDIT_SEARCH_RESULTS)
+      .map((result) => ({
+        filePath: result.filePath,
+        line: result.line,
+        content: result.content
+      }));
+
+    for (const result of results) {
+      uniquePush(agentContext.searchResultFiles, result.filePath);
+      uniquePush(agentContext.relevantFiles, result.filePath);
+    }
+
+    resultsByQuery.push({ query, results });
+    logAi(runId, "edit.preflightSearch", { query, resultCount: results.length, files: [...new Set(results.map((result) => result.filePath))].slice(0, 10) });
+    onAgentStep?.(
+      createAgentStep({
+        type: "tool_result",
+        toolName: "searchCode",
+        output: {
+          query,
+          toolDescription: "Search the current workspace code with ripgrep and return matching lines.",
+          resultCount: results.length,
+          files: [...new Set(results.map((result) => result.filePath))].slice(0, 10)
+        }
+      })
+    );
+
+    if (results.length) {
+      break;
+    }
+  }
+
+  return {
+    instruction: "The first model-selected search did not find matching files, so fallback project search has been performed. Use fallbackSearchResults to identify existing project files and patterns. If relevant files are found, call readFile(filePath) for the files you need before returning the final edit.",
+    queries,
+    resultsByQuery
+  };
+}
+
+// 执行模型计划摘要里提到的关键词搜索，避免“先搜索...”停留在文字计划阶段。
+async function runAdditionalEditSearch(queries: string[], agentContext: AgentContext, runId: string, onAgentStep?: (step: AgentStep) => void) {
+  const resultsByQuery: Array<{ query: string; results: Array<{ filePath: string; line: number; content: string }> }> = [];
+
+  for (const query of queries) {
+    uniquePush(agentContext.searchQueries, query);
+    onAgentStep?.(
+      createAgentStep({
+        type: "tool_call",
+        toolName: "searchCode",
+        input: {
+          query,
+          purpose: `Use searchCode to execute the intermediate edit plan with keyword "${query}".`,
+          toolDescription: "Search the current workspace code with ripgrep and return matching lines."
+        }
+      })
+    );
+
+    const results = (await searchWorkspaceCode(query))
+      .slice(0, MAX_PREFLIGHT_EDIT_SEARCH_RESULTS)
+      .map((result) => ({
+        filePath: result.filePath,
+        line: result.line,
+        content: result.content
+      }));
+
+    for (const result of results) {
+      uniquePush(agentContext.searchResultFiles, result.filePath);
+      uniquePush(agentContext.relevantFiles, result.filePath);
+    }
+
+    resultsByQuery.push({ query, results });
+    logAi(runId, "edit.additionalSearch", { query, resultCount: results.length, files: [...new Set(results.map((result) => result.filePath))].slice(0, 10) });
+    onAgentStep?.(
+      createAgentStep({
+        type: "tool_result",
+        toolName: "searchCode",
+        output: {
+          query,
+          toolDescription: "Search the current workspace code with ripgrep and return matching lines.",
+          resultCount: results.length,
+          files: [...new Set(results.map((result) => result.filePath))].slice(0, 10)
+        }
+      })
+    );
+  }
+
+  return resultsByQuery;
+}
+
+function getFallbackSearchFilePaths(fallbackSearch: Awaited<ReturnType<typeof runMandatoryEditPreflightSearch>>) {
+  const paths: string[] = [];
+
+  for (const group of fallbackSearch.resultsByQuery) {
+    for (const result of group.results) {
+      uniquePush(paths, result.filePath);
+    }
+  }
+
+  return paths;
 }
 
 function truncateFileForPrompt(content: string) {
@@ -296,165 +632,124 @@ function truncateFileForPrompt(content: string) {
   };
 }
 
-async function executeFileChatToolCall(
-  toolCall: ToolCall,
-  searchCache: Map<string, unknown>,
-  readCache: Map<string, string>,
+async function readEditContextFiles(
+  filePaths: string[],
   agentContext: AgentContext,
   runId: string,
   onAgentStep?: (step: AgentStep) => void
-): Promise<ChatMessage> {
-  const toolName = toolCall.function.name as FileChatToolName;
-  logAi(runId, "tool.call", { name: toolCall.function.name, arguments: toolCall.function.arguments });
+) {
+  const files: Array<{ filePath: string; content: string; truncated: boolean; linesRead: number; totalLines: number }> = [];
 
-  if (toolName !== "searchCode" && toolName !== "readFile") {
-    logAi(runId, "tool.unknown", toolCall.function.name);
-    return {
-      role: "tool",
-      tool_call_id: toolCall.id,
-      content: JSON.stringify({ error: `Unknown tool: ${toolCall.function.name}` })
-    };
-  }
-
-  const args = parseToolArguments(toolCall.function.arguments);
-
-  if (toolName === "readFile") {
-    const filePath = typeof args.filePath === "string" ? args.filePath.trim() : "";
-
-    if (!filePath) {
-      logAi(runId, "tool.readFile.missingPath");
-      return {
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: JSON.stringify({ error: "filePath is required" })
-      };
+  for (const filePath of filePaths) {
+    if (files.length >= MAX_AUTO_EDIT_CONTEXT_FILES) {
+      break;
     }
 
-    const readCacheKey = filePath.toLowerCase();
-
-    if (readCache.has(readCacheKey)) {
-      logAi(runId, "tool.readFile.cacheHit", { filePath });
-      return {
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: JSON.stringify({
-          note: `readFile("${filePath}") was already called. Use this cached file content instead of reading it again.`,
-          ...JSON.parse(readCache.get(readCacheKey) || "{}")
-        })
-      };
+    if (agentContext.filesRead.includes(filePath)) {
+      continue;
     }
 
-    if (!agentContext.filesRead.includes(filePath) && agentContext.filesRead.length >= MAX_AUTO_READ_FILES) {
-      logAi(runId, "tool.readFile.limit", { filePath, filesRead: agentContext.filesRead });
-      return {
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: JSON.stringify({
-          error: `Automatic file read limit reached. You may read at most ${MAX_AUTO_READ_FILES} files.`,
-          filesRead: agentContext.filesRead
-        })
-      };
-    }
-
-    let rawContent = "";
-
-    try {
-      rawContent = await readWorkspaceFile(filePath);
-    } catch (error) {
-      logAi(runId, "tool.readFile.error", { filePath, error: error instanceof Error ? error.message : "Failed to read file" });
-      return {
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: JSON.stringify({ error: error instanceof Error ? error.message : "Failed to read file", filePath })
-      };
-    }
-    const truncated = truncateFileForPrompt(rawContent);
-    logAi(runId, "tool.readFile.ok", { filePath, chars: rawContent.length, linesRead: truncated.linesRead, totalLines: truncated.totalLines, truncated: truncated.truncated });
-    uniquePush(agentContext.filesRead, filePath);
-    uniquePush(agentContext.relevantFiles, filePath);
     onAgentStep?.(
-      createAgentStep(
-        "read",
-        `Read ${filePath}`,
-        truncated.truncated ? `Read first ${truncated.linesRead} of ${truncated.totalLines} lines.` : `Read ${truncated.totalLines} lines.`
-      )
+      createAgentStep({
+        type: "tool_call",
+        toolName: "readFile",
+        input: {
+          filePath,
+          automatic: true,
+          purpose: `Use readFile to load ${filePath} as edit context after code search.`,
+          toolDescription: "Read a relevant workspace file with line and character limits."
+        }
+      })
     );
 
-    const payload = JSON.stringify({
-      filePath,
-      ...truncated
-    });
-    readCache.set(readCacheKey, payload);
-
-    return {
-      role: "tool",
-      tool_call_id: toolCall.id,
-      content: payload
-    };
+    try {
+      const rawContent = await readWorkspaceFile(filePath);
+      const truncated = truncateFileForPrompt(rawContent);
+      uniquePush(agentContext.filesRead, filePath);
+      uniquePush(agentContext.relevantFiles, filePath);
+      logAi(runId, "edit.autoRead.ok", { filePath, chars: rawContent.length, linesRead: truncated.linesRead, totalLines: truncated.totalLines, truncated: truncated.truncated });
+      onAgentStep?.(
+        createAgentStep({
+          type: "tool_result",
+          toolName: "readFile",
+          output: {
+            filePath,
+            toolDescription: "Read a relevant workspace file with line and character limits.",
+            linesRead: truncated.linesRead,
+            totalLines: truncated.totalLines,
+            truncated: truncated.truncated
+          }
+        })
+      );
+      files.push({
+        filePath,
+        ...truncated
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to read file";
+      logAi(runId, "edit.autoRead.error", { filePath, error: message });
+      onAgentStep?.(createAgentStep({ type: "error", message: `readFile(${filePath}) failed: ${message}` }));
+    }
   }
 
-  const query = typeof args.query === "string" ? args.query.trim() : "";
+  return files;
+}
 
-  if (!query) {
-    logAi(runId, "tool.searchCode.emptyQuery");
-    return {
-      role: "tool",
-      tool_call_id: toolCall.id,
-      content: JSON.stringify({ error: "query is required. Do not call searchCode with an empty query." })
-    };
+function createAutomaticEditContextMessage(files: Awaited<ReturnType<typeof readEditContextFiles>>): ChatMessage | null {
+  if (!files.length) {
+    return null;
   }
-
-  const cacheKey = query.toLowerCase();
-  uniquePush(agentContext.searchQueries, query);
-  onAgentStep?.(createAgentStep("search", `Search ${query}`, "Scanned workspace code for matching lines."));
-
-  if (searchCache.has(cacheKey)) {
-    logAi(runId, "tool.searchCode.cacheHit", { query });
-    return {
-      role: "tool",
-      tool_call_id: toolCall.id,
-      content: JSON.stringify({
-        note: `searchCode("${query}") was already called. Use these cached results instead of searching again.`,
-        results: searchCache.get(cacheKey)
-      })
-    };
-  }
-
-  const results = query
-    ? (await searchWorkspaceCode(query)).map((result) => ({
-        filePath: result.filePath,
-        line: result.line,
-        content: result.content
-      }))
-    : [];
-
-  searchCache.set(cacheKey, results);
-  logAi(runId, "tool.searchCode.ok", { query, resultCount: results.length, files: [...new Set(results.map((result) => result.filePath))].slice(0, 10) });
 
   return {
-    role: "tool",
-    tool_call_id: toolCall.id,
-    content: JSON.stringify(results)
+    role: "user",
+    content: JSON.stringify({
+      automaticContextFiles: files,
+      instruction:
+        "The server has already read likely edit target files. Use automaticContextFiles as editable context and return a non-empty patches array with oldContent and newContent. Only return patches:null if none of these files can possibly satisfy the request."
+    })
   };
 }
 
-async function generateFileChatAssistantContent(messages: ChatMessage[], agentContext: AgentContext, onAgentStep?: (step: AgentStep) => void) {
+function createNullPatchRecoveryMessage(options: { summary: string; status: AiEditResult["status"]; automaticContextFiles: Awaited<ReturnType<typeof readEditContextFiles>>; candidateFilePaths: string[]; intermediate: boolean }): ChatMessage {
+  const instruction = options.intermediate
+    ? "The previous response used an intermediate edit status, not a final edit result. Continue the agent loop now: use nextSearchKeywords, automaticContextFiles, and tools as needed, then return status \"patch\" with a non-empty patches array. Do not finish by restating the plan."
+    : "The previous response returned patches:null because more context was needed. The user requested a code fix, so do not finish with patches:null for that reason. Use projectFacts and automaticContextFiles as editable context and return a non-empty patches array with exact oldContent and newContent. For framework/API errors, verify dependency versions before choosing imports. If no patch is possible, cite concrete file evidence in the summary.";
+
+  return {
+    role: "user",
+    content: JSON.stringify({
+      previousStatus: options.status,
+      previousSummary: options.summary,
+      previousResponseWasIntermediate: options.intermediate,
+      automaticContextFiles: options.automaticContextFiles,
+      candidateFilePaths: [...new Set(options.candidateFilePaths)].slice(0, 20),
+      instruction
+    })
+  };
+}
+
+
+async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentContext, onAgentStep: ((step: AgentStep) => void) | undefined, deferFinalAnswer: boolean): Promise<FileChatToolLoopResult> {
   const runId = createAiRunId("chat");
   const startedAt = Date.now();
   const toolMessages = [...messages];
-  const searchCache = new Map<string, unknown>();
-  const readCache = new Map<string, string>();
+  const toolRuntime = createAgentToolRuntime({ agentContext, runId, onAgentStep });
   logAi(runId, "start", { userGoal: agentContext.userGoal, contextFiles: agentContext.relevantFiles });
 
   for (let step = 0; step < MAX_FILE_CHAT_TOOL_STEPS; step += 1) {
     logAi(runId, "completion.request", { step, messageCount: toolMessages.length, tools: true });
-    const data = await requestChatCompletion({
+    const completionBody = {
       model: config.aiModel,
-      temperature: 0.3,
+      temperature: config.aiChatTemperature,
       messages: toolMessages,
-      tools: fileChatTools,
+      tools: agentToolSchemas,
       tool_choice: "auto"
-    });
+    };
+    const fallbackCompletionBody = {
+      ...completionBody,
+      tool_choice: "auto"
+    };
+    const data = await requestChatCompletionWithToolChoiceFallback(completionBody, fallbackCompletionBody, runId);
 
     const message = data.choices?.[0]?.message;
 
@@ -464,8 +759,19 @@ async function generateFileChatAssistantContent(messages: ChatMessage[], agentCo
     }
 
     if (!message.tool_calls?.length) {
+      if (deferFinalAnswer) {
+        logAi(runId, "tools.done.deferFinal", { elapsedMs: Date.now() - startedAt, contentPreview: message.content || "" });
+        return {
+          finalContent: null,
+          messages: toolMessages
+        };
+      }
+
       logAi(runId, "done", { elapsedMs: Date.now() - startedAt, contentPreview: message.content || "" });
-      return message.content || "";
+      return {
+        finalContent: message.content || "",
+        messages: toolMessages
+      };
     }
 
     toolMessages.push({
@@ -475,7 +781,7 @@ async function generateFileChatAssistantContent(messages: ChatMessage[], agentCo
     });
 
     logAi(runId, "completion.toolCalls", message.tool_calls.map((toolCall) => toolCall.function.name));
-    const results = await Promise.all(message.tool_calls.map((toolCall) => executeFileChatToolCall(toolCall, searchCache, readCache, agentContext, runId, onAgentStep)));
+    const results = await Promise.all(message.tool_calls.map((toolCall) => executeAgentToolCall(toolCall, toolRuntime)));
     toolMessages.push(...results);
   }
 
@@ -485,93 +791,71 @@ async function generateFileChatAssistantContent(messages: ChatMessage[], agentCo
     content: "You have already called tools enough times. Do not call any more tools. Answer the user's request using the search results and files already provided."
   });
 
+  if (deferFinalAnswer) {
+    return {
+      finalContent: null,
+      messages: toolMessages
+    };
+  }
+
   const data = await requestChatCompletion({
     model: config.aiModel,
-    temperature: 0.3,
+    temperature: config.aiChatTemperature,
     messages: toolMessages
   });
 
   const content = data.choices?.[0]?.message?.content || "I searched the code, but could not produce a final answer.";
   logAi(runId, "done.afterLimit", { elapsedMs: Date.now() - startedAt, contentPreview: content });
-  return content;
+  return {
+    finalContent: content,
+    messages: toolMessages
+  };
 }
 
-async function requestChatCompletionStream(body: unknown, onDelta: (delta: string) => void, signal?: AbortSignal) {
-  let lastErrorText = "";
+async function generateFileChatAssistantContent(messages: ChatMessage[], agentContext: AgentContext, onAgentStep?: (step: AgentStep) => void) {
+  const result = await runFileChatToolLoop(messages, agentContext, onAgentStep, false);
+  return result.finalContent || "";
+}
 
-  for (const url of getChatCompletionUrls()) {
-    let response: Response;
+async function streamFileChatFinalAnswer(messages: ChatMessage[], onDelta: (delta: string) => void, signal?: AbortSignal) {
+  const finalMessages: ChatMessage[] = [
+    ...messages,
+    {
+      role: "user",
+      content: "Use the gathered context and answer the user's latest request directly. Do not call tools. Do not mention internal tool names unless they are relevant to the answer."
+    }
+  ];
 
-    try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${config.aiApiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(body),
-        signal
-      });
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        return "";
-      }
-
-      const message = error instanceof Error ? error.message : "AI request failed";
-      throw new HttpError(502, `AI request failed: ${message}`);
+  try {
+    return await requestChatCompletionStream(
+      {
+        model: config.aiModel,
+        temperature: config.aiChatTemperature,
+        messages: finalMessages,
+        stream: true
+      },
+      onDelta,
+      signal
+    );
+  } catch (error) {
+    if (!(error instanceof HttpError)) {
+      throw error;
     }
 
-    if (!response.ok) {
-      lastErrorText = await response.text();
+    logAi("chat-stream", "fallback.nonStreamFinal", { status: error.status, error: error.message });
+    const data = await requestChatCompletion({
+      model: config.aiModel,
+      temperature: config.aiChatTemperature,
+      messages: finalMessages
+    });
+    const text = data.choices?.[0]?.message?.content || "";
 
-      if (response.status === 404 || response.status === 405) {
-        continue;
-      }
-
-      throw new HttpError(response.status, lastErrorText || `AI request failed with status ${response.status}`);
+    if (!signal?.aborted && text) {
+      onDelta(text);
     }
 
-    if (!response.body) {
-      throw new HttpError(502, "AI response did not include a stream body");
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let answer = "";
-
-    while (true) {
-      const { value, done } = await reader.read();
-
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-
-        if (!trimmed.startsWith("data:")) continue;
-
-        const payload = trimmed.slice(5).trim();
-
-        if (!payload || payload === "[DONE]") continue;
-
-        const data = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
-        const delta = data.choices?.[0]?.delta?.content || "";
-
-        if (delta) {
-          answer += delta;
-          onDelta(delta);
-        }
-      }
-    }
-
-    return answer;
+    return signal?.aborted ? "" : text;
   }
-
-  throw new HttpError(502, lastErrorText || "AI request failed");
 }
 
 function parseAiEditResult(rawContent: string): AiEditResult {
@@ -588,82 +872,108 @@ function parseAiEditResult(rawContent: string): AiEditResult {
     throw new HttpError(502, "Failed to parse AI response");
   }
 
-  const result = parsed as { summary?: unknown; files?: unknown; changes?: unknown; newContent?: unknown };
+  const result = parsed as {
+    status?: unknown;
+    summary?: unknown;
+    patches?: unknown;
+    files?: unknown;
+    changes?: unknown;
+    newContent?: unknown;
+    nextSearchKeywords?: unknown;
+    commandsToRun?: unknown;
+  };
 
   if (typeof result.summary !== "string") {
     console.error("Failed to parse AI edit response summary:", JSON.stringify(parsed).slice(0, 1000));
     throw new HttpError(502, "Failed to parse AI response");
   }
 
-  if (result.files === null || result.newContent === null) {
+  const planSummary = result.summary;
+
+  if (result.patches === null || result.files === null || result.newContent === null) {
+    const patches = null;
     return {
-      summary: result.summary,
-      files: null
+      status: parseEditStatus(result.status, patches),
+      summary: planSummary,
+      patches,
+      nextSearchKeywords: parseNextSearchKeywords(result.nextSearchKeywords),
+      commandsToRun: parseCommandsToRun(result.commandsToRun)
     };
   }
 
-  const fileChanges = Array.isArray(result.files) ? result.files : Array.isArray(result.changes) ? result.changes : null;
+  const fileChanges = Array.isArray(result.patches) ? result.patches : Array.isArray(result.files) ? result.files : Array.isArray(result.changes) ? result.changes : null;
 
   if (fileChanges) {
-    const files = fileChanges.map((file) => {
+    const patches = fileChanges.map((file) => {
       if (!file || typeof file !== "object") {
         console.error("Failed to parse AI edit response file item:", JSON.stringify(file).slice(0, 1000));
         throw new HttpError(502, "Failed to parse AI response");
       }
 
-      const change = file as { path?: unknown; filePath?: unknown; file?: unknown; newContent?: unknown; content?: unknown };
+      const change = file as { path?: unknown; filePath?: unknown; file?: unknown; oldContent?: unknown; newContent?: unknown; content?: unknown; summary?: unknown };
       const path = typeof change.path === "string" ? change.path : typeof change.filePath === "string" ? change.filePath : typeof change.file === "string" ? change.file : "";
+      const oldContent = change.oldContent;
       const newContent = typeof change.newContent === "string" ? change.newContent : typeof change.content === "string" ? change.content : "";
+      const summary = typeof change.summary === "string" ? change.summary : planSummary;
 
-      if (!path || typeof newContent !== "string") {
+      if (!path || typeof oldContent !== "string" || typeof newContent !== "string") {
         console.error("Failed to parse AI edit response file shape:", JSON.stringify(file).slice(0, 1000));
         throw new HttpError(502, "Failed to parse AI response");
       }
 
       return {
-        path,
-        newContent
+        filePath: path,
+        oldContent,
+        newContent,
+        summary
       };
     });
 
     return {
-      summary: result.summary,
-      files
+      status: parseEditStatus(result.status, patches),
+      summary: planSummary,
+      patches,
+      nextSearchKeywords: parseNextSearchKeywords(result.nextSearchKeywords),
+      commandsToRun: parseCommandsToRun(result.commandsToRun)
     };
   }
 
   if (typeof result.newContent === "string") {
+    const patches: FilePatch[] = [];
     return {
-      summary: result.summary,
-      files: []
+      status: parseEditStatus(result.status, patches),
+      summary: planSummary,
+      patches,
+      nextSearchKeywords: parseNextSearchKeywords(result.nextSearchKeywords),
+      commandsToRun: parseCommandsToRun(result.commandsToRun)
     };
   }
 
   throw new HttpError(502, "Failed to parse AI response");
 }
 
-function normalizeAiEditResult(rawContent: string, filePath?: string | null) {
+function parseCommandsToRun(value: unknown) {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const commands = value.filter((command): command is string => typeof command === "string" && Boolean(command.trim())).map((command) => command.trim());
+  return commands.length ? commands : undefined;
+}
+
+function normalizeAiEditResult(rawContent: string) {
   const result = parseAiEditResult(rawContent);
 
-  if (result.files && result.files.length === 0) {
-    if (!filePath) {
-      throw new HttpError(502, "AI returned a single-file edit without a selected file path");
-    }
-
-    const parsed = JSON.parse(extractJsonContent(rawContent)) as { summary: string; newContent: string };
-
-    return {
-      summary: parsed.summary,
-      files: [{ path: filePath, newContent: parsed.newContent }]
-    };
+  if (result.patches && result.patches.length === 0) {
+    throw new HttpError(502, "AI edit response is missing patches[].filePath");
   }
 
   return result;
 }
 
-async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: string | null, runId = "edit") {
+async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: string | null, runId = "edit", candidateFilePaths: string[] = []) {
   try {
-    return normalizeAiEditResult(rawContent, filePath);
+    return normalizeAiEditResult(rawContent);
   } catch (error) {
     if (!(error instanceof HttpError) || error.status !== 502) {
       throw error;
@@ -672,7 +982,7 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
     logAi(runId, "edit.parse.repair.start", { rawPreview: rawContent });
     const repairResponse = await requestJsonChatCompletion({
       model: config.aiModel,
-      temperature: 0,
+      temperature: config.aiEditTemperature,
       messages: [
         {
           role: "system",
@@ -681,8 +991,12 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
             "Return ONLY valid JSON.",
             "Do not change the intended code content except to make it valid JSON.",
             "The required schema is:",
-            '{"summary":"short summary","files":[{"path":"existing/workspace/path","newContent":"full updated file content"}]}',
-            "If the original response says the edit cannot be done, return {\"summary\":\"reason\",\"files\":null}."
+            '{"status":"patch|needs_context|plan|blocked","summary":"short summary","patches":[{"filePath":"existing/workspace/path","oldContent":"exact original file content","newContent":"full updated file content","summary":"short file-level summary"}],"nextSearchKeywords":["optional keyword"],"commandsToRun":["optional validation command"]}',
+            "The selected file is optional context, not a required edit target.",
+            "For an existing file, choose filePath from candidateFilePaths. For a genuinely new file requested by the user, use a safe workspace-relative path.",
+            "If the malformed response uses the legacy single-file newContent format, convert it to patches with an explicit filePath inferred from the selected context or candidateFilePaths.",
+            "If the original response needs more search/read work, return status \"needs_context\" or \"plan\" with patches:null and nextSearchKeywords.",
+            "If the original response says the edit cannot be done, return {\"status\":\"blocked\",\"summary\":\"reason\",\"patches\":null}."
           ].join("\n")
         },
         {
@@ -690,6 +1004,7 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
           content: JSON.stringify(
             {
               selectedFilePath: filePath || null,
+              candidateFilePaths: [...new Set(candidateFilePaths.filter(Boolean))],
               malformedResponse: rawContent
             },
             null,
@@ -706,8 +1021,8 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
     }
 
     try {
-      const result = normalizeAiEditResult(repairedContent, filePath);
-      logAi(runId, "edit.parse.repair.ok", { files: result.files?.map((file) => file.path) || null });
+      const result = normalizeAiEditResult(repairedContent);
+      logAi(runId, "edit.parse.repair.ok", { patches: result.patches?.map((file) => file.filePath) || null });
       return result;
     } catch {
       console.error("Failed to parse repaired AI edit response:", repairedContent.slice(0, 1000));
@@ -720,13 +1035,21 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
 async function generateAiEditWithTools(filePath: string | null, content: string, userRequest: string, onAgentStep?: (step: AgentStep) => void, pathRetryContext?: EditPathRetryContext): Promise<AiEditResult> {
   const runId = createAiRunId("edit");
   const startedAt = Date.now();
-  const [availableCommands, recentFailedCommand] = await Promise.all([getAvailableCommandsForPrompt(), Promise.resolve(null).then(formatCommandFailureForPrompt)]);
+  const contextPaths = filePath ? [filePath] : [];
+  const [availableCommands, recentFailedCommand, projectFacts, projectRules] = await Promise.all([
+    getAvailableCommandsForPrompt(),
+    Promise.resolve(null).then(formatCommandFailureForPrompt),
+    getProjectFactsForPrompt(),
+    getProjectRulesForPrompt(contextPaths)
+  ]);
   const agentContext: AgentContext = {
     userGoal: userRequest,
     filesRead: [],
     searchQueries: [],
+    searchResultFiles: [],
     relevantFiles: filePath ? [filePath] : []
   };
+  logAi(runId, "start", { userGoal: userRequest, selectedFile: filePath, selectedFileChars: content.length, pathRetryContext });
   const toolMessages: ChatMessage[] = [
     { role: "system", content: AI_MULTI_FILE_EDIT_SYSTEM_PROMPT },
     {
@@ -735,11 +1058,17 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
         {
           selectedFile: filePath ? { path: filePath, content } : null,
           availableCommands,
+          projectFacts,
+          projectRules,
           recentFailedCommand,
+          fallbackSearch: null,
           pathRetryContext: pathRetryContext
             ? {
                 ...pathRetryContext,
-                instruction: "Your previous edit response used file paths that do not exist in the workspace. Regenerate the full edit response using only paths from validFilePaths."
+                instruction:
+                  pathRetryContext.reason === "no_file_changes"
+                    ? "Your previous edit response returned patches:null and could not be applied. The user's request requires code changes. Use projectFacts and inspectProject for framework/API errors, search/read the relevant files if needed, then return a non-empty patches array with oldContent and newContent. Only return patches:null if the request is truly impossible or unsafe and cite concrete file evidence in summary."
+                    : "Your previous edit response used file paths that do not exist in the workspace. Regenerate the full edit plan using only paths from validFilePaths."
               }
             : null,
           userRequest
@@ -749,19 +1078,24 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
       )
     }
   ];
-  const searchCache = new Map<string, unknown>();
-  const readCache = new Map<string, string>();
-  logAi(runId, "start", { userGoal: userRequest, selectedFile: filePath, selectedFileChars: content.length, pathRetryContext });
+  const toolRuntime = createAgentToolRuntime({ agentContext, runId, onAgentStep });
+  let nullPatchRecoveryAttempts = 0;
 
   for (let step = 0; step < MAX_FILE_CHAT_TOOL_STEPS; step += 1) {
-    logAi(runId, "completion.request", { step, messageCount: toolMessages.length, tools: true });
-    const data = await requestJsonChatCompletion({
+    const forceInitialSearch = step === 0;
+    logAi(runId, "completion.request", { step, messageCount: toolMessages.length, tools: true, forceInitialSearch });
+    const completionBody = {
       model: config.aiModel,
-      temperature: 0,
+      temperature: config.aiEditTemperature,
       messages: toolMessages,
-      tools: fileChatTools,
+      tools: agentToolSchemas,
+      tool_choice: forceInitialSearch ? { type: "function", function: { name: "searchCode" } } : "auto"
+    };
+    const fallbackCompletionBody = {
+      ...completionBody,
       tool_choice: "auto"
-    });
+    };
+    const data = forceInitialSearch ? await requestJsonChatCompletionWithToolChoiceFallback(completionBody, fallbackCompletionBody, runId) : await requestJsonChatCompletion(completionBody);
 
     const message = data.choices?.[0]?.message;
 
@@ -776,8 +1110,59 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
         throw new HttpError(502, "AI response did not include content");
       }
 
-      const result = await normalizeAiEditResultWithRepair(message.content, filePath, runId);
-      logAi(runId, "done", { elapsedMs: Date.now() - startedAt, files: result.files?.map((file) => file.path) || null, summary: result.summary });
+      const result = await normalizeAiEditResultWithRepair(
+        message.content,
+        filePath,
+        runId,
+        [...agentContext.filesRead, ...agentContext.searchResultFiles, ...(pathRetryContext?.validFilePaths || [])]
+      );
+
+      const intermediateStatus = result.patches === null && isIntermediateEditStatus(result.status);
+      const legacyPlanSummary = result.patches === null && !result.status && isIntermediateEditPlanSummary(result.summary);
+      const shouldContinueEditLoop = intermediateStatus || legacyPlanSummary;
+
+      if (result.patches === null && result.status !== "blocked" && nullPatchRecoveryAttempts < MAX_NULL_PATCH_RECOVERY_ATTEMPTS) {
+        nullPatchRecoveryAttempts += 1;
+        const planSearchKeywords = shouldContinueEditLoop ? result.nextSearchKeywords?.length ? result.nextSearchKeywords : derivePlanSearchKeywords(userRequest, result.summary) : [];
+        const additionalSearchResults = planSearchKeywords.length ? await runAdditionalEditSearch(planSearchKeywords, agentContext, runId, onAgentStep) : [];
+        const additionalSearchFilePaths = additionalSearchResults.flatMap((group) => group.results.map((item) => item.filePath));
+        const contextFilePaths = [...new Set([...(additionalSearchFilePaths.length ? additionalSearchFilePaths : agentContext.searchResultFiles), ...(pathRetryContext?.validFilePaths || [])])];
+        const automaticContextFiles = await readEditContextFiles(contextFilePaths, agentContext, runId, onAgentStep);
+        const candidateFilePaths = [...agentContext.filesRead, ...agentContext.searchResultFiles, ...(pathRetryContext?.validFilePaths || [])];
+
+        logAi(runId, "edit.nullPatch.recover", {
+          attempt: nullPatchRecoveryAttempts,
+          status: result.status,
+          summary: result.summary,
+          intermediateStatus,
+          legacyPlanSummary,
+          planSearchKeywords,
+          automaticContextFiles: automaticContextFiles.map((file) => file.filePath),
+          candidateFileCount: candidateFilePaths.length
+        });
+        onAgentStep?.(
+          createAgentStep({
+            type: "message",
+            content: shouldContinueEditLoop
+              ? "Model returned an intermediate edit status instead of file changes. Continuing the agent loop and patch generation."
+              : automaticContextFiles.length
+              ? `Model requested more context. Automatically read ${automaticContextFiles.length} file(s) and continuing patch generation.`
+              : "Model requested more context. Continuing with a stronger instruction to call tools or return a concrete patch."
+          })
+        );
+        toolMessages.push(
+          createNullPatchRecoveryMessage({
+            summary: result.summary,
+            status: result.status,
+            automaticContextFiles,
+            candidateFilePaths,
+            intermediate: shouldContinueEditLoop
+          })
+        );
+        continue;
+      }
+
+      logAi(runId, "done", { elapsedMs: Date.now() - startedAt, patches: result.patches?.map((file) => file.filePath) || null, summary: result.summary });
       return result;
     }
 
@@ -788,8 +1173,30 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
     });
 
     logAi(runId, "completion.toolCalls", message.tool_calls.map((toolCall) => toolCall.function.name));
-    const results = await Promise.all(message.tool_calls.map((toolCall) => executeFileChatToolCall(toolCall, searchCache, readCache, agentContext, runId, onAgentStep)));
+    const results = await Promise.all(message.tool_calls.map((toolCall) => executeAgentToolCall(toolCall, toolRuntime)));
     toolMessages.push(...results);
+
+    if (agentContext.searchResultFiles.length && !agentContext.filesRead.length) {
+      const contextMessage = createAutomaticEditContextMessage(await readEditContextFiles(agentContext.searchResultFiles, agentContext, runId, onAgentStep));
+
+      if (contextMessage) {
+        toolMessages.push(contextMessage);
+      }
+    }
+
+    if (forceInitialSearch && !agentContext.searchResultFiles.length) {
+      const fallbackSearch = await runMandatoryEditPreflightSearch(userRequest, filePath, agentContext, runId, onAgentStep);
+      const automaticContextFiles = await readEditContextFiles(getFallbackSearchFilePaths(fallbackSearch), agentContext, runId, onAgentStep);
+      toolMessages.push({
+        role: "user",
+        content: JSON.stringify({
+          fallbackSearch,
+          automaticContextFiles,
+          instruction:
+            "The required first searchCode call did not find matching files. If automaticContextFiles is non-empty, use those files as editable context and return a non-empty patches array with oldContent and newContent. If it is empty, use fallbackSearch results and call readFile for relevant files before returning the final edit."
+        })
+      });
+    }
   }
 
   logAi(runId, "toolSteps.limitReached", { maxSteps: MAX_FILE_CHAT_TOOL_STEPS });
@@ -800,7 +1207,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
 
   const data = await requestJsonChatCompletion({
     model: config.aiModel,
-    temperature: 0,
+    temperature: config.aiEditTemperature,
     messages: toolMessages
   });
 
@@ -810,8 +1217,13 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
     throw new HttpError(502, "AI response did not include content");
   }
 
-  const result = await normalizeAiEditResultWithRepair(rawContent, filePath, runId);
-  logAi(runId, "done.afterLimit", { elapsedMs: Date.now() - startedAt, files: result.files?.map((file) => file.path) || null, summary: result.summary });
+  const result = await normalizeAiEditResultWithRepair(
+    rawContent,
+    filePath,
+    runId,
+    [...agentContext.filesRead, ...agentContext.searchResultFiles, ...(pathRetryContext?.validFilePaths || [])]
+  );
+  logAi(runId, "done.afterLimit", { elapsedMs: Date.now() - startedAt, patches: result.patches?.map((file) => file.filePath) || null, summary: result.summary });
   return result;
 }
 
@@ -830,16 +1242,32 @@ export async function generateAiEdit(filePath: string | null, content: string, u
     return generateAiEditWithTools(null, content, userRequest, undefined, pathRetryContext);
   }
 
-  const [availableCommands, recentFailedCommand] = await Promise.all([getAvailableCommandsForPrompt(), Promise.resolve(null).then(formatCommandFailureForPrompt)]);
+  const [availableCommands, recentFailedCommand, projectFacts, projectRules] = await Promise.all([
+    getAvailableCommandsForPrompt(),
+    Promise.resolve(null).then(formatCommandFailureForPrompt),
+    getProjectFactsForPrompt(),
+    getProjectRulesForPrompt([filePath])
+  ]);
   logAi(runId, "start", { userGoal: userRequest, selectedFile: filePath, selectedFileChars: content.length });
 
   logAi(runId, "completion.request", { messageCount: 2, tools: false });
   const data = await requestJsonChatCompletion({
     model: config.aiModel,
-    temperature: 0,
+    temperature: config.aiEditTemperature,
     messages: [
       { role: "system", content: AI_SYSTEM_PROMPT },
-      { role: "user", content: buildUserPrompt(filePath, content, userRequest, availableCommands, recentFailedCommand) }
+      {
+        role: "user",
+        content: JSON.stringify(
+          {
+            ...JSON.parse(buildUserPrompt(filePath, content, userRequest, availableCommands, recentFailedCommand)),
+            projectFacts,
+            projectRules
+          },
+          null,
+          2
+        )
+      }
     ]
   });
 
@@ -851,11 +1279,11 @@ export async function generateAiEdit(filePath: string | null, content: string, u
   }
 
   const result = await normalizeAiEditResultWithRepair(rawContent, filePath, runId);
-  logAi(runId, "done", { elapsedMs: Date.now() - startedAt, files: result.files?.map((file) => file.path) || null, summary: result.summary });
+  logAi(runId, "done", { elapsedMs: Date.now() - startedAt, patches: result.patches?.map((file) => file.filePath) || null, summary: result.summary });
   return result;
 }
 
-export async function generateFileChatReply(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string) {
+export async function generateFileChatReply(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string, onAgentStep?: (step: AgentStep) => void) {
   if (!config.aiApiKey) {
     return [
       `Received: ${userRequest}`,
@@ -868,12 +1296,19 @@ export async function generateFileChatReply(contextFiles: ChatContextFile[], his
     role: message.role,
     content: message.content
   }));
-  const [availableCommands, recentFailedCommand] = await Promise.all([getAvailableCommandsForPrompt(), getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt)]);
+  const contextPaths = contextFiles.map((file) => file.path);
+  const [availableCommands, recentFailedCommand, projectFacts, projectRules] = await Promise.all([
+    getAvailableCommandsForPrompt(),
+    getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt),
+    getProjectFactsForPrompt(),
+    getProjectRulesForPrompt(contextPaths)
+  ]);
 
   const agentContext: AgentContext = {
     userGoal: userRequest,
     filesRead: [],
     searchQueries: [],
+    searchResultFiles: [],
     relevantFiles: contextFiles.map((file) => file.path)
   };
 
@@ -885,6 +1320,8 @@ export async function generateFileChatReply(contextFiles: ChatContextFile[], his
         {
           contextFiles,
           availableCommands,
+          projectFacts,
+          projectRules,
           recentFailedCommand
         },
         null,
@@ -893,7 +1330,7 @@ export async function generateFileChatReply(contextFiles: ChatContextFile[], his
     },
     ...recentHistory,
     { role: "user", content: userRequest }
-  ], agentContext);
+  ], agentContext, onAgentStep);
 }
 
 async function buildFileChatMessages(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string): Promise<ChatMessage[]> {
@@ -901,7 +1338,13 @@ async function buildFileChatMessages(contextFiles: ChatContextFile[], history: F
     role: message.role,
     content: message.content
   }));
-  const [availableCommands, recentFailedCommand] = await Promise.all([getAvailableCommandsForPrompt(), getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt)]);
+  const contextPaths = contextFiles.map((file) => file.path);
+  const [availableCommands, recentFailedCommand, projectFacts, projectRules] = await Promise.all([
+    getAvailableCommandsForPrompt(),
+    getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt),
+    getProjectFactsForPrompt(),
+    getProjectRulesForPrompt(contextPaths)
+  ]);
 
   return [
     { role: "system", content: AI_FILE_CHAT_SYSTEM_PROMPT },
@@ -911,6 +1354,8 @@ async function buildFileChatMessages(contextFiles: ChatContextFile[], history: F
         {
           contextFiles,
           availableCommands,
+          projectFacts,
+          projectRules,
           recentFailedCommand
         },
         null,
@@ -938,10 +1383,8 @@ export async function streamFileChatReply(
       "AI_API_KEY is not configured, so this is a local mock streaming response. Configure an OpenAI-compatible provider to get real AI replies."
     ].join("\n");
 
-    for (const chunk of text.match(/.{1,5}/gs) || []) {
-      if (signal?.aborted) break;
-      onDelta(chunk);
-      await new Promise((resolve) => setTimeout(resolve, 35));
+    if (!signal?.aborted) {
+      onDelta(text);
     }
 
     return signal?.aborted ? "" : text;
@@ -951,14 +1394,18 @@ export async function streamFileChatReply(
     userGoal: userRequest,
     filesRead: [],
     searchQueries: [],
+    searchResultFiles: [],
     relevantFiles: contextFiles.map((file) => file.path)
   };
-  const text = await generateFileChatAssistantContent(await buildFileChatMessages(contextFiles, history, userRequest, chatId), agentContext, onAgentStep);
+  const toolLoop = await runFileChatToolLoop(await buildFileChatMessages(contextFiles, history, userRequest, chatId), agentContext, onAgentStep, true);
 
-  for (const chunk of text.match(/.{1,16}/gs) || []) {
-    if (signal?.aborted) break;
-    onDelta(chunk);
+  if (toolLoop.finalContent !== null) {
+    if (!signal?.aborted && toolLoop.finalContent) {
+      onDelta(toolLoop.finalContent);
+    }
+
+    return signal?.aborted ? "" : toolLoop.finalContent;
   }
 
-  return signal?.aborted ? "" : text;
+  return streamFileChatFinalAnswer(toolLoop.messages, onDelta, signal);
 }

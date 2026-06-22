@@ -1,0 +1,183 @@
+.git-workflow {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.git-workflow h2,
+.git-workflow h3 {
+  margin: 0;
+}
+
+.git-workflow h2 {
+  font-size: 11px;
+}
+
+.git-workflow h3 {
+  color: #334155;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.git-workflow-heading {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.git-workflow-heading span {
+  color: #647181;
+  display: block;
+  font-size: 10px;
+  margin-top: 3px;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-workflow-error,
+.git-workflow-notice,
+.git-workflow-empty {
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  margin: 0;
+  padding: 8px;
+}
+
+.git-workflow-error {
+  background: #fff2f0;
+  border: 1px solid #ffccc7;
+  color: #a8071a;
+}
+
+.git-workflow-notice {
+  background: #eef8f1;
+  border: 1px solid #b7e1c0;
+  color: #1f5d2e;
+}
+
+.git-workflow-empty {
+  background: #f8fafc;
+  border: 1px solid #d8dee5;
+  color: #647181;
+}
+
+.git-workflow-card {
+  background: #ffffff;
+  border: 1px solid #d8dee5;
+  border-radius: 6px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.git-workflow-card dl {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.git-workflow-card dl div {
+  display: grid;
+  gap: 2px;
+}
+
+.git-workflow-card dt {
+  color: #647181;
+  font-size: 10px;
+}
+
+.git-workflow-card dd {
+  color: #1f2937;
+  font-size: 11px;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-workflow-form {
+  display: flex;
+  gap: 6px;
+}
+
+.git-workflow-form input,
+.git-workflow-card textarea {
+  border: 1px solid #b6c1cc;
+  border-radius: 6px;
+  color: #17202a;
+  font: inherit;
+  font-size: 11px;
+  min-width: 0;
+}
+
+.git-workflow-form input {
+  flex: 1;
+  min-height: 30px;
+  padding: 0 8px;
+}
+
+.git-workflow-form button,
+.git-workflow-actions button {
+  font-size: 11px;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.git-workflow-card textarea {
+  line-height: 1.45;
+  min-height: 118px;
+  padding: 8px;
+  resize: vertical;
+}
+
+.git-workflow-files {
+  display: grid;
+  gap: 5px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.git-workflow-files li {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #edf1f5;
+  border-radius: 5px;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 42px minmax(0, 1fr);
+  min-height: 28px;
+  padding: 5px 6px;
+}
+
+.git-workflow-files span {
+  color: #155aa8;
+  font-size: 10px;
+}
+
+.git-workflow-files code {
+  color: #334155;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-workflow-files .git-workflow-muted {
+  color: #647181;
+  display: block;
+  font-size: 11px;
+}
+
+.git-workflow-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}

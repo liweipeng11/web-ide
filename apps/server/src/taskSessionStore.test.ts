@@ -1,0 +1,198 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { config } from "./config.js";
+import { projectRuntimeDirectory } from "./statePaths.js";
+import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, deleteTaskPlanItem, getTaskSession, setTaskPlanItems, updateTaskPlanItem } from "./taskSessionStore.js";
+import { setWorkspaceRoot } from "./workspaceStore.js";
+import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
+
+async function createIsolatedTaskSession(userGoal = "实现任务计划器") {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-plan-"));
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  return {
+    workspaceRoot,
+    session: await createTaskSession(userGoal)
+  };
+}
+
+test("adds, updates, and deletes task plan items", async () => {
+  const { session } = await createIsolatedTaskSession();
+
+  const added = await addTaskPlanItem(session.id, { title: "梳理任务目标" });
+  assert.equal(added?.planItems?.length, 1);
+  assert.equal(added?.planItems?.[0]?.title, "梳理任务目标");
+  assert.equal(added?.planItems?.[0]?.status, "pending");
+
+  const planItemId = added?.planItems?.[0]?.id || "";
+  const updated = await updateTaskPlanItem(session.id, planItemId, {
+    title: "拆分任务步骤",
+    status: "in_progress",
+    note: "先完成手动计划维护闭环"
+  });
+
+  assert.equal(updated?.planItems?.[0]?.title, "拆分任务步骤");
+  assert.equal(updated?.planItems?.[0]?.status, "in_progress");
+  assert.equal(updated?.planItems?.[0]?.note, "先完成手动计划维护闭环");
+
+  const persisted = await getTaskSession(session.id);
+  assert.equal(persisted.planItems?.[0]?.status, "in_progress");
+
+  const removed = await deleteTaskPlanItem(session.id, planItemId);
+  assert.deepEqual(removed?.planItems, []);
+});
+
+test("rejects empty task plan item titles", async () => {
+  const { session } = await createIsolatedTaskSession();
+
+  await assert.rejects(() => addTaskPlanItem(session.id, { title: "   " }), /计划标题不能为空/);
+
+  const added = await addTaskPlanItem(session.id, { title: "准备验证" });
+  const planItemId = added?.planItems?.[0]?.id || "";
+
+  await assert.rejects(() => updateTaskPlanItem(session.id, planItemId, { title: "" }), /计划标题不能为空/);
+});
+
+test("normalizes legacy task sessions without plan items", async () => {
+  const { session } = await createIsolatedTaskSession("读取旧任务记录");
+  const sessionPath = path.join(projectRuntimeDirectory("task-sessions"), `${session.id}.json`);
+  const persisted = JSON.parse(await fs.readFile(sessionPath, "utf8")) as Record<string, unknown>;
+
+  // 旧版本任务记录没有 planItems 字段，读取时需要补成空数组。
+  delete persisted.planItems;
+  await fs.writeFile(sessionPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+  const loaded = await getTaskSession(session.id);
+  assert.deepEqual(loaded.planItems, []);
+});
+
+test("initializes fallback task plans for edit tasks", async () => {
+  const { session } = await createIsolatedTaskSession("新增自动计划能力");
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+
+  try {
+    const planned = await initializeTaskPlan(session, {
+      intent: "edit",
+      confidence: 0.9,
+      normalizedGoal: "新增自动计划能力",
+      reason: "test"
+    });
+
+    assert.ok((planned?.planItems?.length || 0) >= 3);
+    assert.equal(planned?.planItems?.[0]?.status, "in_progress");
+    assert.equal(planned?.planItems?.[1]?.status, "pending");
+    assert.equal(planned?.planApproval?.status, "pending");
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+  }
+});
+
+test("approves pending task plans", async () => {
+  const { session } = await createIsolatedTaskSession("实现审批模式");
+  await setTaskPlanItems(session.id, [{ title: "确认方案" }], { requireApproval: true });
+
+  const approved = await approveTaskSessionPlan(session.id);
+
+  assert.equal(approved?.planApproval?.status, "approved");
+  assert.equal(typeof approved?.planApproval?.approvedAt, "number");
+});
+
+test("skips task plans for simple chat and command tasks", async () => {
+  const { session } = await createIsolatedTaskSession("解释这个函数是什么意思");
+  const chatClassification = {
+    intent: "chat" as const,
+    confidence: 0.9,
+    normalizedGoal: "解释这个函数是什么意思",
+    reason: "test"
+  };
+
+  assert.equal(shouldInitializeTaskPlan(session.userGoal, chatClassification), false);
+  assert.equal(await initializeTaskPlan(session, chatClassification), null);
+  assert.deepEqual((await getTaskSession(session.id)).planItems, []);
+
+  assert.equal(
+    shouldInitializeTaskPlan("运行测试", {
+      intent: "command",
+      confidence: 0.9,
+      normalizedGoal: "运行测试",
+      reason: "test"
+    }),
+    false
+  );
+});
+
+test("initializes task plans for explicit planning requests", async () => {
+  const { session } = await createIsolatedTaskSession("先给我一个实现计划");
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+
+  try {
+    const planned = await initializeTaskPlan(session, {
+      intent: "chat",
+      confidence: 0.8,
+      normalizedGoal: "先给我一个实现计划",
+      reason: "test"
+    });
+
+    assert.ok((planned?.planItems?.length || 0) > 0);
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+  }
+});
+
+test("creates shorter fallback plans for inspect tasks", () => {
+  const items = createFallbackTaskPlan("分析为什么构建失败", "inspect");
+
+  assert.deepEqual(
+    items.map((item) => item.title),
+    ["理解问题和上下文", "检索相关代码和资料", "整理结论和建议"]
+  );
+});
+
+test("advances task plan progress across agent phases", async () => {
+  const { session } = await createIsolatedTaskSession("推进计划状态");
+  await setTaskPlanItems(session.id, [{ title: "理解目标" }, { title: "生成修改" }, { title: "运行验证" }]);
+
+  const afterPatch = await advanceTaskPlanProgress(session.id, "patch_generated");
+  assert.deepEqual(afterPatch?.planItems?.map((item) => item.status), ["completed", "in_progress", "pending"]);
+
+  const afterApply = await advanceTaskPlanProgress(session.id, "patch_applied");
+  assert.deepEqual(afterApply?.planItems?.map((item) => item.status), ["completed", "completed", "in_progress"]);
+
+  const afterValidation = await advanceTaskPlanProgress(session.id, "validation_success");
+  assert.deepEqual(afterValidation?.planItems?.map((item) => item.status), ["completed", "completed", "completed"]);
+});
+
+test("links agent steps to active task plan item evidence", async () => {
+  const { session } = await createIsolatedTaskSession("记录执行证据");
+  await setTaskPlanItems(session.id, [{ title: "读取文件" }, { title: "生成修改" }]);
+
+  const updated = await appendTaskSessionStep(session.id, {
+    id: "read-step",
+    type: "tool_result",
+    toolName: "readFile",
+    output: { filePath: "src/App.tsx" },
+    createdAt: Date.now()
+  });
+
+  assert.deepEqual(updated?.planItems?.[0]?.evidence?.stepIds, ["read-step"]);
+  assert.deepEqual(updated?.planItems?.[0]?.evidence?.files, ["src/App.tsx"]);
+});
+
+test("rewrites task plans from natural language instructions with fallback rules", async () => {
+  const { session } = await createIsolatedTaskSession("调整任务计划");
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+
+  try {
+    const planned = await setTaskPlanItems(session.id, [{ title: "第一步" }, { title: "第二步" }, { title: "第三步" }]);
+    const rewritten = await rewriteTaskPlanWithInstruction(planned!, "删除第 2 步");
+
+    assert.deepEqual(rewritten?.planItems?.map((item) => item.title), ["第一步", "第三步"]);
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+  }
+});

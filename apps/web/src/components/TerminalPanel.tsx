@@ -38,6 +38,7 @@ type ActiveCommand = {
   marker: string;
   output: string;
   startedAt: string;
+  chatId?: string;
   timeoutId: number;
   settleTimeoutId: number | null;
   longRunning: boolean;
@@ -45,6 +46,8 @@ type ActiveCommand = {
 };
 
 const maxCapturedOutputLength = 80_000;
+const maxResultOutputLength = 12_000;
+const maxResultPreviewLength = 4_000;
 const commandTimeoutMs = 120_000;
 const longRunningSettleMs = 3_000;
 
@@ -68,11 +71,54 @@ function escapeRegExp(value: string) {
 }
 
 function stripAnsi(value: string) {
-  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+  return value
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\r(?!\n)/g, "\n")
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 function commandLooksLongRunning(command: string) {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b|(?:^|\s)(?:vite|next\s+dev|webpack-dev-server)(?:\s|$)/i.test(command);
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b|(?:^|\s)(?:vite|next\s+dev|webpack-dev-server|vue-cli-service\s+serve)(?:\s|$)/i.test(command);
+}
+
+function tail(value: string, maxLength: number) {
+  return value.length > maxLength ? value.slice(value.length - maxLength) : value;
+}
+
+function detectUrl(output: string) {
+  return output.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[[^\]]+\]|[^\s]+)/i)?.[0]?.replace(/[),.;]+$/, "");
+}
+
+function createCommandResult(command: string, cwd: string, exitCode: number | null, output: string, startedAt: string, chatId?: string, finishedAt = new Date().toISOString()): CommandResult {
+  const cleanedOutput = stripAnsi(output).trim();
+  const detectedUrl = detectUrl(cleanedOutput);
+  const longRunning = commandLooksLongRunning(command);
+  const status = detectedUrl && longRunning ? "running" : exitCode === 0 ? "success" : exitCode === null ? "timeout" : "failed";
+  const preview = tail(cleanedOutput, maxResultPreviewLength);
+  const summary = [
+    status === "running" && detectedUrl ? `Development server is running at ${detectedUrl}.` : "",
+    status === "timeout" ? `Command timed out after ${commandTimeoutMs / 1000} seconds.` : "",
+    status === "success" ? "Command completed successfully." : "",
+    status === "failed" ? `Command failed with exit code ${exitCode}.` : "",
+    preview ? `Output preview:\n${preview}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return {
+    command,
+    chatId,
+    cwd,
+    exitCode,
+    stdout: tail(cleanedOutput, maxResultOutputLength),
+    stderr: "",
+    summary,
+    status,
+    detectedUrl,
+    outputTruncated: cleanedOutput.length > maxResultOutputLength,
+    startedAt,
+    finishedAt
+  };
 }
 
 function shellLooksLikePowerShell(shell: string) {
@@ -80,7 +126,7 @@ function shellLooksLikePowerShell(shell: string) {
 }
 
 function shellLooksLikeCmd(shell: string) {
-  return /^cmd$/i.test(shell);
+  return /(?:^|[\\/])cmd(?:\.exe)?$/i.test(shell) || /^cmd(?:\.exe)?$/i.test(shell);
 }
 
 function wrapCommandForCompletion(command: string, requestId: string, shell: string) {
@@ -133,15 +179,7 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
     setRunningCommand(false);
     onCommandComplete?.({
       id: activeCommand.id,
-      result: {
-        command: activeCommand.command,
-        cwd: terminalCwdRef.current || workspaceRoot,
-        exitCode,
-        stdout: stripAnsi(output).trim(),
-        stderr: "",
-        startedAt: activeCommand.startedAt,
-        finishedAt: new Date().toISOString()
-      }
+      result: createCommandResult(activeCommand.command, terminalCwdRef.current || workspaceRoot, exitCode, output, activeCommand.startedAt, activeCommand.chatId)
     });
   }
 
@@ -167,15 +205,7 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
     activeCommand.reportedSnapshot = true;
     onCommandComplete?.({
       id: activeCommand.id,
-      result: {
-        command: activeCommand.command,
-        cwd: terminalCwdRef.current || workspaceRoot,
-        exitCode: null,
-        stdout: stripAnsi(activeCommand.output).trim(),
-        stderr: "",
-        startedAt: activeCommand.startedAt,
-        finishedAt: new Date().toISOString()
-      }
+      result: createCommandResult(activeCommand.command, terminalCwdRef.current || workspaceRoot, null, activeCommand.output, activeCommand.startedAt, activeCommand.chatId)
     });
   }
 
@@ -369,6 +399,7 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
           marker: wrappedCommand.marker,
           output: "",
           startedAt: new Date().toISOString(),
+          chatId: request.chatId,
           timeoutId,
           settleTimeoutId: null,
           longRunning: commandLooksLongRunning(trimmedCommand),

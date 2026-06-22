@@ -4,7 +4,7 @@ import { HttpError } from "./errors.js";
 import type { FileTreeNode } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
-const IGNORED_NAMES = new Set(["node_modules", ".git", "dist", "build", ".next"]);
+const IGNORED_NAMES = new Set(["node_modules", ".git", ".ai-agent", ".mini-ai-web-editor", "dist", "build", ".next"]);
 
 type ResolveOptions = {
   allowIgnored?: boolean;
@@ -15,10 +15,9 @@ function toComparablePath(value: string) {
 }
 
 function hasIgnoredSegment(relativePath: string) {
-  return relativePath
-    .split(/[\\/]+/)
-    .filter(Boolean)
-    .some((segment) => IGNORED_NAMES.has(segment));
+  const segments = relativePath.split(/[\\/]+/).filter(Boolean);
+
+  return segments.some((segment, index) => IGNORED_NAMES.has(segment) || (segment === ".mini-ai" && segments[index + 1] === "state"));
 }
 
 export function safeResolve(relativePath = "", options: ResolveOptions = {}) {
@@ -68,7 +67,11 @@ export async function listFiles(dir = "", includeIgnored = false): Promise<FileT
   });
 
   const visibleEntries = entries
-    .filter((entry) => includeIgnored || !IGNORED_NAMES.has(entry.name))
+    .filter((entry) => {
+      const absolutePath = path.join(absoluteDir, entry.name);
+      const relativePath = toWorkspaceRelative(absolutePath);
+      return includeIgnored || !hasIgnoredSegment(relativePath);
+    })
     .sort((a, b) => {
       if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
       return a.name.localeCompare(b.name);
@@ -80,7 +83,7 @@ export async function listFiles(dir = "", includeIgnored = false): Promise<FileT
       const relativePath = toWorkspaceRelative(absolutePath);
 
       if (entry.isDirectory()) {
-        const shouldSkipChildren = includeIgnored && IGNORED_NAMES.has(entry.name);
+        const shouldSkipChildren = includeIgnored && hasIgnoredSegment(relativePath);
 
         return {
           name: entry.name,

@@ -1,18 +1,25 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer } from "node:http";
-import path from "node:path";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
-import { generateAiEdit, generateFileChatReply, streamFileChatReply, type AgentStep, type EditPathRetryContext } from "./aiClient.js";
+import { buildContextualEditRequest, classifyAgentRequest, generateFileChatReply, shouldGeneratePatchForIntent, streamFileChatReply, type AgentStep } from "./aiClient.js";
 import { appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
+import { createCheckpoint, getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
 import { discoverProjectCommands } from "./commandDiscovery.js";
+import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { getRecentCommandResults } from "./commandResults.js";
 import { runProjectCommand } from "./commandRunner.js";
-import { createDiffHtml, createMultiFileDiffHtml } from "./diffTools.js";
-import { createWorkspaceFile, listFiles, readWorkspaceFile, safeResolve, workspacePathExists, writeWorkspaceFile } from "./fileTools.js";
-import { createPendingPatch, deletePendingPatch, getPendingPatch, clearPendingPatches } from "./patchStore.js";
-import type { AiEditResult, ApplyPatchRequest, FileChatRequest, FileTreeNode, GenerateEditRequest, RejectPatchRequest, RunCommandRequest, SaveFileRequest } from "./types.js";
+import { createEditPatchResponse } from "./editPatchService.js";
+import { runAutoValidation } from "./autoValidationService.js";
+import { createWorkspaceFile, listFiles, readWorkspaceFile, workspacePathExists, writeWorkspaceFile } from "./fileTools.js";
+import { createGitWorkflowRouter } from "./gitWorkflow/routes.js";
+import { clearPendingPatches, deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
+import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
+import { createAgentStep } from "./routeAgentSteps.js";
+import type { ApplyPatchRequest, AutoValidationRequest, FileChatRequest, GenerateEditRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionCommand, addTaskSessionFilesChanged, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, deleteTaskPlanItem, listTaskSessions, getTaskSession, updateTaskPlanItem, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
+import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
@@ -22,22 +29,16 @@ const server = createServer(app);
 const workspaceChatKey = "__workspace_chat__";
 const maxChatContextFiles = 8;
 const maxChatContextCharsPerFile = 20_000;
-const routeLogPreviewChars = 500;
 
 app.use(express.json({ limit: "5mb" }));
+app.use("/api/git-workflow", createGitWorkflowRouter());
 
-function createRouteRunId(prefix: string) {
+function createStreamRunId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function previewRouteLog(value: unknown, maxLength = routeLogPreviewChars) {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
-  return text.length > maxLength ? `${text.slice(0, maxLength)}...<truncated ${text.length - maxLength} chars>` : text;
-}
-
-function logRoute(runId: string, event: string, detail?: unknown) {
-  const suffix = detail === undefined ? "" : ` ${previewRouteLog(detail)}`;
-  console.log(`[route:${runId}] ${event}${suffix}`);
+function logStreamRoute(runId: string, event: string, detail?: unknown) {
+  console.log(`[route:${runId}] ${event}`, detail ?? "");
 }
 
 function asyncRoute(handler: (request: Request, response: Response) => Promise<void>) {
@@ -72,6 +73,13 @@ function requireChatKey(requestBody?: Partial<FileChatRequest>, query?: Request[
   return chatKey;
 }
 
+// 统一校验计划状态，避免接口写入前端无法识别的状态值。
+function parseTaskPlanStatus(value: unknown): TaskPlanItemStatus | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value === "pending" || value === "in_progress" || value === "completed" || value === "blocked") return value;
+  throw new HttpError(400, "计划状态无效");
+}
+
 async function readChatContextFiles(paths: string[]) {
   return Promise.all(
     paths.map(async (filePath) => ({
@@ -79,221 +87,6 @@ async function readChatContextFiles(paths: string[]) {
       content: (await readWorkspaceFile(filePath)).slice(0, maxChatContextCharsPerFile)
     }))
   );
-}
-
-function flattenFilePaths(nodes: FileTreeNode[]): string[] {
-  return nodes.flatMap((node) => (node.type === "file" ? [node.path] : flattenFilePaths(node.children || [])));
-}
-
-function normalizeWorkspacePath(value: string) {
-  return value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/^\.\//, "");
-}
-
-function normalizeCandidateEditPath(rawPath: string) {
-  const workspaceRoot = getWorkspaceRoot();
-  const trimmedPath = rawPath.trim();
-
-  if (workspaceRoot && path.isAbsolute(trimmedPath)) {
-    const relative = path.relative(workspaceRoot, trimmedPath);
-
-    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
-      return normalizeWorkspacePath(relative);
-    }
-  }
-
-  return normalizeWorkspacePath(trimmedPath);
-}
-
-function resolveExistingEditPath(rawPath: string, existingPaths: string[]) {
-  const workspaceRoot = getWorkspaceRoot();
-  const normalizedExistingPaths = new Map(existingPaths.map((filePath) => [filePath.toLowerCase(), filePath]));
-  const candidates: string[] = [];
-  const trimmedPath = rawPath.trim();
-
-  if (trimmedPath) {
-    candidates.push(trimmedPath);
-  }
-
-  if (workspaceRoot && path.isAbsolute(trimmedPath)) {
-    const relative = path.relative(workspaceRoot, trimmedPath);
-
-    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
-      candidates.push(relative);
-    }
-  }
-
-  candidates.push(normalizeWorkspacePath(trimmedPath));
-
-  for (const candidate of candidates) {
-    const normalized = normalizeWorkspacePath(candidate);
-    const exact = normalizedExistingPaths.get(normalized.toLowerCase());
-
-    if (exact) {
-      return exact;
-    }
-  }
-
-  const suffix = normalizeWorkspacePath(trimmedPath).toLowerCase();
-  const suffixMatches = suffix ? existingPaths.filter((filePath) => filePath.toLowerCase().endsWith(`/${suffix}`) || filePath.toLowerCase() === suffix) : [];
-
-  return suffixMatches.length === 1 ? suffixMatches[0] : null;
-}
-
-function getPathRetryCandidates(invalidPaths: string[], existingPaths: string[], selectedFilePath: string | null) {
-  const candidateSet = new Set<string>();
-
-  if (selectedFilePath) {
-    candidateSet.add(selectedFilePath);
-  }
-
-  for (const invalidPath of invalidPaths) {
-    const baseName = path.basename(invalidPath.replace(/\\/g, "/")).toLowerCase();
-
-    for (const existingPath of existingPaths) {
-      if (existingPath.toLowerCase().endsWith(`/${baseName}`) || existingPath.toLowerCase() === baseName) {
-        candidateSet.add(existingPath);
-      }
-    }
-  }
-
-  for (const existingPath of existingPaths) {
-    if (candidateSet.size >= 80) break;
-    candidateSet.add(existingPath);
-  }
-
-  return [...candidateSet];
-}
-
-async function validateEditResultPaths(aiResult: AiEditResult, selectedFilePath: string | null) {
-  if (aiResult.files === null) {
-    return { files: null, invalidFilePaths: [], validFilePaths: [] };
-  }
-
-  const existingPaths = flattenFilePaths(await listFiles(""));
-  const existingPathSet = new Set(existingPaths.map((filePath) => filePath.toLowerCase()));
-  const invalidFilePaths: string[] = [];
-  const files = aiResult.files
-    .map((change) => {
-      const existingPath = resolveExistingEditPath(change.path, existingPaths);
-
-      if (existingPath) {
-        return {
-          ...change,
-          path: existingPath,
-          status: "modify" as const
-        };
-      }
-
-      const createPath = normalizeCandidateEditPath(change.path);
-
-      try {
-        safeResolve(createPath);
-      } catch {
-        invalidFilePaths.push(change.path);
-        return null;
-      }
-
-      if (!createPath || existingPathSet.has(createPath.toLowerCase())) {
-        invalidFilePaths.push(change.path);
-        return null;
-      }
-
-      return {
-        ...change,
-        path: createPath,
-        status: "create" as const
-      };
-    })
-    .filter((change): change is NonNullable<typeof change> => Boolean(change));
-
-  return {
-    files,
-    invalidFilePaths,
-    validFilePaths: invalidFilePaths.length ? getPathRetryCandidates(invalidFilePaths, existingPaths, selectedFilePath) : []
-  };
-}
-
-async function createEditPatchResponse(filePath: string | null | undefined, userRequest: string, onAgentStep?: (step: AgentStep) => void) {
-  const runId = createRouteRunId("edit");
-  const startedAt = Date.now();
-  const selectedFilePath = typeof filePath === "string" && filePath.trim() ? filePath.trim() : null;
-  logRoute(runId, "start", { selectedFilePath, userRequest });
-  const oldContent = selectedFilePath ? await readWorkspaceFile(selectedFilePath) : "";
-  let retryContext: EditPathRetryContext | undefined;
-  let aiResult: AiEditResult | null = null;
-  let validatedPaths: Awaited<ReturnType<typeof validateEditResultPaths>> | null = null;
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    logRoute(runId, "ai.generate.start", { attempt, retryContext });
-    aiResult = await generateAiEdit(selectedFilePath, oldContent, userRequest, onAgentStep, retryContext);
-    logRoute(runId, "ai.generate.done", { attempt, summary: aiResult.summary, files: aiResult.files?.map((file) => file.path) || null });
-    validatedPaths = await validateEditResultPaths(aiResult, selectedFilePath);
-    logRoute(runId, "paths.validated", { attempt, validFiles: validatedPaths.files?.map((file) => file.path) || null, invalidFilePaths: validatedPaths.invalidFilePaths });
-
-    if (aiResult.files === null || !validatedPaths.invalidFilePaths.length) {
-      break;
-    }
-
-    retryContext = {
-      invalidFilePaths: validatedPaths.invalidFilePaths,
-      validFilePaths: validatedPaths.validFilePaths
-    };
-
-    console.warn("AI returned non-existent edit paths, retrying with valid paths:", retryContext);
-    logRoute(runId, "paths.retry", retryContext);
-  }
-
-  if (!aiResult || !validatedPaths) {
-    throw new HttpError(502, "AI did not return an edit response");
-  }
-
-  if (aiResult.files === null) {
-    throw new HttpError(422, aiResult.summary);
-  }
-
-  if (validatedPaths.invalidFilePaths.length) {
-    throw new HttpError(422, `AI returned file paths that do not exist: ${validatedPaths.invalidFilePaths.join(", ")}`);
-  }
-
-  const uniqueChanges = [...new Map((validatedPaths.files || []).map((change) => [change.path, change])).values()];
-  logRoute(runId, "patch.prepare", { files: uniqueChanges.map((change) => change.path) });
-  const files = (
-    await Promise.all(
-      uniqueChanges.map(async (change) => {
-        const previousContent = change.status === "create" ? "" : selectedFilePath && change.path === selectedFilePath ? oldContent : await readWorkspaceFile(change.path);
-
-        if (previousContent === change.newContent) {
-          return null;
-        }
-
-        return {
-          path: change.path,
-          status: change.status,
-          oldContent: previousContent,
-          newContent: change.newContent,
-          diffHtml: createDiffHtml(previousContent, change.newContent)
-        };
-      })
-    )
-  ).filter((change): change is NonNullable<typeof change> => Boolean(change));
-
-  if (!files.length) {
-    logRoute(runId, "patch.empty");
-    throw new HttpError(422, "AI did not return any file changes");
-  }
-
-  const patch = createPendingPatch(files);
-  const selectedFileChange = (selectedFilePath ? files.find((change) => change.path === selectedFilePath) : null) || files[0];
-  logRoute(runId, "done", { elapsedMs: Date.now() - startedAt, patchId: patch.patchId, files: files.map((file) => file.path) });
-
-  return {
-    patchId: patch.patchId,
-    summary: aiResult.summary,
-    files,
-    oldContent: selectedFileChange.oldContent,
-    newContent: selectedFileChange.newContent,
-    diffHtml: createMultiFileDiffHtml(files)
-  };
 }
 
 app.get(
@@ -308,6 +101,7 @@ app.post(
   asyncRoute(async (request, response) => {
     const workspaceRoot = typeof request.body?.workspaceRoot === "string" ? request.body.workspaceRoot : "";
     const nextWorkspaceRoot = await setWorkspaceRoot(workspaceRoot);
+    await ensureProjectRulesDirectory(nextWorkspaceRoot);
 
     clearPendingPatches();
     response.json({ workspaceRoot: nextWorkspaceRoot });
@@ -325,6 +119,7 @@ app.post(
     }
 
     const nextWorkspaceRoot = await setWorkspaceRoot(selectedPath);
+    await ensureProjectRulesDirectory(nextWorkspaceRoot);
 
     clearPendingPatches();
     response.json({ workspaceRoot: nextWorkspaceRoot, cancelled: false });
@@ -376,16 +171,64 @@ app.get(
   })
 );
 
+app.get(
+  "/api/project-rules",
+  asyncRoute(async (request, response) => {
+    const rawPaths = request.query.path;
+    const contextPaths = (Array.isArray(rawPaths) ? rawPaths : rawPaths ? [rawPaths] : []).filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
+    response.json(await discoverProjectRules(contextPaths));
+  })
+);
+
+app.post(
+  "/api/commands/policy",
+  asyncRoute(async (request, response) => {
+    const command = typeof request.body?.command === "string" ? request.body.command : "";
+
+    if (!command.trim()) {
+      throw new HttpError(400, "command is required");
+    }
+
+    response.json({ policy: evaluateCommandPolicy(command) });
+  })
+);
+
 app.post(
   "/api/commands/run",
   asyncRoute(async (request, response) => {
-    const { command, cwd, chatId } = request.body as Partial<RunCommandRequest>;
+    const { command, cwd, chatId, taskSessionId, confirmed } = request.body as Partial<RunCommandRequest>;
 
     if (!command?.trim()) {
       throw new HttpError(400, "command is required");
     }
 
-    response.json({ result: await runProjectCommand(command, cwd, chatId) });
+    const result = await runProjectCommand(command, cwd, chatId, Boolean(confirmed));
+    await addTaskSessionCommand(taskSessionId, result.command);
+    await appendTaskSessionStep(taskSessionId, createAgentStep({ type: "command", command: result.command, status: result.status === "success" || result.status === "running" ? "success" : "failed", result }));
+    await advanceTaskPlanProgress(taskSessionId, result.status === "success" || result.status === "running" ? "validation_success" : "validation_failed");
+    response.json({ result });
+  })
+);
+
+app.post(
+  "/api/ai/validate-and-fix",
+  asyncRoute(async (request, response) => {
+    const { command, selectedPath, taskSessionId, attempts, maxAttempts, confirmed } = request.body as Partial<AutoValidationRequest>;
+
+    if (!command?.trim()) {
+      throw new HttpError(400, "command is required");
+    }
+
+    response.json(
+      await runAutoValidation({
+        command,
+        selectedPath,
+        taskSessionId,
+        attempts,
+        maxAttempts,
+        confirmed
+      })
+    );
   })
 );
 
@@ -412,23 +255,49 @@ app.post(
       throw new HttpError(400, "userRequest is required");
     }
 
+    const taskSession = await createTaskSession(userRequest.trim());
+    const plannedTaskSession = await initializeTaskPlan(taskSession, {
+      intent: "edit",
+      confidence: 1,
+      normalizedGoal: userRequest.trim(),
+      reason: "Direct edit endpoint"
+    }, { forceApproval: false });
     const agentSteps: AgentStep[] = [];
-    const patchResponse = await createEditPatchResponse(filePath, userRequest, (step) => agentSteps.push(step));
+    const taskStepWrites: Promise<unknown>[] = [];
+    const pushAgentStep = (step: AgentStep) => {
+      agentSteps.push(step);
+      taskStepWrites.push(appendTaskSessionStep(taskSession.id, step));
+    };
 
-    response.json({
-      ...patchResponse,
-      agentSteps
-    });
+    try {
+      const patchResponse = await createEditPatchResponse(filePath, userRequest, pushAgentStep, taskSession.id);
+      await advanceTaskPlanProgress(taskSession.id, "patch_generated");
+      await Promise.all(taskStepWrites);
+      response.json({
+        ...patchResponse,
+        taskSessionId: plannedTaskSession?.id || taskSession.id,
+        agentSteps
+      });
+    } catch (error) {
+      await Promise.allSettled(taskStepWrites);
+      await advanceTaskPlanProgress(taskSession.id, "task_failed");
+      await updateTaskSessionStatus(taskSession.id, "failed");
+      throw error;
+    }
   })
 );
 
 app.post("/api/ai/generate-edit/stream", async (request, response) => {
   let completed = false;
   let clientClosed = false;
+  let taskSessionId: string | null = null;
+  const streamRunId = createStreamRunId("edit-stream");
 
   response.on("close", () => {
     if (completed) return;
     clientClosed = true;
+    void advanceTaskPlanProgress(taskSessionId, "task_cancelled");
+    void updateTaskSessionStatus(taskSessionId, "cancelled");
   });
 
   const sendEvent = (event: string, data: unknown) => {
@@ -439,10 +308,20 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
 
   try {
     const { path: filePath, userRequest } = request.body as Partial<GenerateEditRequest>;
+    logStreamRoute(streamRunId, "start", { filePath: filePath || null, hasUserRequest: Boolean(userRequest) });
 
     if (!userRequest) {
       throw new HttpError(400, "userRequest is required");
     }
+
+    const taskSession = await createTaskSession(userRequest.trim());
+    taskSessionId = taskSession.id;
+    const plannedTaskSession = await initializeTaskPlan(taskSession, {
+      intent: "edit",
+      confidence: 1,
+      normalizedGoal: userRequest.trim(),
+      reason: "Direct edit stream endpoint"
+    }, { forceApproval: false });
 
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -452,24 +331,56 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
     });
 
     const agentSteps: AgentStep[] = [];
-    const patchResponse = await createEditPatchResponse(filePath, userRequest, (step) => {
+    const taskStepWrites: Promise<unknown>[] = [];
+    const pushAgentStep = (step: AgentStep) => {
       agentSteps.push(step);
+      taskStepWrites.push(appendTaskSessionStep(taskSession.id, step));
       sendEvent("agent_step", { step });
+    };
+
+    sendEvent("task_session", { session: plannedTaskSession || taskSession });
+
+    pushAgentStep({
+      id: `${streamRunId}:start`,
+      createdAt: Date.now(),
+      type: "message",
+      content: filePath ? `准备编辑：${filePath}` : "准备处理工作区编辑请求"
+    });
+
+    const patchResponse = await createEditPatchResponse(filePath, userRequest, (step) => {
+      pushAgentStep(step);
+    }, taskSession.id);
+    const progressedTaskSession = await advanceTaskPlanProgress(taskSession.id, "patch_generated");
+
+    pushAgentStep({
+      id: `${streamRunId}:done`,
+      createdAt: Date.now(),
+      type: "message",
+      content: `已生成 ${patchResponse.files.length} 个文件的修改`
     });
 
     completed = true;
-    sendEvent("done", { patch: { ...patchResponse, agentSteps } });
+    await Promise.all(taskStepWrites);
+    logStreamRoute(streamRunId, "done", { patchId: patchResponse.patchId, files: patchResponse.files.map((file) => file.path) });
+    if (progressedTaskSession) {
+      sendEvent("task_session", { session: progressedTaskSession });
+    }
+    sendEvent("done", { patch: { ...patchResponse, taskSessionId: taskSession.id, agentSteps } });
     response.end();
   } catch (error) {
     completed = true;
     const message = error instanceof Error ? error.message : "Internal server error";
+    logStreamRoute(streamRunId, "error", { message });
     console.error(message);
+    await advanceTaskPlanProgress(taskSessionId, clientClosed ? "task_cancelled" : "task_failed");
+    await updateTaskSessionStatus(taskSessionId, clientClosed ? "cancelled" : "failed");
 
     if (!response.headersSent) {
       response.status(error instanceof HttpError ? error.status : 500).json({ error: message });
       return;
     }
 
+    sendEvent("agent_step", { step: createAgentStep({ type: "error", message }) });
     sendEvent("error", { error: message });
     response.end();
   }
@@ -479,6 +390,114 @@ app.get(
   "/api/ai/file-chat",
   asyncRoute(async (request, response) => {
     response.json({ messages: await getFileChatMessages(getChatKey(undefined, request.query)) });
+  })
+);
+
+app.get(
+  "/api/task-sessions",
+  asyncRoute(async (_request, response) => {
+    response.json({ sessions: await listTaskSessions() });
+  })
+);
+
+app.get(
+  "/api/task-sessions/:taskSessionId",
+  asyncRoute(async (request, response) => {
+    response.json({ session: await getTaskSession(String(request.params.taskSessionId || "")) });
+  })
+);
+
+app.post(
+  "/api/task-sessions/:taskSessionId/commands",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    const command = typeof request.body?.command === "string" ? request.body.command : "";
+    const result = request.body?.result;
+
+    if (!command.trim()) {
+      throw new HttpError(400, "command is required");
+    }
+
+    await addTaskSessionCommand(taskSessionId, command);
+    await appendTaskSessionStep(
+      taskSessionId,
+      createAgentStep({
+        type: "command",
+        command,
+        status: result?.status === "success" || result?.status === "running" ? "success" : result ? "failed" : "cancelled",
+        result: result || null
+      })
+    );
+    await advanceTaskPlanProgress(taskSessionId, result?.status === "success" || result?.status === "running" ? "validation_success" : "validation_failed");
+    response.json({ success: true });
+  })
+);
+
+app.post(
+  "/api/task-sessions/:taskSessionId/plan-items",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    const { title, note } = request.body as Partial<UpsertTaskPlanItemRequest>;
+
+    if (!title?.trim()) {
+      throw new HttpError(400, "计划标题不能为空");
+    }
+
+    const session = await addTaskPlanItem(taskSessionId, {
+      title,
+      status: parseTaskPlanStatus(request.body?.status),
+      note
+    });
+    response.json({ session });
+  })
+);
+
+app.post(
+  "/api/task-sessions/:taskSessionId/plan-items/rewrite",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    const { instruction } = request.body as Partial<RewriteTaskPlanRequest>;
+
+    if (!instruction?.trim()) {
+      throw new HttpError(400, "计划调整要求不能为空");
+    }
+
+    const session = await getTaskSession(taskSessionId);
+    response.json({ session: await rewriteTaskPlanWithInstruction(session, instruction.trim()) });
+  })
+);
+
+app.post(
+  "/api/task-sessions/:taskSessionId/plan/approve",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    response.json({ session: await approveTaskSessionPlan(taskSessionId) });
+  })
+);
+
+app.patch(
+  "/api/task-sessions/:taskSessionId/plan-items/:planItemId",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    const planItemId = String(request.params.planItemId || "");
+    const { title, note } = request.body as Partial<UpdateTaskPlanItemRequest>;
+
+    const session = await updateTaskPlanItem(taskSessionId, planItemId, {
+      title,
+      status: parseTaskPlanStatus(request.body?.status),
+      note
+    });
+    response.json({ session });
+  })
+);
+
+app.delete(
+  "/api/task-sessions/:taskSessionId/plan-items/:planItemId",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    const planItemId = String(request.params.planItemId || "");
+    const session = await deleteTaskPlanItem(taskSessionId, planItemId);
+    response.json({ session });
   })
 );
 
@@ -512,24 +531,45 @@ app.post(
       throw new HttpError(400, "userRequest is required");
     }
 
-    const contextFiles = await readChatContextFiles(getRequestedContextPaths(request.body as Partial<FileChatRequest>));
-    const history = await getFileChatMessages(chatKey);
-    const answer = await generateFileChatReply(contextFiles, history, userRequest.trim(), chatKey);
-    const messages = await appendFileChatTurn(chatKey, userRequest.trim(), answer);
+    const taskSession = await createTaskSession(userRequest.trim(), { chatId: chatKey });
 
-    response.json({ messages });
+    try {
+      const contextPaths = getRequestedContextPaths(request.body as Partial<FileChatRequest>);
+      const contextFiles = await readChatContextFiles(contextPaths);
+      await addTaskSessionFilesRead(taskSession.id, contextFiles.map((file) => file.path));
+      const history = await getFileChatMessages(chatKey);
+      const classification = await classifyAgentRequest(history, userRequest.trim());
+      await initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length });
+      const taskStepWrites: Promise<unknown>[] = [];
+      const answer = await generateFileChatReply(contextFiles, history, userRequest.trim(), chatKey, (step) => {
+        taskStepWrites.push(appendTaskSessionStep(taskSession.id, step));
+      });
+      const messages = await appendFileChatTurn(chatKey, userRequest.trim(), answer);
+      await Promise.all(taskStepWrites);
+      await advanceTaskPlanProgress(taskSession.id, "validation_success");
+      await updateTaskSessionStatus(taskSession.id, "success");
+
+      response.json({ messages, taskSessionId: taskSession.id });
+    } catch (error) {
+      await advanceTaskPlanProgress(taskSession.id, "task_failed");
+      await updateTaskSessionStatus(taskSession.id, "failed");
+      throw error;
+    }
   })
 );
 
 app.post("/api/ai/file-chat/stream", async (request, response) => {
   let completed = false;
   let clientClosed = false;
+  let taskSessionId: string | null = null;
   const controller = new AbortController();
 
   response.on("close", () => {
     if (completed) return;
     clientClosed = true;
     controller.abort();
+    void advanceTaskPlanProgress(taskSessionId, "task_cancelled");
+    void updateTaskSessionStatus(taskSessionId, "cancelled");
   });
 
   const sendEvent = (event: string, data: unknown) => {
@@ -539,14 +579,18 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
   };
 
   try {
-    const { userRequest, replayFromMessageId } = request.body as Partial<FileChatRequest>;
+    const { path: selectedPath, userRequest, replayFromMessageId, approvedTaskSessionId } = request.body as Partial<FileChatRequest>;
     const chatKey = requireChatKey(request.body as Partial<FileChatRequest>);
 
     if (!userRequest?.trim()) {
       throw new HttpError(400, "userRequest is required");
     }
 
-    const contextFiles = await readChatContextFiles(getRequestedContextPaths(request.body as Partial<FileChatRequest>));
+    const taskSession = approvedTaskSessionId ? await approveTaskSessionPlan(approvedTaskSessionId).then((session) => session || getTaskSession(approvedTaskSessionId)) : await createTaskSession(userRequest.trim(), { chatId: chatKey });
+    taskSessionId = taskSession.id;
+    const contextPaths = getRequestedContextPaths(request.body as Partial<FileChatRequest>);
+    const contextFiles = await readChatContextFiles(contextPaths);
+    await addTaskSessionFilesRead(taskSession.id, contextFiles.map((file) => file.path));
     const turn = await startFileChatTurn(chatKey, userRequest.trim(), replayFromMessageId);
 
     response.writeHead(200, {
@@ -558,7 +602,68 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
 
     sendEvent("user", { message: turn.userMessage });
     sendEvent("assistant_start", { message: turn.assistantMessage });
-    sendEvent("chat", { chatId: chatKey, historyCount: turn.history.length });
+    sendEvent("chat", { chatId: chatKey, historyCount: turn.history.length, taskSessionId: taskSession.id });
+    const taskStepWrites: Promise<unknown>[] = [];
+    const agentSteps: AgentStep[] = [];
+    const pushAgentStep = (step: AgentStep) => {
+      agentSteps.push(step);
+      taskStepWrites.push(appendTaskSessionStep(taskSession.id, step));
+      sendEvent("agent_step", { step });
+    };
+
+    const classification = await classifyAgentRequest(turn.history, userRequest.trim());
+    const plannedTaskSession = approvedTaskSessionId ? taskSession : await initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length, selectedPath });
+    sendEvent("task_session", { session: plannedTaskSession || taskSession });
+    pushAgentStep(
+      createAgentStep({
+        type: "message",
+        content: `Intent recognized: ${classification.intent} (${Math.round(classification.confidence * 100)}%). ${classification.reason || ""}`.trim()
+      })
+    );
+
+    if (!approvedTaskSessionId && plannedTaskSession?.planApproval?.status === "pending") {
+      const answer = "已根据你的需求生成执行计划。请先审阅右侧任务计划，确认后点击“批准执行”，我再开始修改代码。";
+      sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
+      const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
+
+      completed = true;
+      await Promise.all(taskStepWrites);
+      sendEvent("done", { messages });
+      response.end();
+      return;
+    }
+
+    if (shouldGeneratePatchForIntent(classification.intent)) {
+      const editRequest = buildContextualEditRequest(turn.history, userRequest.trim(), classification.normalizedGoal);
+
+      if (editRequest !== userRequest.trim()) {
+        await updateTaskSessionUserGoal(taskSession.id, editRequest);
+        pushAgentStep(
+          createAgentStep({
+            type: "message",
+            content: "Resolved request into a contextual edit goal from intent routing and recent conversation history."
+          })
+        );
+      }
+
+      const patch = await createEditPatchResponse(selectedPath, editRequest, pushAgentStep, taskSession.id);
+      const progressedTaskSession = await advanceTaskPlanProgress(taskSession.id, "patch_generated");
+      const changedFiles = patch.files.map((file) => `- ${file.path}`).join("\n");
+      const answer = [patch.summary, "", `已生成 ${patch.files.length} 个文件的修改，请在下方审核后应用：`, changedFiles].join("\n");
+      sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
+      const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
+
+      completed = true;
+      await Promise.all(taskStepWrites);
+      await updateTaskSessionStatus(taskSession.id, clientClosed ? "cancelled" : "success");
+      if (progressedTaskSession) {
+        sendEvent("task_session", { session: progressedTaskSession });
+      }
+      sendEvent("patch", { patch: { ...patch, taskSessionId: taskSession.id, agentSteps } });
+      sendEvent("done", { messages });
+      response.end();
+      return;
+    }
 
     const answer = await streamFileChatReply(
       contextFiles,
@@ -567,23 +672,32 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       (delta) => sendEvent("delta", { id: turn.assistantMessage.id, delta }),
       controller.signal,
       chatKey,
-      (step: AgentStep) => sendEvent("agent_step", { step })
+      pushAgentStep
     );
     const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
 
     completed = true;
+    await Promise.all(taskStepWrites);
+    const completedTaskSession = await advanceTaskPlanProgress(taskSession.id, "validation_success");
+    await updateTaskSessionStatus(taskSession.id, clientClosed ? "cancelled" : "success");
+    if (completedTaskSession) {
+      sendEvent("task_session", { session: completedTaskSession });
+    }
     sendEvent("done", { messages });
     response.end();
   } catch (error) {
     completed = true;
     const message = error instanceof Error ? error.message : "Internal server error";
     console.error(message);
+    await advanceTaskPlanProgress(taskSessionId, clientClosed ? "task_cancelled" : "task_failed");
+    await updateTaskSessionStatus(taskSessionId, clientClosed ? "cancelled" : "failed");
 
     if (!response.headersSent) {
       response.status(error instanceof HttpError ? error.status : 500).json({ error: message });
       return;
     }
 
+    sendEvent("agent_step", { step: createAgentStep({ type: "error", message }) });
     sendEvent("error", { error: message });
     response.end();
   }
@@ -616,7 +730,7 @@ app.delete(
 app.post(
   "/api/patch/apply",
   asyncRoute(async (request, response) => {
-    const { patchId } = request.body as Partial<ApplyPatchRequest>;
+    const { patchId, filePath } = request.body as Partial<ApplyPatchRequest>;
 
     if (!patchId) {
       throw new HttpError(400, "patchId is required");
@@ -628,7 +742,16 @@ app.post(
       throw new HttpError(404, "Patch not found");
     }
 
-    for (const file of patch.files) {
+    const normalizedFilePath = filePath ? normalizePatchPath(filePath) : null;
+    const targetFiles = normalizedFilePath
+      ? patch.files.filter((file) => normalizePatchPath(file.path) === normalizedFilePath)
+      : patch.files;
+
+    if (!targetFiles.length) {
+      throw new HttpError(404, "Patch file not found");
+    }
+
+    for (const file of targetFiles) {
       if (file.status === "create") {
         if (await workspacePathExists(file.path)) {
           throw new HttpError(409, `${file.path} already exists`);
@@ -639,16 +762,66 @@ app.post(
       const currentContent = await readWorkspaceFile(file.path);
 
       if (currentContent !== file.oldContent) {
-        throw new HttpError(409, `${file.path} has changed since patch was generated`);
+        throw new HttpError(409, `${file.path} has changed since patch was generated. Regenerate the patch before applying.`);
       }
     }
 
-    await Promise.all([
-      ...patch.files.filter((file) => file.status === "modify").map((file) => writeWorkspaceFile(file.path, file.newContent)),
-      ...patch.files.filter((file) => file.status === "create").map((file) => createWorkspaceFile(file.path, file.newContent))
-    ]);
-    deletePendingPatch(patch.patchId);
+    const checkpoint = await createCheckpoint(patch.patchId, targetFiles);
 
+    await Promise.all([
+      ...targetFiles.filter((file) => file.status === "modify").map((file) => writeWorkspaceFile(file.path, file.newContent)),
+      ...targetFiles.filter((file) => file.status === "create").map((file) => createWorkspaceFile(file.path, file.newContent))
+    ]);
+
+    for (const file of targetFiles) {
+      const writtenContent = await readWorkspaceFile(file.path);
+
+      if (writtenContent !== file.newContent) {
+        throw new HttpError(500, `${file.path} was not written correctly. Apply the patch again after refreshing the workspace.`);
+      }
+    }
+
+    await addTaskSessionFilesChanged(patch.taskSessionId, targetFiles.map((file) => file.path));
+    await addTaskSessionCheckpoint(patch.taskSessionId, checkpoint.id);
+    await advanceTaskPlanProgress(patch.taskSessionId, "patch_applied");
+
+    if (filePath) {
+      const remainingPatch = removePendingPatchFile(patch.patchId, filePath);
+
+      if (!remainingPatch && !patch.commandsToRun?.length) {
+        await advanceTaskPlanProgress(patch.taskSessionId, "validation_success");
+        await updateTaskSessionStatus(patch.taskSessionId, "success");
+      }
+    } else {
+      deletePendingPatch(patch.patchId);
+
+      if (!patch.commandsToRun?.length) {
+        await advanceTaskPlanProgress(patch.taskSessionId, "validation_success");
+        await updateTaskSessionStatus(patch.taskSessionId, "success");
+      }
+    }
+
+    response.json({ success: true, checkpoint });
+  })
+);
+
+app.get(
+  "/api/checkpoints/:checkpointId",
+  asyncRoute(async (request, response) => {
+    response.json({ checkpoint: await getCheckpoint(String(request.params.checkpointId || "")) });
+  })
+);
+
+app.post(
+  "/api/checkpoints/rollback",
+  asyncRoute(async (request, response) => {
+    const { checkpointId } = request.body as Partial<RollbackCheckpointRequest>;
+
+    if (!checkpointId) {
+      throw new HttpError(400, "checkpointId is required");
+    }
+
+    await rollbackCheckpoint(checkpointId);
     response.json({ success: true });
   })
 );
@@ -656,13 +829,38 @@ app.post(
 app.post(
   "/api/patch/reject",
   asyncRoute(async (request, response) => {
-    const { patchId } = request.body as Partial<RejectPatchRequest>;
+    const { patchId, filePath } = request.body as Partial<RejectPatchRequest>;
 
     if (!patchId) {
       throw new HttpError(400, "patchId is required");
     }
 
-    deletePendingPatch(patchId);
+    if (filePath) {
+      const patch = getPendingPatch(patchId);
+
+      if (!patch) {
+        throw new HttpError(404, "Patch not found");
+      }
+
+      const normalizedFilePath = normalizePatchPath(filePath);
+
+      if (!patch.files.some((file) => normalizePatchPath(file.path) === normalizedFilePath)) {
+        throw new HttpError(404, "Patch file not found");
+      }
+
+      const remainingPatch = removePendingPatchFile(patchId, filePath);
+
+      if (!remainingPatch) {
+        await advanceTaskPlanProgress(patch.taskSessionId, "task_cancelled");
+        await updateTaskSessionStatus(patch.taskSessionId, "cancelled");
+      }
+    } else {
+      const patch = getPendingPatch(patchId);
+      deletePendingPatch(patchId);
+      await advanceTaskPlanProgress(patch?.taskSessionId, "task_cancelled");
+      await updateTaskSessionStatus(patch?.taskSessionId, "cancelled");
+    }
+
     response.json({ success: true });
   })
 );
@@ -676,6 +874,8 @@ app.use((error: unknown, _request: Request, response: Response, _next: NextFunct
 });
 
 await initializeWorkspaceRoot();
+await ensureGlobalRulesDirectory();
+await ensureProjectRulesDirectory();
 attachTerminalServer(server);
 
 server.listen(config.serverPort, () => {

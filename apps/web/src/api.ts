@@ -11,20 +11,48 @@ export type ReadFileResponse = {
 };
 
 export type GenerateEditResponse = {
+  taskSessionId?: string;
   patchId: string;
   summary: string;
   files: PatchFileChange[];
+  commandsToRun?: string[];
   oldContent: string;
   newContent: string;
   diffHtml: string;
   agentSteps?: AgentStep[];
 };
 
+export type AutoValidationResponse = {
+  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached";
+  command: string;
+  attempts: number;
+  maxAttempts: number;
+  policy: CommandPolicyResult;
+  result?: CommandResult;
+  patch?: GenerateEditResponse;
+  failureSummary?: string;
+  agentSteps: AgentStep[];
+};
+
+export type Checkpoint = {
+  id: string;
+  taskId: string;
+  createdAt: number;
+  files: {
+    filePath: string;
+    beforeContent: string;
+    afterContent: string;
+    beforeExists?: boolean;
+  }[];
+};
+
 export type PatchFileChange = {
   path: string;
+  filePath: string;
   status: "create" | "modify";
   oldContent: string;
   newContent: string;
+  summary: string;
   diffHtml: string;
 };
 
@@ -37,9 +65,83 @@ export type FileChatMessage = {
 
 export type AgentStep = {
   id: string;
-  type: "search" | "read";
+  createdAt: number;
+} & (
+  | {
+      type: "message";
+      content: string;
+    }
+  | {
+      type: "tool_call";
+      toolName: string;
+      input: unknown;
+    }
+  | {
+      type: "tool_result";
+      toolName: string;
+      output: unknown;
+    }
+  | {
+      type: "edit";
+      files: string[];
+    }
+  | {
+      type: "command";
+      command: string;
+      policy?: CommandPolicyResult;
+      status?: "suggested" | "running" | "success" | "failed" | "blocked" | "cancelled";
+      result?: CommandResult | null;
+    }
+  | {
+      type: "error";
+      message: string;
+    }
+);
+
+export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export type TaskPlanItem = {
+  id: string;
   title: string;
-  detail: string;
+  status: TaskPlanItemStatus;
+  note?: string;
+  evidence?: {
+    stepIds: string[];
+    files: string[];
+    commands: string[];
+  };
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TaskPlanApproval = {
+  required: boolean;
+  status: "not_required" | "pending" | "approved";
+  requestedAt?: number;
+  approvedAt?: number;
+};
+
+export type TaskSession = {
+  id: string;
+  userGoal: string;
+  chatId?: string;
+  messageIds?: string[];
+  status: "running" | "success" | "failed" | "cancelled";
+  filesRead: string[];
+  filesChanged: string[];
+  commandsRun: string[];
+  steps: AgentStep[];
+  planItems?: TaskPlanItem[];
+  planApproval?: TaskPlanApproval;
+  checkpointIds: string[];
+  gitCommits?: {
+    hash: string;
+    message: string;
+    files: string[];
+    createdAt: number;
+  }[];
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type FileChatHistoryItem = {
@@ -51,6 +153,7 @@ export type FileChatHistoryItem = {
 
 export type FileChatResponse = {
   messages: FileChatMessage[];
+  taskSessionId?: string;
 };
 
 export type FileChatHistoriesResponse = {
@@ -80,6 +183,24 @@ export type ProjectCommand = {
   dependencyState?: "installed" | "missing" | "unknown";
 };
 
+export type ProjectRule = {
+  path: string;
+  scope: "global" | "project" | "legacy";
+  source: "agents" | "cursor" | "windsurf" | "mini-ai";
+  title: string;
+  content: string;
+  globs: string[];
+  alwaysApply: boolean;
+  active: boolean;
+  truncated: boolean;
+};
+
+export type ProjectRulesResponse = {
+  rules: ProjectRule[];
+  combinedInstructions: string | null;
+  supportedFiles: string[];
+};
+
 export type CommandResult = {
   command: string;
   chatId?: string;
@@ -87,8 +208,19 @@ export type CommandResult = {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  summary?: string;
+  status?: "success" | "failed" | "running" | "timeout";
+  detectedUrl?: string;
+  outputTruncated?: boolean;
   startedAt: string;
   finishedAt: string;
+};
+
+export type CommandRiskLevel = "safe" | "confirm" | "blocked";
+
+export type CommandPolicyResult = {
+  level: CommandRiskLevel;
+  reason: string;
 };
 
 export type CommandsResponse = {
@@ -96,16 +228,23 @@ export type CommandsResponse = {
   results: CommandResult[];
 };
 
+export type TaskSessionsResponse = {
+  sessions: TaskSession[];
+};
+
 export type FileChatStreamEvent =
   | { event: "user"; data: { message: FileChatMessage } }
   | { event: "assistant_start"; data: { message: FileChatMessage } }
-  | { event: "chat"; data: { chatId: string; historyCount: number } }
+  | { event: "chat"; data: { chatId: string; historyCount: number; taskSessionId?: string } }
+  | { event: "task_session"; data: { session: TaskSession } }
   | { event: "agent_step"; data: { step: AgentStep } }
+  | { event: "patch"; data: { patch: GenerateEditResponse } }
   | { event: "delta"; data: { id: string; delta: string } }
   | { event: "done"; data: { messages: FileChatMessage[] } }
   | { event: "error"; data: { error: string } };
 
 export type GenerateEditStreamEvent =
+  | { event: "task_session"; data: { session: TaskSession } }
   | { event: "agent_step"; data: { step: AgentStep } }
   | { event: "done"; data: { patch: GenerateEditResponse } }
   | { event: "error"; data: { error: string } };
@@ -170,10 +309,32 @@ export function fetchProjectCommands() {
   return request<CommandsResponse>("/api/commands");
 }
 
-export function runProjectCommand(command: string, cwd?: string, chatId?: string) {
+export function fetchProjectRules(paths: string[] = []) {
+  const query = paths.map((path) => `path=${encodeURIComponent(path)}`).join("&");
+  return request<ProjectRulesResponse>(`/api/project-rules${query ? `?${query}` : ""}`);
+}
+
+export function fetchCommandPolicy(command: string) {
+  return request<{ policy: CommandPolicyResult }>("/api/commands/policy", {
+    method: "POST",
+    body: JSON.stringify({ command })
+  });
+}
+
+export function runProjectCommand(command: string, cwd?: string, chatId?: string, confirmed = false, taskSessionId?: string | null) {
   return request<{ result: CommandResult }>("/api/commands/run", {
     method: "POST",
-    body: JSON.stringify({ command, cwd, chatId })
+    body: JSON.stringify({ command, cwd, chatId, confirmed, taskSessionId })
+  });
+}
+
+export function validateAndFix(command: string, options: { selectedPath?: string | null; taskSessionId?: string | null; attempts?: number; maxAttempts?: number; confirmed?: boolean } = {}) {
+  return request<AutoValidationResponse>("/api/ai/validate-and-fix", {
+    method: "POST",
+    body: JSON.stringify({
+      command,
+      ...options
+    })
   });
 }
 
@@ -203,7 +364,7 @@ export async function streamGenerateEdit(path: string | null, userRequest: strin
 
   if (!response.ok || !response.body) {
     const data = await response.json().catch(() => null);
-    throw new Error(data?.error || `璇锋眰澶辫触锛岀姸鎬佺爜 ${response.status}`);
+    throw new Error(data?.error || `请求失败，状态码 ${response.status}`);
   }
 
   const reader = response.body.getReader();
@@ -239,6 +400,55 @@ export function fetchFileChatHistories() {
   return request<FileChatHistoriesResponse>("/api/ai/file-chat/histories");
 }
 
+export function fetchTaskSessions() {
+  return request<TaskSessionsResponse>("/api/task-sessions");
+}
+
+export function fetchTaskSession(taskSessionId: string) {
+  return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}`);
+}
+
+export function recordTaskSessionCommand(taskSessionId: string, command: string, result?: CommandResult | null) {
+  return request<{ success: boolean }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/commands`, {
+    method: "POST",
+    body: JSON.stringify({ command, result })
+  });
+}
+
+export function createTaskPlanItem(taskSessionId: string, title: string, status: TaskPlanItemStatus = "pending", note = "") {
+  return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/plan-items`, {
+    method: "POST",
+    body: JSON.stringify({ title, status, note })
+  });
+}
+
+export function updateTaskPlanItem(taskSessionId: string, planItemId: string, updates: { title?: string; status?: TaskPlanItemStatus; note?: string }) {
+  return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/plan-items/${encodeURIComponent(planItemId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates)
+  });
+}
+
+export function deleteTaskPlanItem(taskSessionId: string, planItemId: string) {
+  return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/plan-items/${encodeURIComponent(planItemId)}`, {
+    method: "DELETE"
+  });
+}
+
+export function rewriteTaskPlan(taskSessionId: string, instruction: string) {
+  return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/plan-items/rewrite`, {
+    method: "POST",
+    body: JSON.stringify({ instruction })
+  });
+}
+
+export function approveTaskPlan(taskSessionId: string) {
+  return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/plan/approve`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
 export function deleteFileChatHistory(path: string) {
   return request<FileChatHistoriesResponse>(`/api/ai/file-chat/histories?path=${encodeURIComponent(path)}`, {
     method: "DELETE"
@@ -252,14 +462,14 @@ export function sendFileChatMessage(userRequest: string, paths: string[] = [], c
   });
 }
 
-export async function streamFileChatMessage(userRequest: string, paths: string[], chatId: string, onEvent: (event: FileChatStreamEvent) => void, signal?: AbortSignal, replayFromMessageId?: string) {
+export async function streamFileChatMessage(userRequest: string, paths: string[], chatId: string, onEvent: (event: FileChatStreamEvent) => void, signal?: AbortSignal, replayFromMessageId?: string, path?: string | null, approvedTaskSessionId?: string) {
   const response = await fetch("/api/ai/file-chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     signal,
-    body: JSON.stringify({ chatId, paths, userRequest, replayFromMessageId })
+    body: JSON.stringify({ chatId, path, paths, userRequest, replayFromMessageId, approvedTaskSessionId })
   });
 
   if (!response.ok || !response.body) {
@@ -310,16 +520,27 @@ export function branchFileChatMessage(chatId: string, messageId: string) {
   });
 }
 
-export function applyPatch(patchId: string) {
-  return request<{ success: boolean }>("/api/patch/apply", {
+export function applyPatch(patchId: string, filePath?: string) {
+  return request<{ success: boolean; checkpoint: Checkpoint }>("/api/patch/apply", {
     method: "POST",
-    body: JSON.stringify({ patchId })
+    body: JSON.stringify({ patchId, filePath })
   });
 }
 
-export function rejectPatch(patchId: string) {
+export function fetchCheckpoint(checkpointId: string) {
+  return request<{ checkpoint: Checkpoint }>(`/api/checkpoints/${encodeURIComponent(checkpointId)}`);
+}
+
+export function rollbackCheckpoint(checkpointId: string) {
+  return request<{ success: boolean }>("/api/checkpoints/rollback", {
+    method: "POST",
+    body: JSON.stringify({ checkpointId })
+  });
+}
+
+export function rejectPatch(patchId: string, filePath?: string) {
   return request<{ success: boolean }>("/api/patch/reject", {
     method: "POST",
-    body: JSON.stringify({ patchId })
+    body: JSON.stringify({ patchId, filePath })
   });
 }

@@ -48,6 +48,24 @@ export type ProjectCommand = PackageScript & {
   dependencyState?: "installed" | "missing" | "unknown";
 };
 
+export type ProjectRule = {
+  path: string;
+  scope: "global" | "project" | "legacy";
+  source: "agents" | "cursor" | "windsurf" | "mini-ai";
+  title: string;
+  content: string;
+  globs: string[];
+  alwaysApply: boolean;
+  active: boolean;
+  truncated: boolean;
+};
+
+export type ProjectRulesResponse = {
+  rules: ProjectRule[];
+  combinedInstructions: string | null;
+  supportedFiles: string[];
+};
+
 export type CommandResult = {
   command: string;
   chatId?: string;
@@ -55,14 +73,36 @@ export type CommandResult = {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  summary?: string;
+  status?: "success" | "failed" | "running" | "timeout";
+  detectedUrl?: string;
+  outputTruncated?: boolean;
   startedAt: string;
   finishedAt: string;
+};
+
+export type CommandRiskLevel = "safe" | "confirm" | "blocked";
+
+export type CommandPolicyResult = {
+  level: CommandRiskLevel;
+  reason: string;
 };
 
 export type RunCommandRequest = {
   command: string;
   chatId?: string;
+  taskSessionId?: string;
   cwd?: string;
+  confirmed?: boolean;
+};
+
+export type AutoValidationRequest = {
+  command: string;
+  selectedPath?: string | null;
+  taskSessionId?: string | null;
+  attempts?: number;
+  maxAttempts?: number;
+  confirmed?: boolean;
 };
 
 export type FileChatMessage = {
@@ -90,6 +130,7 @@ export type FileChatRequest = {
   paths?: string[];
   userRequest: string;
   replayFromMessageId?: string;
+  approvedTaskSessionId?: string;
 };
 
 export type FileChatResponse = {
@@ -97,50 +138,189 @@ export type FileChatResponse = {
 };
 
 export type GenerateEditResponse = {
+  taskSessionId?: string;
   patchId: string;
   summary: string;
   files: PatchFileChange[];
+  commandsToRun?: string[];
   diffHtml: string;
   oldContent: string;
   newContent: string;
-  agentSteps?: Array<{
-    id: string;
-    type: "search" | "read";
-    title: string;
-    detail: string;
-  }>;
+  agentSteps?: AgentStep[];
+};
+
+export type AutoValidationResponse = {
+  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached";
+  command: string;
+  attempts: number;
+  maxAttempts: number;
+  policy: CommandPolicyResult;
+  result?: CommandResult;
+  patch?: GenerateEditResponse;
+  failureSummary?: string;
+  agentSteps: AgentStep[];
+};
+
+export type AgentStep = {
+  id: string;
+  createdAt: number;
+} & (
+  | {
+      type: "message";
+      content: string;
+    }
+  | {
+      type: "tool_call";
+      toolName: string;
+      input: unknown;
+    }
+  | {
+      type: "tool_result";
+      toolName: string;
+      output: unknown;
+    }
+  | {
+      type: "edit";
+      files: string[];
+    }
+  | {
+      type: "command";
+      command: string;
+      policy?: CommandPolicyResult;
+      status?: "suggested" | "running" | "success" | "failed" | "blocked" | "cancelled";
+      result?: CommandResult | null;
+    }
+  | {
+      type: "error";
+      message: string;
+    }
+);
+
+export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export type TaskPlanItem = {
+  id: string;
+  title: string;
+  status: TaskPlanItemStatus;
+  note?: string;
+  evidence?: {
+    stepIds: string[];
+    files: string[];
+    commands: string[];
+  };
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TaskPlanApproval = {
+  required: boolean;
+  status: "not_required" | "pending" | "approved";
+  requestedAt?: number;
+  approvedAt?: number;
+};
+
+export type TaskSession = {
+  id: string;
+  userGoal: string;
+  chatId?: string;
+  messageIds?: string[];
+  status: "running" | "success" | "failed" | "cancelled";
+  filesRead: string[];
+  filesChanged: string[];
+  commandsRun: string[];
+  steps: AgentStep[];
+  planItems?: TaskPlanItem[];
+  planApproval?: TaskPlanApproval;
+  checkpointIds: string[];
+  gitCommits?: {
+    hash: string;
+    message: string;
+    files: string[];
+    createdAt: number;
+  }[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type UpsertTaskPlanItemRequest = {
+  id?: string;
+  title: string;
+  status?: TaskPlanItemStatus;
+  note?: string;
+};
+
+export type UpdateTaskPlanItemRequest = {
+  title?: string;
+  status?: TaskPlanItemStatus;
+  note?: string;
+};
+
+export type RewriteTaskPlanRequest = {
+  instruction: string;
 };
 
 export type ApplyPatchRequest = {
   patchId: string;
+  filePath?: string;
 };
 
 export type ApplyPatchResponse = {
   success: boolean;
+  checkpoint: Checkpoint;
 };
 
 export type RejectPatchRequest = {
   patchId: string;
+  filePath?: string;
 };
 
-export type AiEditResult = {
+export type FilePatch = {
+  filePath: string;
+  oldContent: string;
+  newContent: string;
   summary: string;
-  files: Array<{
-    path: string;
-    newContent: string;
-  }> | null;
 };
+
+export type Checkpoint = {
+  id: string;
+  taskId: string;
+  createdAt: number;
+  files: {
+    filePath: string;
+    beforeContent: string;
+    afterContent: string;
+    beforeExists?: boolean;
+  }[];
+};
+
+export type RollbackCheckpointRequest = {
+  checkpointId: string;
+};
+
+export type EditPlan = {
+  summary: string;
+  status?: "patch" | "needs_context" | "plan" | "blocked";
+  patches: FilePatch[] | null;
+  nextSearchKeywords?: string[];
+  commandsToRun?: string[];
+};
+
+export type AiEditResult = EditPlan;
 
 export type PatchFileChange = {
   path: string;
+  filePath: string;
   status: "create" | "modify";
   oldContent: string;
   newContent: string;
+  summary: string;
   diffHtml: string;
 };
 
 export type PendingPatch = {
   patchId: string;
+  taskSessionId?: string;
   files: PatchFileChange[];
+  commandsToRun?: string[];
   createdAt: number;
 };

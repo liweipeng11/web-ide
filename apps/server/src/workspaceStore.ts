@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
+import { readTextWithLegacyFallback } from "./statePaths.js";
 
 type PersistedState = {
   workspaceRoot?: string | null;
@@ -14,12 +15,7 @@ export function getWorkspaceRoot() {
 }
 
 async function readPersistedState(): Promise<PersistedState> {
-  const raw = await fs.readFile(config.stateFilePath, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  });
+  const raw = await readTextWithLegacyFallback(config.stateFilePath, config.legacyStateFilePath);
 
   if (!raw) {
     return {};
@@ -76,8 +72,13 @@ async function validateWorkspaceRoot(nextWorkspaceRoot: string) {
   return resolved;
 }
 
-export async function setWorkspaceRoot(nextWorkspaceRoot: string) {
+export async function setWorkspaceRoot(nextWorkspaceRoot: string, options: { persist?: boolean } = {}) {
   workspaceRoot = await validateWorkspaceRoot(nextWorkspaceRoot);
-  await persistWorkspaceRoot(workspaceRoot);
+
+  // 测试可以只切换进程内工作区，避免覆盖真实应用保存的项目地址。
+  if (options.persist !== false) {
+    await persistWorkspaceRoot(workspaceRoot);
+  }
+
   return workspaceRoot;
 }

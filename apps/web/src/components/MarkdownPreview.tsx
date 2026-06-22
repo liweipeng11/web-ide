@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 
 type Block =
   | { type: "code"; language: string; content: string }
@@ -11,8 +11,23 @@ type Props = {
   content: string;
 };
 
-export default function MarkdownPreview({ content }: Props) {
-  const blocks = parseMarkdown(content);
+const maxRenderedContentLength = 12_000;
+
+function MarkdownPreview({ content }: Props) {
+  const contentForRender = useMemo(
+    () =>
+      content.length > maxRenderedContentLength
+        ? [
+            content.slice(0, 4_000),
+            "",
+            `... content truncated for display (${content.length - maxRenderedContentLength} characters omitted) ...`,
+            "",
+            content.slice(-8_000)
+          ].join("\n")
+        : content,
+    [content]
+  );
+  const blocks = useMemo(() => parseMarkdown(contentForRender), [contentForRender]);
 
   return (
     <div className="markdown-preview">
@@ -50,6 +65,8 @@ export default function MarkdownPreview({ content }: Props) {
     </div>
   );
 }
+
+export default memo(MarkdownPreview);
 
 function parseMarkdown(content: string): Block[] {
   const lines = content.replace(/\r\n/g, "\n").split("\n");

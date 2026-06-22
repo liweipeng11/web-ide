@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { config } from "./config.js";
+import { appStatePath, legacyAppStatePath, readTextWithLegacyFallback } from "./statePaths.js";
 import type { CommandResult } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
@@ -8,7 +8,8 @@ type CommandResultStore = {
   results: Record<string, CommandResult[]>;
 };
 
-const commandResultStorePath = path.join(path.dirname(config.stateFilePath), "command-results.json");
+const commandResultStorePath = appStatePath("command-results.json");
+const legacyCommandResultStorePath = legacyAppStatePath("command-results.json");
 const maxStoredResultsPerWorkspace = 20;
 
 function workspaceKey(workspaceRoot = getWorkspaceRoot()) {
@@ -16,13 +17,7 @@ function workspaceKey(workspaceRoot = getWorkspaceRoot()) {
 }
 
 async function readCommandResultStore(): Promise<CommandResultStore> {
-  const raw = await fs.readFile(commandResultStorePath, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") {
-      return null;
-    }
-
-    throw error;
-  });
+  const raw = await readTextWithLegacyFallback(commandResultStorePath, legacyCommandResultStorePath);
 
   if (!raw) {
     return { results: {} };
@@ -76,7 +71,7 @@ export function formatCommandFailureForPrompt(result: CommandResult | null) {
     return null;
   }
 
-  const errorLog = (result.stderr || result.stdout || "").slice(-6000);
+  const errorLog = (result.summary || result.stderr || result.stdout || "").slice(-6000);
 
   return [
     "最近执行命令：",

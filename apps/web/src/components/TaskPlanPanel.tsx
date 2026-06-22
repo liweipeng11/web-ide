@@ -1,0 +1,204 @@
+import { useEffect, useState } from "react";
+import type { TaskPlanItem, TaskPlanItemStatus, TaskSession } from "../api";
+import Icon from "./Icon";
+
+type Props = {
+  session: TaskSession | null;
+  loading: boolean;
+  disabled: boolean;
+  compact?: boolean;
+  onAddItem: (title: string) => Promise<void>;
+  onUpdateItem: (itemId: string, updates: { title?: string; status?: TaskPlanItemStatus; note?: string }) => Promise<void>;
+  onDeleteItem: (itemId: string) => Promise<void>;
+  onRewritePlan: (instruction: string) => Promise<void>;
+  onApprovePlan: () => Promise<void>;
+};
+
+const statusText: Record<TaskPlanItemStatus, string> = {
+  pending: "待处理",
+  in_progress: "进行中",
+  completed: "已完成",
+  blocked: "受阻"
+};
+
+// 计划状态集中定义，避免界面文案和状态值散落在多个分支里。
+const statusOptions: TaskPlanItemStatus[] = ["pending", "in_progress", "completed", "blocked"];
+
+function countByStatus(items: TaskPlanItem[], status: TaskPlanItemStatus) {
+  return items.filter((item) => item.status === status).length;
+}
+
+export default function TaskPlanPanel({ session, loading, disabled, compact = false, onAddItem, onUpdateItem, onDeleteItem, onRewritePlan, onApprovePlan }: Props) {
+  const [draftTitle, setDraftTitle] = useState("");
+  const [rewriteInstruction, setRewriteInstruction] = useState("");
+  const [editingItemId, setEditingItemId] = useState("");
+  const [editingTitle, setEditingTitle] = useState("");
+  const [editingNote, setEditingNote] = useState("");
+  const planItems = session?.planItems || [];
+  const canEdit = Boolean(session) && !disabled && !loading;
+  const completedCount = countByStatus(planItems, "completed");
+  const inProgressCount = countByStatus(planItems, "in_progress");
+  const blockedCount = countByStatus(planItems, "blocked");
+
+  useEffect(() => {
+    setEditingItemId("");
+    setEditingTitle("");
+    setEditingNote("");
+    setDraftTitle("");
+    setRewriteInstruction("");
+  }, [session?.id]);
+
+  function startEditing(item: TaskPlanItem) {
+    setEditingItemId(item.id);
+    setEditingTitle(item.title);
+    setEditingNote(item.note || "");
+  }
+
+  async function saveEditing(itemId: string) {
+    const nextTitle = editingTitle.trim();
+
+    if (!nextTitle) return;
+
+    await onUpdateItem(itemId, {
+      title: nextTitle,
+      note: editingNote.trim()
+    });
+    setEditingItemId("");
+    setEditingTitle("");
+    setEditingNote("");
+  }
+
+  async function addItem() {
+    const title = draftTitle.trim();
+
+    if (!title) return;
+
+    await onAddItem(title);
+    setDraftTitle("");
+  }
+
+  async function rewritePlan() {
+    const instruction = rewriteInstruction.trim();
+
+    if (!instruction) return;
+
+    await onRewritePlan(instruction);
+    setRewriteInstruction("");
+  }
+
+  return (
+    <section className={compact ? "task-plan-panel compact" : "task-plan-panel"}>
+      <div className="task-plan-heading">
+        <div>
+          <h3>任务计划</h3>
+          <span>
+            {planItems.length ? `${completedCount}/${planItems.length} 完成 · ${inProgressCount} 进行中 · ${blockedCount} 受阻` : session ? "暂无计划步骤" : "选择任务后可维护计划"}
+          </span>
+        </div>
+      </div>
+
+      {session?.planApproval?.status === "pending" && (
+        <div className="task-plan-approval">
+          <strong>计划等待批准</strong>
+          <p>确认后智能体会按当前计划继续执行代码修改。</p>
+          <button type="button" disabled={!canEdit} onClick={() => void onApprovePlan()}>
+            批准执行
+          </button>
+        </div>
+      )}
+
+      {session && (
+        <form
+          className="task-plan-rewrite"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void rewritePlan();
+          }}
+        >
+          <input value={rewriteInstruction} disabled={!canEdit} placeholder="用一句话调整计划，例如：把测试提前、删除第 3 步..." onChange={(event) => setRewriteInstruction(event.target.value)} />
+          <button type="submit" disabled={!canEdit || !rewriteInstruction.trim()}>
+            调整计划
+          </button>
+        </form>
+      )}
+
+      {session && (
+        <form
+          className="task-plan-add"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void addItem();
+          }}
+        >
+          <input value={draftTitle} disabled={!canEdit} placeholder="新增一个计划步骤..." onChange={(event) => setDraftTitle(event.target.value)} />
+          <button type="submit" className="icon-button" disabled={!canEdit || !draftTitle.trim()} title="添加计划步骤" aria-label="添加计划步骤">
+            <Icon name="send" />
+          </button>
+        </form>
+      )}
+
+      {planItems.length ? (
+        <ol className="task-plan-list">
+          {planItems.map((item) => {
+            const isEditing = editingItemId === item.id;
+
+            return (
+              <li key={item.id} className={`task-plan-item ${item.status}`}>
+                <select value={item.status} disabled={!canEdit} aria-label="计划状态" onChange={(event) => void onUpdateItem(item.id, { status: event.target.value as TaskPlanItemStatus })}>
+                  {statusOptions.map((status) => (
+                    <option key={status} value={status}>
+                      {statusText[status]}
+                    </option>
+                  ))}
+                </select>
+
+                {isEditing ? (
+                  <div className="task-plan-edit">
+                    <input value={editingTitle} disabled={!canEdit} onChange={(event) => setEditingTitle(event.target.value)} />
+                    <textarea value={editingNote} disabled={!canEdit} placeholder="备注，可选" onChange={(event) => setEditingNote(event.target.value)} />
+                    <div className="task-plan-actions">
+                      <button type="button" className="icon-button" disabled={!canEdit || !editingTitle.trim()} title="保存计划步骤" aria-label="保存计划步骤" onClick={() => void saveEditing(item.id)}>
+                        <Icon name="save" />
+                      </button>
+                      <button type="button" className="icon-button" disabled={loading} title="取消编辑" aria-label="取消编辑" onClick={() => setEditingItemId("")}>
+                        <Icon name="close" />
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="task-plan-content">
+                    <strong>{item.title}</strong>
+                    {item.note && <p>{item.note}</p>}
+                    {((item.evidence?.files.length || 0) > 0 || (item.evidence?.commands.length || 0) > 0) && (
+                      <div className="task-plan-evidence">
+                        {(item.evidence?.files || []).slice(0, 4).map((file) => (
+                          <code key={file}>{file}</code>
+                        ))}
+                        {(item.evidence?.commands || []).slice(0, 3).map((command) => (
+                          <code key={command}>{command}</code>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!isEditing && (
+                  <div className="task-plan-actions">
+                    <button type="button" className="icon-button" disabled={!canEdit} title="编辑计划步骤" aria-label="编辑计划步骤" onClick={() => startEditing(item)}>
+                      <Icon name="edit" />
+                    </button>
+                    <button type="button" className="icon-button" disabled={!canEdit} title="删除计划步骤" aria-label="删除计划步骤" onClick={() => void onDeleteItem(item.id)}>
+                      <Icon name="delete" />
+                    </button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <p className="task-plan-empty">{session ? "还没有计划步骤，可以先手动添加。后续 Agent Loop 会自动维护这里。" : "打开任务历史或开始一次智能体任务后，这里会显示计划。"}</p>
+      )}
+    </section>
+  );
+}

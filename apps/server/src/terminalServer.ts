@@ -1,4 +1,4 @@
-import os from "node:os";
+import path from "node:path";
 import pty, { type IPty } from "node-pty";
 import type { Server } from "node:http";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
@@ -21,6 +21,14 @@ function getShell() {
   }
 
   return process.env.ComSpec || "cmd.exe";
+}
+
+function getShellLabel(shell: string) {
+  if (process.platform !== "win32") {
+    return path.basename(shell);
+  }
+
+  return path.basename(shell).replace(/\.exe$/i, "");
 }
 
 function parseMessage(data: RawData): TerminalClientMessage | null {
@@ -92,7 +100,7 @@ export function attachTerminalServer(server: Server) {
       writeJson(socket, {
         type: "ready",
         cwd: workspaceRoot,
-        shell: os.platform() === "win32" ? shell.replace(/\.exe$/i, "") : shell
+        shell: getShellLabel(shell)
       });
 
       terminal.onData((data) => {
