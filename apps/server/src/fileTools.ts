@@ -120,6 +120,44 @@ export async function readWorkspaceFile(filePath: string, options: ResolveOption
   return fs.readFile(absolutePath, "utf8");
 }
 
+export type WorkspaceFileRange = {
+  content: string;
+  startLine: number;
+  endLine: number;
+  linesRead: number;
+  totalLines: number;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+};
+
+export async function readWorkspaceFileRange(filePath: string, startLine: number, endLine: number, options: ResolveOptions = {}): Promise<WorkspaceFileRange> {
+  if (!Number.isInteger(startLine) || startLine < 1) {
+    throw new HttpError(400, "startLine must be a positive integer");
+  }
+
+  if (!Number.isInteger(endLine) || endLine < startLine) {
+    throw new HttpError(400, "endLine must be an integer greater than or equal to startLine");
+  }
+
+  const content = await readWorkspaceFile(filePath, options);
+  const lines = content.split(/\r?\n/);
+  const totalLines = lines.length;
+  const boundedStartLine = Math.min(startLine, totalLines + 1);
+  const boundedEndLine = Math.min(endLine, totalLines);
+  const selectedLines = boundedStartLine <= boundedEndLine ? lines.slice(boundedStartLine - 1, boundedEndLine) : [];
+  const actualEndLine = selectedLines.length ? boundedStartLine + selectedLines.length - 1 : boundedStartLine - 1;
+
+  return {
+    content: selectedLines.join("\n"),
+    startLine: boundedStartLine,
+    endLine: actualEndLine,
+    linesRead: selectedLines.length,
+    totalLines,
+    hasMoreBefore: boundedStartLine > 1,
+    hasMoreAfter: actualEndLine < totalLines
+  };
+}
+
 export async function writeWorkspaceFile(filePath: string, content: string) {
   const absolutePath = safeResolve(filePath);
   const stat = await fs.stat(absolutePath).catch((error: NodeJS.ErrnoException) => {

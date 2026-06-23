@@ -1,4 +1,4 @@
-﻿.chat-composer {
+.chat-composer {
   position: relative;
 }
 
@@ -466,6 +466,54 @@
   margin: 0;
 }
 
+.task-plan-revisions {
+  border-top: 1px solid #edf1f5;
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+}
+
+.task-plan-revisions > strong {
+  color: #334155;
+  font-size: 11px;
+}
+
+.task-plan-revisions ul {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.task-plan-revisions li {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  display: grid;
+  gap: 3px;
+  padding: 7px;
+}
+
+.task-plan-revisions span {
+  color: #1f2d3d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.task-plan-revisions p {
+  color: #475569;
+  font-size: 10px;
+  line-height: 1.45;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-plan-revisions small {
+  color: #647181;
+  font-size: 9px;
+}
+
 .chat-empty {
   color: #647181;
   font-size: 11px;
@@ -854,4 +902,3 @@
   min-height: 72px;
   resize: vertical;
 }
-

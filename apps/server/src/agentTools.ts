@@ -1,6 +1,6 @@
 import { logAi } from "./aiHttp.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
-import { readWorkspaceFile } from "./fileTools.js";
+import { readWorkspaceFile, readWorkspaceFileRange } from "./fileTools.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
@@ -48,6 +48,7 @@ export type AgentToolRuntime = {
 const MAX_AUTO_READ_FILES = 5;
 const MAX_READ_FILE_LINES = 240;
 const MAX_READ_FILE_CHARS = 20_000;
+const MAX_READ_RANGE_LINES = 240;
 
 function uniquePush(values: string[], value: string) {
   if (value && !values.includes(value)) values.push(value);
@@ -58,6 +59,17 @@ function requiredString(args: Record<string, unknown>, name: string) {
 
   if (!value) {
     throw new Error(`${name} is required`);
+  }
+
+  return value;
+}
+
+function requiredPositiveInteger(args: Record<string, unknown>, name: string) {
+  const rawValue = args[name];
+  const value = typeof rawValue === "number" ? rawValue : typeof rawValue === "string" && rawValue.trim() ? Number(rawValue) : NaN;
+
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
   }
 
   return value;
@@ -181,6 +193,73 @@ const definitions: AgentToolDefinition[] = [
         truncated: value.truncated
       };
     }
+  },
+  {
+    name: "readFileRange",
+    description: "Read a specific 1-based inclusive line range from a workspace file. Use this when readFile is truncated or when you need a later section of a long file.",
+    parameters: {
+      type: "object",
+      properties: {
+        filePath: {
+          type: "string",
+          description: "Workspace-relative file path to read."
+        },
+        startLine: {
+          type: "integer",
+          minimum: 1,
+          description: "1-based first line to read."
+        },
+        endLine: {
+          type: "integer",
+          minimum: 1,
+          description: "1-based last line to read, inclusive. The server caps very large ranges."
+        }
+      },
+      required: ["filePath", "startLine", "endLine"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const filePath = requiredString(args, "filePath");
+      const startLine = requiredPositiveInteger(args, "startLine");
+      const requestedEndLine = requiredPositiveInteger(args, "endLine");
+      const endLine = Math.min(requestedEndLine, startLine + MAX_READ_RANGE_LINES - 1);
+
+      if (requestedEndLine < startLine) {
+        throw new Error("endLine must be greater than or equal to startLine");
+      }
+
+      if (!runtime.agentContext.filesRead.includes(filePath) && runtime.agentContext.filesRead.length >= MAX_AUTO_READ_FILES) {
+        throw new Error(`Automatic file read limit reached. You may read at most ${MAX_AUTO_READ_FILES} files.`);
+      }
+
+      const range = await readWorkspaceFileRange(filePath, startLine, endLine);
+      const charTruncated = range.content.length > MAX_READ_FILE_CHARS;
+      uniquePush(runtime.agentContext.filesRead, filePath);
+      uniquePush(runtime.agentContext.relevantFiles, filePath);
+
+      return {
+        filePath,
+        ...range,
+        content: charTruncated ? range.content.slice(0, MAX_READ_FILE_CHARS) : range.content,
+        requestedStartLine: startLine,
+        requestedEndLine,
+        truncated: charTruncated || requestedEndLine > endLine
+      };
+    },
+    summarize(result, cached) {
+      const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+      return {
+        filePath: value.filePath,
+        cached,
+        startLine: value.startLine,
+        endLine: value.endLine,
+        linesRead: value.linesRead,
+        totalLines: value.totalLines,
+        hasMoreBefore: value.hasMoreBefore,
+        hasMoreAfter: value.hasMoreAfter,
+        truncated: value.truncated
+      };
+    }
   }
 ];
 
@@ -208,6 +287,7 @@ function getCacheKey(toolName: string, args: Record<string, unknown>) {
   if (toolName === "inspectProject") return toolName;
   if (toolName === "searchCode") return `${toolName}:${String(args.query || "").trim().toLowerCase()}`;
   if (toolName === "readFile") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}`;
+  if (toolName === "readFileRange") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
   return `${toolName}:${JSON.stringify(args)}`;
 }
 
@@ -222,6 +302,10 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
 
   if (toolName === "readFile") {
     return `Use readFile to load workspace file "${String(args.filePath || "").trim()}" as context.`;
+  }
+
+  if (toolName === "readFileRange") {
+    return `Use readFileRange to load lines ${String(args.startLine || "?")} through ${String(args.endLine || "?")} from workspace file "${String(args.filePath || "").trim()}".`;
   }
 
   return `Use ${toolName}.`;

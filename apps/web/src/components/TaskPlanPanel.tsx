@@ -24,6 +24,26 @@ const statusText: Record<TaskPlanItemStatus, string> = {
 // 计划状态集中定义，避免界面文案和状态值散落在多个分支里。
 const statusOptions: TaskPlanItemStatus[] = ["pending", "in_progress", "completed", "blocked"];
 
+function getRevisionTriggerText(trigger: string) {
+  const triggerText: Record<string, string> = {
+    user: "用户调整",
+    agent: "智能体重规划",
+    validation: "验证反馈",
+    system: "系统记录"
+  };
+
+  return triggerText[trigger] || "计划调整";
+}
+
+function formatRevisionTime(timestamp: number) {
+  return new Date(timestamp).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 function countByStatus(items: TaskPlanItem[], status: TaskPlanItemStatus) {
   return items.filter((item) => item.status === status).length;
 }
@@ -35,6 +55,7 @@ export default function TaskPlanPanel({ session, loading, disabled, compact = fa
   const [editingTitle, setEditingTitle] = useState("");
   const [editingNote, setEditingNote] = useState("");
   const planItems = session?.planItems || [];
+  const planRevisions = session?.planRevisions || [];
   const canEdit = Boolean(session) && !disabled && !loading;
   const completedCount = countByStatus(planItems, "completed");
   const inProgressCount = countByStatus(planItems, "in_progress");
@@ -198,6 +219,23 @@ export default function TaskPlanPanel({ session, loading, disabled, compact = fa
         </ol>
       ) : (
         <p className="task-plan-empty">{session ? "还没有计划步骤，可以先手动添加。后续 Agent Loop 会自动维护这里。" : "打开任务历史或开始一次智能体任务后，这里会显示计划。"}</p>
+      )}
+
+      {planRevisions.length > 0 && (
+        <div className="task-plan-revisions" aria-label="计划修订记录">
+          <strong>计划修订</strong>
+          <ul>
+            {planRevisions.slice(0, 4).map((revision) => (
+              <li key={revision.id}>
+                <span>{getRevisionTriggerText(revision.trigger)}</span>
+                <p>{revision.reason}</p>
+                <small>
+                  {formatRevisionTime(revision.createdAt)} · {revision.beforeItems.length} 步变为 {revision.afterItems.length} 步
+                </small>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </section>
   );

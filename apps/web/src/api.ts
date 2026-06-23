@@ -114,6 +114,23 @@ export type TaskPlanItem = {
   updatedAt: number;
 };
 
+export type TaskPlanRevisionTrigger = "user" | "agent" | "validation" | "system";
+
+export type TaskPlanRevision = {
+  id: string;
+  trigger: TaskPlanRevisionTrigger;
+  reason: string;
+  beforeItems: {
+    title: string;
+    status: TaskPlanItemStatus;
+  }[];
+  afterItems: {
+    title: string;
+    status: TaskPlanItemStatus;
+  }[];
+  createdAt: number;
+};
+
 export type TaskPlanApproval = {
   required: boolean;
   status: "not_required" | "pending" | "approved";
@@ -132,6 +149,7 @@ export type TaskSession = {
   commandsRun: string[];
   steps: AgentStep[];
   planItems?: TaskPlanItem[];
+  planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
   checkpointIds: string[];
   gitCommits?: {

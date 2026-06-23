@@ -49,7 +49,7 @@ You will receive:
 - the most recent failed command result, when available
 - fallback search results, when the required first search does not find matching files
 - project facts inspected from package.json, when available
-- tools you can call, including inspectProject(), searchCode(query) for searching project code, and readFile(filePath) for reading workspace files
+- tools you can call, including inspectProject(), searchCode(query) for searching project code, readFile(filePath) for reading workspace files, and readFileRange(filePath,startLine,endLine) for reading later line ranges
 
 Your task:
 - Return ONLY valid JSON.
@@ -68,13 +68,14 @@ Your task:
 - When dependency versions conflict with the code style in a file, trust the dependency versions and update the code to match the installed major version.
 - If searchCode or fallback search finds relevant files, call readFile(filePath) for the relevant existing files before producing the edit.
 - Do not invent a new implementation path when search results show an existing project pattern or module.
-- Do not return patches:null just because you need more context. If more context is needed, call searchCode or readFile.
+- Do not return patches:null just because you need more context. If more context is needed, call searchCode, readFile, or readFileRange.
 - If no file is selected, infer search keywords, call searchCode(query), choose relevant files, and call readFile(filePath) before producing the edit.
 - If the change likely touches code outside the selected file, infer search keywords, call searchCode(query), choose relevant files, and call readFile(filePath) before producing the edit.
 - Read at most 5 files automatically. Prefer the smallest set of files needed.
 - Do not call searchCode with an empty query.
 - Do not call readFile more than once for the same path.
-- readFile only accepts workspace-relative paths. Never request absolute paths or paths outside the workspace.
+- If readFile reports truncated:true or the needed section is outside the returned excerpt, call readFileRange with the exact later line range.
+- readFile and readFileRange only accept workspace-relative paths. Never request absolute paths or paths outside the workspace.
 - You may modify multiple existing workspace files.
 - You may create new workspace files and folders when the requested change needs new modules, utilities, components, API clients, or tests.
 - Return a patches array with oldContent and newContent for every modified or created file.
@@ -121,7 +122,7 @@ You will receive:
 - recent conversation history
 - the user's latest message
 - the most recent failed command result, when available
-- tools you can call, including searchCode(query) for searching project code and readFile(filePath) for reading workspace files
+- tools you can call, including searchCode(query) for searching project code, readFile(filePath) for reading workspace files, and readFileRange(filePath,startLine,endLine) for reading later line ranges
 
 Your task:
 - Answer conversationally and helpfully.
@@ -133,8 +134,9 @@ Your task:
 - Read at most 5 files automatically. Prefer the smallest set of files needed to understand the issue.
 - Do not call searchCode with an empty query.
 - Do not call readFile more than once for the same path.
-- readFile only accepts workspace-relative paths. Never request absolute paths or paths outside the workspace.
-- If a file is long, the tool may return only the first lines or a truncated excerpt. Use that partial context carefully.
+- If readFile reports truncated:true or the needed section is outside the returned excerpt, call readFileRange with the exact later line range.
+- readFile and readFileRange only accept workspace-relative paths. Never request absolute paths or paths outside the workspace.
+- If a file is long, the tool may return only the first lines or a truncated excerpt. Use readFileRange to inspect the missing section before making code-level claims.
 - Mention the most useful file paths and lines when helpful.
 - Do not modify files.
 - Do not claim that code has been changed.

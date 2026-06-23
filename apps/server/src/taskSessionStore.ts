@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
-import type { AgentStep, TaskPlanItem, TaskPlanItemStatus, TaskSession } from "./types.js";
+import type { AgentStep, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 
 function taskSessionDirectory() {
@@ -96,8 +96,8 @@ function normalizeTaskPlanItems(items: unknown): TaskPlanItem[] {
         id: typeof item.id === "string" && item.id.trim() ? item.id : `plan-${crypto.randomUUID()}`,
         title: typeof item.title === "string" ? item.title : "",
         status: isTaskPlanItemStatus(item.status) ? item.status : "pending",
-        note: typeof item.note === "string" ? item.note : undefined,
-        evidence:
+      note: typeof item.note === "string" ? item.note : undefined,
+      evidence:
           item.evidence && typeof item.evidence === "object" && !Array.isArray(item.evidence)
             ? {
                 stepIds: Array.isArray(item.evidence.stepIds) ? item.evidence.stepIds.filter((value): value is string => typeof value === "string") : [],
@@ -105,11 +105,51 @@ function normalizeTaskPlanItems(items: unknown): TaskPlanItem[] {
                 commands: Array.isArray(item.evidence.commands) ? item.evidence.commands.filter((value): value is string => typeof value === "string") : []
               }
             : { stepIds: [], files: [], commands: [] },
-        createdAt: typeof item.createdAt === "number" ? item.createdAt : now,
-        updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : now
+      createdAt: typeof item.createdAt === "number" ? item.createdAt : now,
+      updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : now
       };
     })
     .filter((item) => item.title.trim());
+}
+
+function snapshotTaskPlanItems(items: unknown) {
+  // 只保存计划标题和状态，避免修订历史膨胀，同时保留足够的审阅线索。
+  return normalizeTaskPlanItems(items).map((item) => ({
+    title: item.title,
+    status: item.status
+  }));
+}
+
+function normalizeTaskPlanRevisions(revisions: unknown): TaskPlanRevision[] {
+  if (!Array.isArray(revisions)) return [];
+
+  return revisions
+    .filter((revision): revision is Partial<TaskPlanRevision> => Boolean(revision && typeof revision === "object" && !Array.isArray(revision)))
+    .map((revision) => ({
+      id: typeof revision.id === "string" && revision.id.trim() ? revision.id : `revision-${crypto.randomUUID()}`,
+      trigger: isTaskPlanRevisionTrigger(revision.trigger) ? revision.trigger : "system",
+      reason: typeof revision.reason === "string" && revision.reason.trim() ? revision.reason.trim() : "计划已调整",
+      beforeItems: snapshotTaskPlanItems(revision.beforeItems),
+      afterItems: snapshotTaskPlanItems(revision.afterItems),
+      createdAt: typeof revision.createdAt === "number" ? revision.createdAt : Date.now()
+    }))
+    .sort((left, right) => right.createdAt - left.createdAt)
+    .slice(0, 20);
+}
+
+function isTaskPlanRevisionTrigger(value: unknown): value is TaskPlanRevisionTrigger {
+  return value === "user" || value === "agent" || value === "validation" || value === "system";
+}
+
+function createTaskPlanRevision(input: { trigger: TaskPlanRevisionTrigger; reason: string; beforeItems: unknown; afterItems: unknown }): TaskPlanRevision {
+  return {
+    id: `revision-${Date.now().toString(36)}-${crypto.randomUUID()}`,
+    trigger: input.trigger,
+    reason: input.reason.trim() || "计划已调整",
+    beforeItems: snapshotTaskPlanItems(input.beforeItems),
+    afterItems: snapshotTaskPlanItems(input.afterItems),
+    createdAt: Date.now()
+  };
 }
 
 async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
@@ -130,7 +170,8 @@ async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
   return {
     ...session,
     // 旧任务记录没有计划字段，读取时补齐可以让前端和 API 逻辑保持简单。
-    planItems: normalizeTaskPlanItems(session.planItems)
+    planItems: normalizeTaskPlanItems(session.planItems),
+    planRevisions: normalizeTaskPlanRevisions(session.planRevisions)
   };
 }
 
@@ -152,6 +193,7 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     commandsRun: [],
     steps: [],
     planItems: [],
+    planRevisions: [],
     planApproval: { required: false, status: "not_required" },
     checkpointIds: [],
     gitCommits: [],
@@ -177,11 +219,11 @@ export async function addTaskPlanItem(taskSessionId: string | null | undefined, 
     const item: TaskPlanItem = {
       id: `plan-${now.toString(36)}-${crypto.randomUUID()}`,
       title,
-        status: input.status || "pending",
-        note: input.note?.trim() || undefined,
-        evidence: { stepIds: [], files: [], commands: [] },
-        createdAt: now,
-        updatedAt: now
+      status: input.status || "pending",
+      note: input.note?.trim() || undefined,
+      evidence: { stepIds: [], files: [], commands: [] },
+      createdAt: now,
+      updatedAt: now
     };
 
     return {
@@ -192,7 +234,7 @@ export async function addTaskPlanItem(taskSessionId: string | null | undefined, 
   });
 }
 
-export async function setTaskPlanItems(taskSessionId: string | null | undefined, items: { title: string; status?: TaskPlanItemStatus; note?: string }[], options: { requireApproval?: boolean } = {}) {
+export async function setTaskPlanItems(taskSessionId: string | null | undefined, items: { title: string; status?: TaskPlanItemStatus; note?: string }[], options: { requireApproval?: boolean; revision?: { trigger: TaskPlanRevisionTrigger; reason: string } } = {}) {
   if (!taskSessionId) return null;
 
   const now = Date.now();
@@ -205,27 +247,40 @@ export async function setTaskPlanItems(taskSessionId: string | null | undefined,
       return {
         id: `plan-${now.toString(36)}-${index}-${crypto.randomUUID()}`,
         title,
-        status: item.status || (index === 0 ? "in_progress" : "pending"),
-        note: item.note?.trim() || undefined,
-        evidence: { stepIds: [], files: [], commands: [] },
-        createdAt: now,
-        updatedAt: now
+      status: item.status || (index === 0 ? "in_progress" : "pending"),
+      note: item.note?.trim() || undefined,
+      evidence: { stepIds: [], files: [], commands: [] },
+      createdAt: now,
+      updatedAt: now
       };
     })
     .filter((item): item is TaskPlanItem => Boolean(item));
 
-  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
-    ...session,
-    planItems,
-    planApproval: options.requireApproval
-      ? {
-          required: true,
-          status: "pending",
-          requestedAt: now
-        }
-      : session.planApproval || { required: false, status: "not_required" },
-    updatedAt: now
-  }));
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const previousItems = normalizeTaskPlanItems(session.planItems);
+    const revision = options.revision
+      ? createTaskPlanRevision({
+          trigger: options.revision.trigger,
+          reason: options.revision.reason,
+          beforeItems: previousItems,
+          afterItems: planItems
+        })
+      : null;
+
+    return {
+      ...session,
+      planItems,
+      planRevisions: revision ? [revision, ...normalizeTaskPlanRevisions(session.planRevisions)].slice(0, 20) : normalizeTaskPlanRevisions(session.planRevisions),
+      planApproval: options.requireApproval
+        ? {
+            required: true,
+            status: "pending",
+            requestedAt: now
+          }
+        : session.planApproval || { required: false, status: "not_required" },
+      updatedAt: now
+    };
+  });
 }
 
 export async function approveTaskSessionPlan(taskSessionId: string | null | undefined) {
@@ -257,6 +312,7 @@ export async function advanceTaskPlanProgress(taskSessionId: string | null | und
 
     const now = Date.now();
     const nextItems = items.map((item) => ({ ...item }));
+    let autoRevisionReason = "";
     const completeActiveAndStartNext = () => {
       const activeIndex = nextItems.findIndex((item) => item.status === "in_progress");
       const targetIndex = activeIndex === -1 ? nextItems.findIndex((item) => item.status === "pending") : activeIndex;
@@ -293,15 +349,39 @@ export async function advanceTaskPlanProgress(taskSessionId: string | null | und
         nextItems[targetIndex] = {
           ...nextItems[targetIndex],
           status: "blocked",
-          note: phase === "task_cancelled" ? "任务已取消，计划暂停。" : "执行过程中遇到问题，需要处理后继续。",
-          updatedAt: now
+        note: phase === "task_cancelled" ? "任务已取消，计划暂停。" : "执行过程中遇到问题，需要处理后继续。",
+        updatedAt: now
         };
       }
+
+      if (phase === "validation_failed" || phase === "task_failed") {
+        // 失败后自动回到计划阶段，模拟主流 AI IDE 的滚动重规划检查点。
+        nextItems.push({
+          id: `plan-${now.toString(36)}-replan-${crypto.randomUUID()}`,
+          title: phase === "validation_failed" ? "根据验证反馈调整计划" : "重新评估失败原因并修订方案",
+          status: "in_progress",
+        note: "系统已插入重规划步骤，请结合失败信息确认下一步。",
+        evidence: { stepIds: [], files: [], commands: [] },
+        createdAt: now,
+        updatedAt: now
+        });
+        autoRevisionReason = phase === "validation_failed" ? "验证失败后自动回到计划阶段" : "任务失败后自动回到计划阶段";
+      }
     }
+
+    const revision = autoRevisionReason
+      ? createTaskPlanRevision({
+          trigger: phase === "validation_failed" ? "validation" : "agent",
+          reason: autoRevisionReason,
+          beforeItems: items,
+          afterItems: nextItems
+        })
+      : null;
 
     return {
       ...session,
       planItems: nextItems,
+      planRevisions: revision ? [revision, ...normalizeTaskPlanRevisions(session.planRevisions)].slice(0, 20) : normalizeTaskPlanRevisions(session.planRevisions),
       updatedAt: now
     };
   });
@@ -339,8 +419,8 @@ export async function updateTaskPlanItem(taskSessionId: string | null | undefine
               ...item,
               title,
               status,
-              note: updates.note === undefined ? item.note : updates.note.trim() || undefined,
-              updatedAt: now
+            note: updates.note === undefined ? item.note : updates.note.trim() || undefined,
+            updatedAt: now
             }
           : item
       ),
@@ -449,12 +529,12 @@ export async function appendTaskSessionStep(taskSessionId: string | null | undef
 
             return {
               ...item,
-              evidence: {
+            evidence: {
                 stepIds: unique([...(item.evidence?.stepIds || []), step.id]),
                 files: unique([...(item.evidence?.files || []), ...evidenceFiles]),
                 commands: unique([...(item.evidence?.commands || []), ...commands])
               },
-              updatedAt: Date.now()
+            updatedAt: Date.now()
             };
           });
 

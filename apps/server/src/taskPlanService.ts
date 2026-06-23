@@ -192,7 +192,7 @@ export async function rewriteTaskPlanWithInstruction(session: TaskSession, instr
   const fallback = rewritePlanFallback(currentItems, instruction);
 
   if (!config.aiApiKey) {
-    return setTaskPlanItems(session.id, fallback, { requireApproval: session.planApproval?.status === "pending" });
+    return setTaskPlanItems(session.id, fallback, { requireApproval: session.planApproval?.status === "pending", revision: { trigger: "user", reason: instruction.trim() } });
   }
 
   const runId = createAiRunId("task-plan-rewrite");
@@ -227,11 +227,11 @@ export async function rewriteTaskPlanWithInstruction(session: TaskSession, instr
 
     if (items.length) {
       logAi(runId, "done", { count: items.length });
-      return setTaskPlanItems(session.id, items, { requireApproval: session.planApproval?.status === "pending" });
+      return setTaskPlanItems(session.id, items, { requireApproval: session.planApproval?.status === "pending", revision: { trigger: "user", reason: instruction.trim() } });
     }
   } catch (error) {
     logAi(runId, "fallback", { error: error instanceof Error ? error.message : String(error) });
   }
 
-  return setTaskPlanItems(session.id, fallback, { requireApproval: session.planApproval?.status === "pending" });
+  return setTaskPlanItems(session.id, fallback, { requireApproval: session.planApproval?.status === "pending", revision: { trigger: "user", reason: instruction.trim() } });
 }
