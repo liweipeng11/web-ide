@@ -172,18 +172,35 @@ test("creates shorter fallback plans for inspect tasks", () => {
   );
 });
 
-test("advances task plan progress across agent phases", async () => {
-  const { session } = await createIsolatedTaskSession("推进计划状态");
+test("advances edit task plan by semantic agent phases", async () => {
+  const { session } = await createIsolatedTaskSession("推进编辑计划状态");
+  await setTaskPlanItems(session.id, [
+    { title: "理解需求目标" },
+    { title: "检索并读取相关文件" },
+    { title: "生成可审查修改" },
+    { title: "应用修改并检查结果" },
+    { title: "运行验证命令" }
+  ]);
+
+  const afterPatch = await advanceTaskPlanProgress(session.id, "patch_generated");
+  assert.deepEqual(afterPatch?.planItems?.map((item) => item.status), ["completed", "completed", "completed", "in_progress", "pending"]);
+
+  const afterApply = await advanceTaskPlanProgress(session.id, "patch_applied");
+  assert.deepEqual(afterApply?.planItems?.map((item) => item.status), ["completed", "completed", "completed", "completed", "in_progress"]);
+
+  const afterValidation = await advanceTaskPlanProgress(session.id, "validation_success");
+  assert.deepEqual(afterValidation?.planItems?.map((item) => item.status), ["completed", "completed", "completed", "completed", "completed"]);
+});
+
+test("keeps validation active when a compact edit plan has no apply step", async () => {
+  const { session } = await createIsolatedTaskSession("紧凑编辑计划状态");
   await setTaskPlanItems(session.id, [{ title: "理解目标" }, { title: "生成修改" }, { title: "运行验证" }]);
 
   const afterPatch = await advanceTaskPlanProgress(session.id, "patch_generated");
-  assert.deepEqual(afterPatch?.planItems?.map((item) => item.status), ["completed", "in_progress", "pending"]);
+  assert.deepEqual(afterPatch?.planItems?.map((item) => item.status), ["completed", "completed", "in_progress"]);
 
   const afterApply = await advanceTaskPlanProgress(session.id, "patch_applied");
   assert.deepEqual(afterApply?.planItems?.map((item) => item.status), ["completed", "completed", "in_progress"]);
-
-  const afterValidation = await advanceTaskPlanProgress(session.id, "validation_success");
-  assert.deepEqual(afterValidation?.planItems?.map((item) => item.status), ["completed", "completed", "completed"]);
 });
 
 test("links agent steps to active task plan item evidence", async () => {

@@ -329,7 +329,9 @@ body.resizing-chat .chat-resizer::after {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  isolation: isolate;
   min-width: 0;
+  overflow: visible;
   position: relative;
   width: 100%;
 }

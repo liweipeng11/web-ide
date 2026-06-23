@@ -162,6 +162,8 @@
   min-height: 120px;
   overflow: auto;
   padding: 10px;
+  position: relative;
+  z-index: 1;
 }
 
 .task-plan-floating {
@@ -170,7 +172,7 @@
   justify-content: flex-end;
   margin: -4px 0 -6px;
   position: relative;
-  z-index: 12;
+  z-index: 24;
 }
 
 .task-plan-trigger {
@@ -227,7 +229,7 @@
   right: 0;
   top: calc(100% + 8px);
   width: min(420px, calc(100vw - 32px));
-  z-index: 20;
+  z-index: 28;
 }
 
 .task-plan-popover-header {

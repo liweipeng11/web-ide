@@ -717,7 +717,6 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
 
       completed = true;
       await Promise.all(taskStepWrites);
-      await updateTaskSessionStatus(taskSession.id, clientClosed ? "cancelled" : "success");
       if (progressedTaskSession) {
         sendEvent("task_session", { session: progressedTaskSession });
       }

@@ -300,6 +300,71 @@ export async function approveTaskSessionPlan(taskSessionId: string | null | unde
 
 export type TaskPlanProgressPhase = "patch_generated" | "patch_applied" | "validation_failed" | "validation_success" | "task_failed" | "task_cancelled";
 
+function titleMatches(title: string, patterns: RegExp[]) {
+  return patterns.some((pattern) => pattern.test(title));
+}
+
+function findPlanItemIndex(items: TaskPlanItem[], patterns: RegExp[]) {
+  return items.findIndex((item) => titleMatches(item.title, patterns));
+}
+
+function findActivePlanItemIndex(items: TaskPlanItem[]) {
+  return items.findIndex((item) => item.status === "in_progress");
+}
+
+function completeThroughPlanIndex(items: TaskPlanItem[], targetIndex: number, now: number) {
+  for (let index = 0; index <= targetIndex && index < items.length; index += 1) {
+    if (items[index].status !== "blocked") {
+      items[index] = { ...items[index], status: "completed", updatedAt: now };
+    }
+  }
+}
+
+function startNextPendingPlanItem(items: TaskPlanItem[], startIndex: number, now: number) {
+  const pendingIndex = items.findIndex((item, index) => index > startIndex && item.status === "pending");
+
+  if (pendingIndex !== -1) {
+    items[pendingIndex] = { ...items[pendingIndex], status: "in_progress", updatedAt: now };
+  }
+}
+
+function advancePlanToIndex(items: TaskPlanItem[], targetIndex: number, now: number) {
+  if (targetIndex < 0) return;
+
+  // 按真实执行阶段推进计划，避免人工审核通过后把后续步骤一次性扫成完成。
+  completeThroughPlanIndex(items, targetIndex, now);
+  startNextPendingPlanItem(items, targetIndex, now);
+}
+
+function getPatchGeneratedTargetIndex(items: TaskPlanItem[]) {
+  const generatedIndex = findPlanItemIndex(items, [/生成|修改|审查|审阅|补丁|patch|edit/i]);
+
+  if (generatedIndex !== -1) return generatedIndex;
+
+  const activeIndex = findActivePlanItemIndex(items);
+  return activeIndex === -1 ? 0 : Math.min(activeIndex + 2, items.length - 1);
+}
+
+function getPatchAppliedTargetIndex(items: TaskPlanItem[]) {
+  const appliedIndex = findPlanItemIndex(items, [/应用|检查结果|检查|apply/i]);
+
+  if (appliedIndex !== -1) return appliedIndex;
+
+  const activeIndex = findActivePlanItemIndex(items);
+
+  if (activeIndex !== -1 && !titleMatches(items[activeIndex].title, [/验证|命令|validation|verify|test|build|lint|check/i])) {
+    return activeIndex;
+  }
+
+  return -1;
+}
+
+function getValidationSuccessTargetIndex(items: TaskPlanItem[]) {
+  const validationIndex = findPlanItemIndex(items, [/验证|命令|validation|verify|test|build|lint|check/i]);
+
+  return validationIndex === -1 ? items.length - 1 : validationIndex;
+}
+
 export async function advanceTaskPlanProgress(taskSessionId: string | null | undefined, phase: TaskPlanProgressPhase) {
   if (!taskSessionId) return null;
 
@@ -313,31 +378,17 @@ export async function advanceTaskPlanProgress(taskSessionId: string | null | und
     const now = Date.now();
     const nextItems = items.map((item) => ({ ...item }));
     let autoRevisionReason = "";
-    const completeActiveAndStartNext = () => {
-      const activeIndex = nextItems.findIndex((item) => item.status === "in_progress");
-      const targetIndex = activeIndex === -1 ? nextItems.findIndex((item) => item.status === "pending") : activeIndex;
 
-      if (targetIndex !== -1) {
-        nextItems[targetIndex] = { ...nextItems[targetIndex], status: "completed", updatedAt: now };
-      }
+    if (phase === "patch_generated") {
+      advancePlanToIndex(nextItems, getPatchGeneratedTargetIndex(nextItems), now);
+    }
 
-      const pendingIndex = nextItems.findIndex((item) => item.status === "pending");
-
-      if (pendingIndex !== -1) {
-        nextItems[pendingIndex] = { ...nextItems[pendingIndex], status: "in_progress", updatedAt: now };
-      }
-    };
-
-    if (phase === "patch_generated" || phase === "patch_applied") {
-      completeActiveAndStartNext();
+    if (phase === "patch_applied") {
+      advancePlanToIndex(nextItems, getPatchAppliedTargetIndex(nextItems), now);
     }
 
     if (phase === "validation_success") {
-      for (let index = 0; index < nextItems.length; index += 1) {
-        if (nextItems[index].status !== "blocked") {
-          nextItems[index] = { ...nextItems[index], status: "completed", updatedAt: now };
-        }
-      }
+      advancePlanToIndex(nextItems, getValidationSuccessTargetIndex(nextItems), now);
     }
 
     if (phase === "validation_failed" || phase === "task_failed" || phase === "task_cancelled") {
