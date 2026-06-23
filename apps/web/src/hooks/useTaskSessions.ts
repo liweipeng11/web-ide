@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
-import { approveTaskPlan, createTaskPlanItem, deleteTaskPlanItem, fetchTaskSession, fetchTaskSessions, rewriteTaskPlan, updateTaskPlanItem, type TaskPlanItemStatus, type TaskSession } from "../api";
-import type { AppState } from "../appState";
+import { approveTaskPlan, createTaskPlanItem, deleteTaskPlanItem, deleteTaskSession, fetchTaskSession, fetchTaskSessions, rewriteTaskPlan, updateTaskPlanItem, type TaskPlanItemStatus, type TaskSession } from "../api";
+import { createChatId, type AppState } from "../appState";
 
 type UseTaskSessionsOptions = {
   state: AppState;
@@ -89,15 +89,49 @@ export function useTaskSessions({ state, setState }: UseTaskSessionsOptions) {
   }
 
   async function handleOpenTaskSession(taskSessionId: string) {
-    if (!state.workspaceRoot) return;
+    if (!state.workspaceRoot) return null;
 
     setState((current) => ({ ...current, loading: true, error: null }));
 
     try {
       const [{ sessions }, { session }] = await Promise.all([fetchTaskSessions(), fetchTaskSession(taskSessionId)]);
-      setState((current) => ({ ...current, loading: false, taskSessions: sessions, selectedTaskSession: session, error: null }));
+      setState((current) => ({
+        ...current,
+        loading: false,
+        currentTaskSessionId: session.id,
+        taskSessions: sessions,
+        selectedTaskSession: session,
+        error: null
+      }));
+      return session;
     } catch (error) {
       setState((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : "加载任务历史失败" }));
+      return null;
+    }
+  }
+
+  async function handleDeleteTaskSession(taskSessionId: string) {
+    if (!state.workspaceRoot || state.loading) return;
+
+    try {
+      const data = await deleteTaskSession(taskSessionId);
+      setState((current) => {
+        const deletedSession = current.taskSessions.find((session) => session.id === taskSessionId) || current.selectedTaskSession;
+        const shouldResetChat = Boolean(deletedSession?.chatId) && current.chatId === deletedSession?.chatId;
+
+        return {
+          ...current,
+          currentTaskSessionId: current.currentTaskSessionId === taskSessionId ? null : current.currentTaskSessionId,
+          selectedTaskSession: current.selectedTaskSession?.id === taskSessionId ? null : current.selectedTaskSession,
+          taskSessions: data.sessions,
+          chatId: shouldResetChat ? createChatId() : current.chatId,
+          chatMessages: shouldResetChat ? [] : current.chatMessages,
+          agentSteps: shouldResetChat ? [] : current.agentSteps,
+          error: null
+        };
+      });
+    } catch (error) {
+      setState((current) => ({ ...current, error: error instanceof Error ? error.message : "删除任务历史失败" }));
     }
   }
 
@@ -117,6 +151,7 @@ export function useTaskSessions({ state, setState }: UseTaskSessionsOptions) {
     handleRewritePlan,
     handleApprovePlan,
     handleOpenTaskSession,
+    handleDeleteTaskSession,
     handleRefreshTaskSessions
   };
 }

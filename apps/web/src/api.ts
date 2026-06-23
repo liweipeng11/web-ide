@@ -232,6 +232,12 @@ export type TaskSessionsResponse = {
   sessions: TaskSession[];
 };
 
+export type ResumeTaskSessionChatResponse = {
+  session: TaskSession;
+  chatId: string;
+  messages: FileChatMessage[];
+};
+
 export type FileChatStreamEvent =
   | { event: "user"; data: { message: FileChatMessage } }
   | { event: "assistant_start"; data: { message: FileChatMessage } }
@@ -406,6 +412,19 @@ export function fetchTaskSessions() {
 
 export function fetchTaskSession(taskSessionId: string) {
   return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}`);
+}
+
+export function resumeTaskSessionChat(taskSessionId: string) {
+  return request<ResumeTaskSessionChatResponse>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/resume-chat`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export function deleteTaskSession(taskSessionId: string) {
+  return request<TaskSessionsResponse>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}`, {
+    method: "DELETE"
+  });
 }
 
 export function recordTaskSessionCommand(taskSessionId: string, command: string, result?: CommandResult | null) {

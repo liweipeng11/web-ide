@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import { buildContextualEditRequest, classifyAgentRequest, generateFileChatReply, shouldGeneratePatchForIntent, streamFileChatReply, type AgentStep } from "./aiClient.js";
-import { appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
+import { appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, ensureFileChatMessages, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
 import { createCheckpoint, getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
 import { discoverProjectCommands } from "./commandDiscovery.js";
@@ -17,8 +17,8 @@ import { createGitWorkflowRouter } from "./gitWorkflow/routes.js";
 import { clearPendingPatches, deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import type { ApplyPatchRequest, AutoValidationRequest, FileChatRequest, GenerateEditRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionCommand, addTaskSessionFilesChanged, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, deleteTaskPlanItem, listTaskSessions, getTaskSession, updateTaskPlanItem, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
+import type { ApplyPatchRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionCommand, addTaskSessionFilesChanged, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, deleteTaskPlanItem, deleteTaskSession, listTaskSessions, getTaskSession, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
@@ -87,6 +87,44 @@ async function readChatContextFiles(paths: string[]) {
       content: (await readWorkspaceFile(filePath)).slice(0, maxChatContextCharsPerFile)
     }))
   );
+}
+
+function formatTaskSessionStatus(status: TaskSession["status"]) {
+  return status === "running" ? "运行中" : status === "success" ? "成功" : status === "failed" ? "失败" : "已取消";
+}
+
+function summarizeTaskSessionList(title: string, values: string[]) {
+  if (!values.length) return "";
+
+  return [`${title}：`, ...values.slice(0, 8).map((value) => `- ${value}`), values.length > 8 ? `- 另有 ${values.length - 8} 项` : ""].filter(Boolean).join("\n");
+}
+
+function createTaskSessionFallbackMessages(session: TaskSession): FileChatMessage[] {
+  const createdAt = new Date(session.createdAt).toISOString();
+  const updatedAt = new Date(session.updatedAt).toISOString();
+  const summaries = [
+    "已恢复这条任务历史，可以在这里继续围绕该任务对话。",
+    `任务状态：${formatTaskSessionStatus(session.status)}`,
+    summarizeTaskSessionList("读取过的文件", session.filesRead),
+    summarizeTaskSessionList("改动过的文件", session.filesChanged),
+    summarizeTaskSessionList("执行过的命令", session.commandsRun)
+  ].filter(Boolean);
+
+  // 旧任务可能没有真实聊天记录，这里用任务元数据生成最小上下文，保证继续提问时有明确起点。
+  return [
+    {
+      id: `task-resume-user:${session.id}`,
+      role: "user",
+      content: session.userGoal || "恢复历史任务",
+      createdAt
+    },
+    {
+      id: `task-resume-assistant:${session.id}`,
+      role: "assistant",
+      content: summaries.join("\n\n"),
+      createdAt: updatedAt
+    }
+  ];
 }
 
 app.get(
@@ -408,6 +446,25 @@ app.get(
 );
 
 app.post(
+  "/api/task-sessions/:taskSessionId/resume-chat",
+  asyncRoute(async (request, response) => {
+    const session = await getTaskSession(String(request.params.taskSessionId || ""));
+    const chatId = session.chatId?.trim() || `chat:${session.id}`;
+    const messages = await ensureFileChatMessages(chatId, createTaskSessionFallbackMessages(session));
+    const linkedSession = session.chatId === chatId ? session : (await updateTaskSessionChatId(session.id, chatId)) || session;
+
+    response.json({ session: linkedSession, chatId, messages });
+  })
+);
+
+app.delete(
+  "/api/task-sessions/:taskSessionId",
+  asyncRoute(async (request, response) => {
+    response.json({ sessions: await deleteTaskSession(String(request.params.taskSessionId || "")) });
+  })
+);
+
+app.post(
   "/api/task-sessions/:taskSessionId/commands",
   asyncRoute(async (request, response) => {
     const taskSessionId = String(request.params.taskSessionId || "");
@@ -586,7 +643,12 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       throw new HttpError(400, "userRequest is required");
     }
 
-    const taskSession = approvedTaskSessionId ? await approveTaskSessionPlan(approvedTaskSessionId).then((session) => session || getTaskSession(approvedTaskSessionId)) : await createTaskSession(userRequest.trim(), { chatId: chatKey });
+    const taskSession =
+      approvedTaskSessionId
+        ? await approveTaskSessionPlan(approvedTaskSessionId)
+            .then((session) => session || getTaskSession(approvedTaskSessionId))
+            .then((session) => updateTaskSessionChatId(session.id, chatKey).then((updated) => updated || session))
+        : await createTaskSession(userRequest.trim(), { chatId: chatKey });
     taskSessionId = taskSession.id;
     const contextPaths = getRequestedContextPaths(request.body as Partial<FileChatRequest>);
     const contextFiles = await readChatContextFiles(contextPaths);

@@ -458,9 +458,23 @@ body.resizing-chat .chat-resizer::after {
   text-align: left;
 }
 
+.task-history-item {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.task-history-item > button:first-child {
+  min-width: 0;
+}
+
 .task-history-list button.active {
   background: #eef6ff;
   border-color: #8bbced;
+}
+
+.task-history-delete {
+  align-self: start;
 }
 
 .task-history-list strong,

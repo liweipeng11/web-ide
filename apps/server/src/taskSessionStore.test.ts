@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, deleteTaskPlanItem, getTaskSession, setTaskPlanItems, updateTaskPlanItem } from "./taskSessionStore.js";
+import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, deleteTaskPlanItem, deleteTaskSession, getTaskSession, listTaskSessions, setTaskPlanItems, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 
@@ -66,6 +66,26 @@ test("normalizes legacy task sessions without plan items", async () => {
 
   const loaded = await getTaskSession(session.id);
   assert.deepEqual(loaded.planItems, []);
+});
+
+test("deletes task session history entries", async () => {
+  const { session } = await createIsolatedTaskSession("删除历史会话");
+
+  await createTaskSession("保留的任务会话");
+  const remaining = await deleteTaskSession(session.id);
+
+  assert.equal(remaining.some((item) => item.id === session.id), false);
+  assert.equal((await listTaskSessions()).some((item) => item.id === session.id), false);
+  await assert.rejects(() => getTaskSession(session.id), /Task session not found/);
+});
+
+test("updates task session chat id for history replay", async () => {
+  const { session } = await createIsolatedTaskSession("关联聊天会话");
+
+  const updated = await updateTaskSessionChatId(session.id, "chat:test-history");
+
+  assert.equal(updated?.chatId, "chat:test-history");
+  assert.equal((await getTaskSession(session.id)).chatId, "chat:test-history");
 });
 
 test("initializes fallback task plans for edit tasks", async () => {

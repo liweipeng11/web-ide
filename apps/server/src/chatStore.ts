@@ -52,6 +52,22 @@ export async function getFileChatMessages(filePath: string) {
   return store.conversations[conversationKey(filePath)] || [];
 }
 
+// 为历史任务补齐聊天记录：如果已有对话则保留原内容，避免覆盖用户真实上下文。
+export async function ensureFileChatMessages(filePath: string, fallbackMessages: FileChatMessage[]) {
+  const store = await readChatStore();
+  const key = conversationKey(filePath);
+  const existingMessages = store.conversations[key] || [];
+
+  if (existingMessages.length) {
+    return existingMessages;
+  }
+
+  store.conversations[key] = fallbackMessages;
+  await writeChatStore(store);
+
+  return fallbackMessages;
+}
+
 export async function listFileChatHistories() {
   const store = await readChatStore();
 

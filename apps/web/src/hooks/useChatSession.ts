@@ -1,5 +1,5 @@
 import { useRef, type Dispatch, type SetStateAction } from "react";
-import { branchFileChatMessage, clearFileChat, deleteFileChatHistory, deleteFileChatMessage, fetchFileChat, fetchFileChatHistories, streamFileChatMessage } from "../api";
+import { branchFileChatMessage, clearFileChat, deleteFileChatHistory, deleteFileChatMessage, fetchFileChat, fetchFileChatHistories, resumeTaskSessionChat, streamFileChatMessage, type TaskSession } from "../api";
 import { createChatId, createClientErrorStep, type AppState } from "../appState";
 
 type UseChatSessionOptions = {
@@ -46,6 +46,38 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
         loading: false,
         error: error instanceof Error ? error.message : "加载聊天历史失败"
       }));
+    }
+  }
+
+  async function handleOpenTaskSessionChat(taskSession: TaskSession) {
+    if (!state.workspaceRoot) return null;
+
+    setState((current) => ({ ...current, loading: true, error: null }));
+
+    try {
+      // 任务历史可能来自旧数据或直接编辑入口，统一交给后端补齐可继续的聊天会话。
+      const resumed = await resumeTaskSessionChat(taskSession.id);
+
+      setState((current) => ({
+        ...current,
+        chatId: resumed.chatId,
+        chatMessages: resumed.messages,
+        agentSteps: resumed.session.steps,
+        currentTaskSessionId: resumed.session.id,
+        selectedTaskSession: resumed.session,
+        taskSessions: [resumed.session, ...current.taskSessions.filter((session) => session.id !== resumed.session.id)].sort((left, right) => right.createdAt - left.createdAt),
+        loading: false,
+        error: null
+      }));
+
+      return resumed.session;
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        loading: false,
+        error: error instanceof Error ? error.message : "恢复任务历史对话失败"
+      }));
+      return null;
     }
   }
 
@@ -271,6 +303,7 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
   return {
     handleRefreshChatHistories,
     handleOpenChatHistory,
+    handleOpenTaskSessionChat,
     handleNewChat,
     handleDeleteChatHistory,
     handleGenerate,

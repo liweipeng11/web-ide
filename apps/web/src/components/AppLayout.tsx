@@ -42,6 +42,7 @@ type Props = {
   onRefreshTaskSessions: () => Promise<void>;
   onRefreshProjectRules: () => Promise<void>;
   onOpenTaskSession: (taskSessionId: string) => Promise<void>;
+  onDeleteTaskSession: (taskSessionId: string) => Promise<void>;
   onAddPlanItem: (taskSessionId: string, title: string) => Promise<void>;
   onUpdatePlanItem: (taskSessionId: string, planItemId: string, updates: { title?: string; status?: TaskPlanItemStatus; note?: string }) => Promise<void>;
   onDeletePlanItem: (taskSessionId: string, planItemId: string) => Promise<void>;
@@ -91,6 +92,7 @@ export default function AppLayout({
   onRefreshTaskSessions,
   onRefreshProjectRules,
   onOpenTaskSession,
+  onDeleteTaskSession,
   onAddPlanItem,
   onUpdatePlanItem,
   onDeletePlanItem,
@@ -266,6 +268,7 @@ export default function AppLayout({
               onRefreshHistories={() => void onRefreshChatHistories()}
               onRefreshTaskSessions={() => void onRefreshTaskSessions()}
               onOpenTaskSession={(taskSessionId) => void onOpenTaskSession(taskSessionId)}
+              onDeleteTaskSession={(taskSessionId) => void onDeleteTaskSession(taskSessionId)}
               onAddPlanItem={onAddPlanItem}
               onUpdatePlanItem={onUpdatePlanItem}
               onDeletePlanItem={onDeletePlanItem}

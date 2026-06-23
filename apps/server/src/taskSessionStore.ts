@@ -392,6 +392,45 @@ export async function listTaskSessions() {
   return sessions.sort((left, right) => right.createdAt - left.createdAt);
 }
 
+// 删除指定任务会话，便于前端清理历史记录面板中的旧任务。
+export async function deleteTaskSession(taskSessionId: string) {
+  if (!taskSessionId.trim()) {
+    throw new HttpError(400, "taskSessionId is required");
+  }
+
+  const runtimePath = taskSessionPath(taskSessionId);
+  const legacyPath = legacyTaskSessionPath(taskSessionId);
+  let deleted = false;
+
+  try {
+    await fs.unlink(runtimePath);
+    deleted = true;
+  } catch (error) {
+    const typedError = error as NodeJS.ErrnoException;
+
+    if (typedError.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  try {
+    await fs.unlink(legacyPath);
+    deleted = true;
+  } catch (error) {
+    const typedError = error as NodeJS.ErrnoException;
+
+    if (typedError.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  if (!deleted) {
+    throw new HttpError(404, "Task session not found");
+  }
+
+  return listTaskSessions();
+}
+
 export async function appendTaskSessionStep(taskSessionId: string | null | undefined, step: AgentStep) {
   if (!taskSessionId) return null;
 
@@ -487,6 +526,17 @@ export async function updateTaskSessionUserGoal(taskSessionId: string | null | u
   return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
     ...session,
     userGoal: userGoal.trim(),
+    updatedAt: Date.now()
+  }));
+}
+
+// 为已有任务会话补写关联聊天 ID，保证历史任务可以重新加载对应对话。
+export async function updateTaskSessionChatId(taskSessionId: string | null | undefined, chatId: string) {
+  if (!taskSessionId || !chatId.trim()) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    chatId: chatId.trim(),
     updatedAt: Date.now()
   }));
 }

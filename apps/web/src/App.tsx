@@ -10,7 +10,7 @@ import { useWorkbenchLayout } from "./hooks/useWorkbenchLayout";
 import { useWorkspaceFiles } from "./hooks/useWorkspaceFiles";
 
 export default function App() {
-  // App 只负责组合各个领域 hook，避免继续堆积业务细节。
+  // App 只负责组合各领域 hook，避免继续堆积业务细节。
   const [files, setFiles] = useState<FileTreeNode[]>([]);
   const [state, setState] = useState<AppState>(initialState);
 
@@ -37,6 +37,15 @@ export default function App() {
     if (!session) return;
 
     await chatSession.handleSendChatMessage(session.userGoal, undefined, session.id);
+  }
+
+  async function handleOpenTaskSession(taskSessionId: string) {
+    const session = await taskSessions.handleOpenTaskSession(taskSessionId);
+
+    // 打开任务历史时恢复成当前聊天会话，兼容没有 chatId 的旧任务或直接编辑任务。
+    if (session) {
+      await chatSession.handleOpenTaskSessionChat(session);
+    }
   }
 
   async function handleApplyPatch(filePath?: string) {
@@ -73,7 +82,8 @@ export default function App() {
       onRefreshChatHistories={chatSession.handleRefreshChatHistories}
       onRefreshTaskSessions={taskSessions.handleRefreshTaskSessions}
       onRefreshProjectRules={workspaceFiles.handleRefreshProjectRules}
-      onOpenTaskSession={taskSessions.handleOpenTaskSession}
+      onOpenTaskSession={handleOpenTaskSession}
+      onDeleteTaskSession={taskSessions.handleDeleteTaskSession}
       onAddPlanItem={taskSessions.handleAddPlanItem}
       onUpdatePlanItem={taskSessions.handleUpdatePlanItem}
       onDeletePlanItem={taskSessions.handleDeletePlanItem}

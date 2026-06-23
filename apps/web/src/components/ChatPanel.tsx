@@ -26,6 +26,7 @@ type Props = {
   onRefreshHistories: () => void;
   onRefreshTaskSessions: () => void;
   onOpenTaskSession: (taskSessionId: string) => void;
+  onDeleteTaskSession: (taskSessionId: string) => void;
   onAddPlanItem: (taskSessionId: string, title: string) => Promise<void>;
   onUpdatePlanItem: (taskSessionId: string, planItemId: string, updates: { title?: string; status?: TaskPlanItemStatus; note?: string }) => Promise<void>;
   onDeletePlanItem: (taskSessionId: string, planItemId: string) => Promise<void>;
@@ -64,6 +65,7 @@ export default function ChatPanel({
   onRefreshHistories,
   onRefreshTaskSessions,
   onOpenTaskSession,
+  onDeleteTaskSession,
   onAddPlanItem,
   onUpdatePlanItem,
   onDeletePlanItem,
@@ -94,9 +96,8 @@ export default function ChatPanel({
   const historyRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const placeholder = "向智能体提问，或直接描述希望修改的内容...";
-  const visibleAgentSteps = useMemo<AgentStep[]>(() => {
-    return [...agentSteps].sort((left, right) => left.createdAt - right.createdAt);
-  }, [agentSteps]);
+
+  const visibleAgentSteps = useMemo<AgentStep[]>(() => [...agentSteps].sort((left, right) => left.createdAt - right.createdAt), [agentSteps]);
   const latestAssistantMessageId = useMemo(() => [...messages].reverse().find((message) => message.role === "assistant")?.id || "", [messages]);
   const contextSearchResults = useMemo(() => {
     const query = contextSearch.trim().toLowerCase();
@@ -112,6 +113,7 @@ export default function ChatPanel({
       })
       .slice(0, 80);
   }, [availableFiles, contextPaths, contextSearch]);
+
   const activePlanItems = activeTaskSession?.planItems || [];
   const activePlanCompletedCount = activePlanItems.filter((item) => item.status === "completed").length;
   const activePlanBlockedCount = activePlanItems.filter((item) => item.status === "blocked").length;
@@ -380,19 +382,33 @@ export default function ChatPanel({
             <div className="task-history-list">
               {taskSessions.length ? (
                 taskSessions.map((session) => (
-                  <button
-                    key={session.id}
-                    type="button"
-                    className={selectedTaskSession?.id === session.id ? "active" : ""}
-                    disabled={loading}
-                    onClick={() => onOpenTaskSession(session.id)}
-                  >
-                    <strong>{session.userGoal || "智能体任务"}</strong>
-                    <span>{getTaskStatusText(session.status)} · {formatTaskTime(session.createdAt)}</span>
-                    <small>
-                      {session.filesRead.length} 读 / {session.filesChanged.length} 改 / {session.commandsRun.length} 命令
-                    </small>
-                  </button>
+                  <div key={session.id} className="task-history-item">
+                    <button
+                      type="button"
+                      className={selectedTaskSession?.id === session.id ? "active" : ""}
+                      disabled={loading}
+                      onClick={() => {
+                        setShowHistories(false);
+                        onOpenTaskSession(session.id);
+                      }}
+                    >
+                      <strong>{session.userGoal || "智能体任务"}</strong>
+                      <span>{getTaskStatusText(session.status)} · {formatTaskTime(session.createdAt)}</span>
+                      <small>
+                        {session.filesRead.length} 读 / {session.filesChanged.length} 改 / {session.commandsRun.length} 命令
+                      </small>
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button task-history-delete"
+                      disabled={loading}
+                      title="删除任务历史"
+                      aria-label="删除任务历史"
+                      onClick={() => onDeleteTaskSession(session.id)}
+                    >
+                      <Icon name="delete" />
+                    </button>
+                  </div>
                 ))
               ) : (
                 <p>No task history.</p>
@@ -400,7 +416,7 @@ export default function ChatPanel({
             </div>
           </section>
           <section className="task-history-section">
-              <h3>旧对话</h3>
+            <h3>旧对话</h3>
             <div className="chat-history-list compact">
               {histories.length ? (
                 histories.map((item) => (
@@ -437,23 +453,23 @@ export default function ChatPanel({
                     type="button"
                     disabled={loading}
                     onClick={() => {
+                      const taskChatId = selectedTaskSession.chatId;
+                      if (!taskChatId) return;
                       setShowHistories(false);
-                      onOpenHistory(selectedTaskSession.chatId!);
+                      onOpenHistory(taskChatId);
                     }}
                   >
                     打开关联对话
                   </button>
                 )}
               </div>
+              <section>{renderTaskPlanPanel(selectedTaskSession, true)}</section>
               <section>
-                {renderTaskPlanPanel(selectedTaskSession, true)}
-              </section>
-              <section>
-                <h3>读过的文件</h3>
+                <h3>读取过的文件</h3>
                 {renderTaskPathList(selectedTaskSession.filesRead, "没有记录读取文件。")}
               </section>
               <section>
-                <h3>改过的文件</h3>
+                <h3>改动过的文件</h3>
                 {renderTaskPathList(selectedTaskSession.filesChanged, "没有记录改动文件。")}
               </section>
               <section>
@@ -494,7 +510,7 @@ export default function ChatPanel({
 
             return (
               <article key={message.id} className={"chat-message " + message.role}>
-                <strong className="chat-message-role">{message.role === "user" ? "你" : "智能体"}</strong>
+                <strong className="chat-message-role">{message.role === "user" ? "用户" : "智能体"}</strong>
                 <AgentStepsPanel inline steps={messageAgentSteps} />
                 {editingMessageId === message.id ? (
                   <div className="chat-message-edit">
