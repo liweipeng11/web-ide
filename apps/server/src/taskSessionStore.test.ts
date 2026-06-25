@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, deleteTaskPlanItem, deleteTaskSession, getTaskSession, listTaskSessions, setTaskPlanItems, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
+import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, setTaskPlanItems, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 
@@ -120,6 +120,23 @@ test("approves pending task plans", async () => {
   assert.equal(typeof approved?.planApproval?.approvedAt, "number");
 });
 
+test("interrupts a running task into replan mode and resumes after approval", async () => {
+  const { session } = await createIsolatedTaskSession("approve tool action");
+  await setTaskPlanItems(session.id, [{ title: "inspect context" }, { title: "apply patch" }]);
+
+  const interrupted = await interruptTaskSessionForReplan(session.id, "revise plan");
+
+  assert.equal(interrupted?.status, "awaiting_replan");
+  assert.equal(interrupted?.planApproval?.status, "pending");
+  assert.equal(interrupted?.planItems?.[0]?.status, "blocked");
+  assert.equal(interrupted?.planRevisions?.[0]?.trigger, "user");
+
+  const resumed = await approveTaskSessionPlan(session.id);
+
+  assert.equal(resumed?.status, "running");
+  assert.equal(resumed?.planApproval?.status, "approved");
+});
+
 test("skips task plans for simple chat and command tasks", async () => {
   const { session } = await createIsolatedTaskSession("解释这个函数是什么意思");
   const chatClassification = {
@@ -142,6 +159,37 @@ test("skips task plans for simple chat and command tasks", async () => {
     }),
     false
   );
+});
+
+test("skips task plans for simple edit tasks but keeps them for complex edits", async () => {
+  const { session: simpleSession } = await createIsolatedTaskSession("淇敼鎸夐挳棰滆壊");
+  const simpleEditClassification = {
+    intent: "edit" as const,
+    confidence: 0.9,
+    normalizedGoal: "淇敼鎸夐挳棰滆壊",
+    reason: "test"
+  };
+
+  assert.equal(shouldInitializeTaskPlan(simpleSession.userGoal, simpleEditClassification, { selectedPath: "apps/web/src/App.tsx", contextFileCount: 1 }), false);
+  assert.equal(await initializeTaskPlan(simpleSession, simpleEditClassification, { selectedPath: "apps/web/src/App.tsx", contextFileCount: 1 }), null);
+
+  const { session: complexSession } = await createIsolatedTaskSession("淇鏋勫缓澶辫触骞舵洿鏂板涓枃浠剁殑瀵煎叆");
+  const complexEditClassification = {
+    intent: "diagnose_then_edit" as const,
+    confidence: 0.9,
+    normalizedGoal: "淇鏋勫缓澶辫触骞舵洿鏂板涓枃浠剁殑瀵煎叆",
+    reason: "test"
+  };
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+
+  try {
+    const planned = await initializeTaskPlan(complexSession, complexEditClassification, { contextFileCount: 2 });
+    assert.ok((planned?.planItems?.length || 0) > 0);
+    assert.equal(planned?.planApproval?.status, "pending");
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+  }
 });
 
 test("initializes task plans for explicit planning requests", async () => {
@@ -201,6 +249,30 @@ test("keeps validation active when a compact edit plan has no apply step", async
 
   const afterApply = await advanceTaskPlanProgress(session.id, "patch_applied");
   assert.deepEqual(afterApply?.planItems?.map((item) => item.status), ["completed", "completed", "in_progress"]);
+});
+
+
+test("updates approval request status by action id", async () => {
+  const { session } = await createIsolatedTaskSession("approve tool action");
+  await appendTaskSessionStep(session.id, {
+    id: "approval-step",
+    type: "approval_request",
+    actionId: "edit_files:test-action",
+    actionType: "edit_files",
+    title: "Generate file changes",
+    summary: "Wait for the user to approve the patch.",
+    riskLevel: "medium",
+    status: "pending",
+    targets: ["src/App.tsx"],
+    createdAt: Date.now()
+  });
+
+  const approved = await decideTaskSessionApproval(session.id, "edit_files:test-action", "approved");
+  const step = approved?.steps.find((item) => item.type === "approval_request" && item.actionId === "edit_files:test-action");
+
+  assert.equal(step?.type, "approval_request");
+  assert.equal(step?.status, "approved");
+  assert.equal((await getTaskSession(session.id)).steps.find((item) => item.id === "approval-step")?.type, "approval_request");
 });
 
 test("links agent steps to active task plan item evidence", async () => {

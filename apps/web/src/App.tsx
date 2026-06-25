@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { type FileTreeNode } from "./api";
+import { decideApprovalRequest, type AgentStep, type FileTreeNode } from "./api";
 import { initialState, type AppState } from "./appState";
 import AppLayout from "./components/AppLayout";
 import { useChatSession } from "./hooks/useChatSession";
@@ -39,6 +39,14 @@ export default function App() {
     await chatSession.handleSendChatMessage(session.userGoal, undefined, session.id);
   }
 
+  async function handleInterruptTaskForReplan(taskSessionId: string, instruction: string) {
+    const session = await taskSessions.handleInterruptTaskPlan(taskSessionId, instruction);
+
+    if (!session) return;
+
+    chatSession.handleStopChat();
+  }
+
   async function handleOpenTaskSession(taskSessionId: string) {
     const session = await taskSessions.handleOpenTaskSession(taskSessionId);
 
@@ -48,8 +56,36 @@ export default function App() {
     }
   }
 
+  function upsertTaskSession(session: NonNullable<AppState["selectedTaskSession"]>) {
+    setState((current) => ({
+      ...current,
+      agentSteps: session.id === current.currentTaskSessionId || session.id === current.selectedTaskSession?.id ? session.steps : current.agentSteps,
+      selectedTaskSession: current.selectedTaskSession?.id === session.id ? session : current.selectedTaskSession,
+      taskSessions: [session, ...current.taskSessions.filter((item) => item.id !== session.id)].sort((left, right) => right.createdAt - left.createdAt)
+    }));
+  }
+
   async function handleApplyPatch(filePath?: string) {
     await patchActions.handleApply(filePath, commandCenter.handleValidateAndFix);
+  }
+
+  async function handleApprovalDecision(step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") {
+    const taskSessionId = state.currentTaskSessionId || state.selectedTaskSession?.id || null;
+
+    if (!taskSessionId) return;
+
+    if (step.actionType === "edit_files") {
+      if (decision === "approved") {
+        await patchActions.handleApply(undefined, commandCenter.handleValidateAndFix);
+      } else {
+        await patchActions.handleReject();
+      }
+    } else if (step.actionType === "run_command" && decision === "approved" && step.command) {
+      await commandCenter.handleValidateAndFix(step.command);
+    }
+
+    const { session } = await decideApprovalRequest(taskSessionId, step.actionId, decision);
+    upsertTaskSession(session);
   }
 
   return (
@@ -89,6 +125,7 @@ export default function App() {
       onDeletePlanItem={taskSessions.handleDeletePlanItem}
       onRewritePlan={taskSessions.handleRewritePlan}
       onApprovePlan={handleApprovePlan}
+      onInterruptTaskForReplan={handleInterruptTaskForReplan}
       onNewChat={chatSession.handleNewChat}
       onDeleteChatHistory={chatSession.handleDeleteChatHistory}
       onStopChat={chatSession.handleStopChat}
@@ -101,6 +138,7 @@ export default function App() {
       onApplyPatch={handleApplyPatch}
       onRejectPatch={patchActions.handleReject}
       onRollbackCheckpoint={patchActions.rollbackCheckpointAndRefresh}
+      onDecideApproval={handleApprovalDecision}
     />
   );
 }

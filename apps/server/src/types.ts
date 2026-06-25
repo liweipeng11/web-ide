@@ -170,6 +170,18 @@ export type AgentStep = {
       content: string;
     }
   | {
+      type: "approval_request";
+      actionId: string;
+      actionType: "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch";
+      title: string;
+      summary: string;
+      riskLevel: "low" | "medium" | "high";
+      status: "pending" | "approved" | "rejected" | "auto_approved";
+      targets?: string[];
+      command?: string;
+      details?: unknown;
+    }
+  | {
       type: "tool_call";
       toolName: string;
       input: unknown;
@@ -236,12 +248,15 @@ export type TaskPlanApproval = {
   approvedAt?: number;
 };
 
+// ?????????????????????????
+export type TaskSessionStatus = "running" | "success" | "failed" | "cancelled" | "awaiting_replan";
+
 export type TaskSession = {
   id: string;
   userGoal: string;
   chatId?: string;
   messageIds?: string[];
-  status: "running" | "success" | "failed" | "cancelled";
+  status: TaskSessionStatus;
   filesRead: string[];
   filesChanged: string[];
   commandsRun: string[];
@@ -275,6 +290,14 @@ export type UpdateTaskPlanItemRequest = {
 
 export type RewriteTaskPlanRequest = {
   instruction: string;
+};
+
+export type InterruptTaskPlanRequest = {
+  instruction?: string;
+};
+
+export type ApprovalDecisionRequest = {
+  decision: "approved" | "rejected";
 };
 
 export type ApplyPatchRequest = {

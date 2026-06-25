@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import type { TaskPlanItem, TaskPlanItemStatus, TaskSession } from "../api";
 import Icon from "./Icon";
 
 type Props = {
   session: TaskSession | null;
   loading: boolean;
+  streaming: boolean;
   disabled: boolean;
   compact?: boolean;
   onAddItem: (title: string) => Promise<void>;
@@ -12,6 +13,7 @@ type Props = {
   onDeleteItem: (itemId: string) => Promise<void>;
   onRewritePlan: (instruction: string) => Promise<void>;
   onApprovePlan: () => Promise<void>;
+  onInterruptForReplan?: (instruction: string) => Promise<void>;
 };
 
 const statusText: Record<TaskPlanItemStatus, string> = {
@@ -21,7 +23,7 @@ const statusText: Record<TaskPlanItemStatus, string> = {
   blocked: "受阻"
 };
 
-// 计划状态集中定义，避免界面文案和状态值散落在多个分支里。
+// 统一维护计划步骤状态，避免界面分散写死状态值。
 const statusOptions: TaskPlanItemStatus[] = ["pending", "in_progress", "completed", "blocked"];
 
 function getRevisionTriggerText(trigger: string) {
@@ -48,7 +50,19 @@ function countByStatus(items: TaskPlanItem[], status: TaskPlanItemStatus) {
   return items.filter((item) => item.status === status).length;
 }
 
-export default function TaskPlanPanel({ session, loading, disabled, compact = false, onAddItem, onUpdateItem, onDeleteItem, onRewritePlan, onApprovePlan }: Props) {
+export default function TaskPlanPanel({
+  session,
+  loading,
+  streaming,
+  disabled,
+  compact = false,
+  onAddItem,
+  onUpdateItem,
+  onDeleteItem,
+  onRewritePlan,
+  onApprovePlan,
+  onInterruptForReplan
+}: Props) {
   const [draftTitle, setDraftTitle] = useState("");
   const [rewriteInstruction, setRewriteInstruction] = useState("");
   const [editingItemId, setEditingItemId] = useState("");
@@ -56,7 +70,10 @@ export default function TaskPlanPanel({ session, loading, disabled, compact = fa
   const [editingNote, setEditingNote] = useState("");
   const planItems = session?.planItems || [];
   const planRevisions = session?.planRevisions || [];
+  const isAwaitingReplan = session?.status === "awaiting_replan";
   const canEdit = Boolean(session) && !disabled && !loading;
+  const canInterruptForReplan = Boolean(session) && Boolean(onInterruptForReplan) && streaming && !disabled;
+  const canSubmitPlanAction = canEdit || canInterruptForReplan;
   const completedCount = countByStatus(planItems, "completed");
   const inProgressCount = countByStatus(planItems, "in_progress");
   const blockedCount = countByStatus(planItems, "blocked");
@@ -98,8 +115,15 @@ export default function TaskPlanPanel({ session, loading, disabled, compact = fa
     setDraftTitle("");
   }
 
-  async function rewritePlan() {
+  async function submitPlanAction() {
     const instruction = rewriteInstruction.trim();
+
+    // 执行中优先走“中断并进入计划模式”，贴近 Claude Code 的交互心智。
+    if (canInterruptForReplan && onInterruptForReplan) {
+      await onInterruptForReplan(instruction);
+      setRewriteInstruction("");
+      return;
+    }
 
     if (!instruction) return;
 
@@ -120,10 +144,10 @@ export default function TaskPlanPanel({ session, loading, disabled, compact = fa
 
       {session?.planApproval?.status === "pending" && (
         <div className="task-plan-approval">
-          <strong>计划等待批准</strong>
-          <p>确认后智能体会按当前计划继续执行代码修改。</p>
+          <strong>{isAwaitingReplan ? "已进入计划模式" : "计划等待批准"}</strong>
+          <p>{isAwaitingReplan ? "当前执行已暂停，请先调整计划；确认后会按新计划继续。" : "确认后智能体会按当前计划继续执行代码修改。"}</p>
           <button type="button" disabled={!canEdit} onClick={() => void onApprovePlan()}>
-            批准执行
+            {isAwaitingReplan ? "批准继续执行" : "批准执行"}
           </button>
         </div>
       )}
@@ -133,12 +157,17 @@ export default function TaskPlanPanel({ session, loading, disabled, compact = fa
           className="task-plan-rewrite"
           onSubmit={(event) => {
             event.preventDefault();
-            void rewritePlan();
+            void submitPlanAction();
           }}
         >
-          <input value={rewriteInstruction} disabled={!canEdit} placeholder="用一句话调整计划，例如：把测试提前、删除第 3 步..." onChange={(event) => setRewriteInstruction(event.target.value)} />
-          <button type="submit" disabled={!canEdit || !rewriteInstruction.trim()}>
-            调整计划
+          <input
+            value={rewriteInstruction}
+            disabled={!canSubmitPlanAction}
+            placeholder={canInterruptForReplan ? "可选：说明为什么要暂停并重规划，例如：先确认路由版本再继续..." : "用一句话调整计划，例如：把测试提前、删除第 3 步..."}
+            onChange={(event) => setRewriteInstruction(event.target.value)}
+          />
+          <button type="submit" disabled={!canSubmitPlanAction || (!canInterruptForReplan && !rewriteInstruction.trim())}>
+            {canInterruptForReplan ? "中断并进入计划模式" : "调整计划"}
           </button>
         </form>
       )}

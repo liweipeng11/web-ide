@@ -264,6 +264,7 @@ AI_BASE_URL=https://api.openai.com/v1
 AI_MODEL=gpt-4.1-mini
 AI_CHAT_TEMPERATURE=0.3
 AI_EDIT_TEMPERATURE=0
+AI_FULL_IO_LOGGING=1
 SERVER_PORT=3001
 # Optional: override local app state storage. Defaults to .mini-ai/state/web-editor.
 # STATE_DIRECTORY=.mini-ai/state/web-editor
@@ -547,3 +548,10 @@ Run the checks with:
 pnpm --filter @mini-ai-web-editor/server typecheck
 pnpm --filter @mini-ai-web-editor/server test
 ```
+
+
+## AI Log Debugging
+
+- Set `AI_FULL_IO_LOGGING=1` to persist each model call into `.mini-ai/state/runtime/ai-logs/`.
+- Each JSON log keeps `requestBody`, `responseBody` / `responseText`, `outputText`, `status`, `error`, and `aborted`.
+- The server does not write the `Authorization` header, but it does keep the complete model input and output body.

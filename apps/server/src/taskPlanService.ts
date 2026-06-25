@@ -50,9 +50,34 @@ function isPlanStatus(value: unknown): value is TaskPlanItemStatus {
   return value === "pending" || value === "in_progress" || value === "completed" || value === "blocked";
 }
 
-function shouldRequirePlanApproval(classification?: AgentRequestClassification, options: { forceApproval?: boolean } = {}) {
+// 判断任务是否足够复杂，只有复杂编辑才进入“先计划后执行”的审批流。
+function isComplexTaskGoal(userGoal: string, intent: AgentIntent, options: { selectedPath?: string | null; contextFileCount?: number } = {}) {
+  const normalizedGoal = userGoal.trim();
+  const seemsComplex =
+    normalizedGoal.length >= 80 ||
+    complexGoalPatterns.some((pattern) => pattern.test(normalizedGoal)) ||
+    (options.contextFileCount || 0) >= 2;
+
+  if (intent === "diagnose_then_edit") {
+    return true;
+  }
+
+  if (intent === "edit") {
+    return seemsComplex;
+  }
+
+  if (intent === "inspect") {
+    return seemsComplex;
+  }
+
+  return false;
+}
+
+function shouldRequirePlanApproval(classification?: AgentRequestClassification, options: { forceApproval?: boolean; selectedPath?: string | null; contextFileCount?: number } = {}) {
   if (options.forceApproval !== undefined) return options.forceApproval;
-  return classification?.intent === "edit" || classification?.intent === "diagnose_then_edit";
+  const intent = classification?.intent || "edit";
+  const normalizedGoal = classification?.normalizedGoal || "";
+  return isComplexTaskGoal(normalizedGoal, intent, options);
 }
 
 export function createFallbackTaskPlan(userGoal: string, intent: AgentIntent = "edit"): GeneratedPlanItem[] {
@@ -92,16 +117,14 @@ export function shouldInitializeTaskPlan(userGoal: string, classification?: Agen
   }
 
   if (intent === "edit" || intent === "diagnose_then_edit") {
-    return true;
+    return isComplexTaskGoal(normalizedGoal, intent, options);
   }
 
   if (intent === "command") {
     return false;
   }
 
-  const seemsComplex = normalizedGoal.length >= 80 || complexGoalPatterns.some((pattern) => pattern.test(normalizedGoal)) || (options.contextFileCount || 0) >= 2;
-
-  return intent === "inspect" ? seemsComplex : false;
+  return intent === "inspect" ? isComplexTaskGoal(normalizedGoal, intent, options) : false;
 }
 
 export async function generateTaskPlan(userGoal: string, classification?: AgentRequestClassification): Promise<GeneratedPlanItem[]> {

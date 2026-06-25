@@ -32,6 +32,7 @@ type Props = {
   onDeletePlanItem: (taskSessionId: string, planItemId: string) => Promise<void>;
   onRewritePlan: (taskSessionId: string, instruction: string) => Promise<void>;
   onApprovePlan: (taskSessionId: string) => Promise<void>;
+  onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
   onRollbackCheckpoint: (checkpointId: string) => void;
   onNewChat: () => void;
   onDeleteHistory: (path: string) => void;
@@ -43,6 +44,7 @@ type Props = {
   onRerunMessage: (message: FileChatMessage) => void;
   onRunCommandSuggestion: (suggestion: CommandSuggestion, message: FileChatMessage, options?: { autoSafeOnly?: boolean }) => Promise<CommandResult | null>;
   onGenerate: () => void;
+  onDecideApproval: (step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") => Promise<void>;
 };
 
 export default function ChatPanel({
@@ -71,6 +73,7 @@ export default function ChatPanel({
   onDeletePlanItem,
   onRewritePlan,
   onApprovePlan,
+  onInterruptTaskForReplan,
   onRollbackCheckpoint,
   onNewChat,
   onDeleteHistory,
@@ -81,7 +84,8 @@ export default function ChatPanel({
   onBranchMessage,
   onRerunMessage,
   onRunCommandSuggestion,
-  onGenerate
+  onGenerate,
+  onDecideApproval
 }: Props) {
   const [editingMessageId, setEditingMessageId] = useState("");
   const [editingDraft, setEditingDraft] = useState("");
@@ -285,7 +289,7 @@ export default function ChatPanel({
   }
 
   function getTaskStatusText(status: TaskSession["status"]) {
-    return status === "running" ? "运行中" : status === "success" ? "成功" : status === "failed" ? "失败" : "已取消";
+    return status === "running" ? "?????" : status === "success" ? "???" : status === "failed" ? "???" : status === "awaiting_replan" ? "??????" : "?????";
   }
 
   function renderTaskPathList(items: string[], emptyText: string) {
@@ -308,12 +312,14 @@ export default function ChatPanel({
         session={session}
         compact={compact}
         loading={loading}
+        streaming={streaming && session?.id === activeTaskSession?.id}
         disabled={disabled}
         onAddItem={(title) => (session ? onAddPlanItem(session.id, title) : Promise.resolve())}
         onUpdateItem={(itemId, updates) => (session ? onUpdatePlanItem(session.id, itemId, updates) : Promise.resolve())}
         onDeleteItem={(itemId) => (session ? onDeletePlanItem(session.id, itemId) : Promise.resolve())}
         onRewritePlan={(instruction) => (session ? onRewritePlan(session.id, instruction) : Promise.resolve())}
         onApprovePlan={() => (session ? onApprovePlan(session.id) : Promise.resolve())}
+        onInterruptForReplan={(instruction) => (session ? onInterruptTaskForReplan(session.id, instruction) : Promise.resolve())}
       />
     );
   }
@@ -492,7 +498,7 @@ export default function ChatPanel({
               </section>
               <section>
                 <h3>完整过程</h3>
-                <AgentStepsPanel steps={selectedTaskSession.steps} />
+                <AgentStepsPanel steps={selectedTaskSession.steps} disabled={disabled || loading} onDecideApproval={onDecideApproval} />
               </section>
             </div>
           )}
@@ -511,7 +517,7 @@ export default function ChatPanel({
             return (
               <article key={message.id} className={"chat-message " + message.role}>
                 <strong className="chat-message-role">{message.role === "user" ? "用户" : "智能体"}</strong>
-                <AgentStepsPanel inline steps={messageAgentSteps} />
+                <AgentStepsPanel inline steps={messageAgentSteps} disabled={disabled || loading} onDecideApproval={onDecideApproval} />
                 {editingMessageId === message.id ? (
                   <div className="chat-message-edit">
                     <textarea value={editingDraft} onChange={(event) => setEditingDraft(event.target.value)} />

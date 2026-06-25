@@ -12,6 +12,47 @@ test("routes warning plus repair requests to diagnose_then_edit in local fallbac
   assert.equal(shouldGeneratePatchForIntent(classification.intent), true);
 });
 
+test("uses recent editable context for natural continuation requests", () => {
+  const history: FileChatMessage[] = [
+    {
+      id: "user-1",
+      role: "user",
+      content: "首页工具卡片样式丢失，先分析原因",
+      createdAt: new Date().toISOString()
+    },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      content: "需要修改 src/views/HomeView.vue 中的工具卡片样式，并补充 scoped CSS。",
+      createdAt: new Date().toISOString()
+    }
+  ];
+  const editRequest = buildContextualEditRequest(history, "按这个处理", "修复首页工具卡片样式丢失问题");
+
+  assert.match(editRequest, /HomeView\.vue/);
+  assert.match(editRequest, /按这个处理/);
+});
+
+test("does not treat short requests with explicit new targets as contextual follow-ups", () => {
+  const history: FileChatMessage[] = [
+    {
+      id: "user-1",
+      role: "user",
+      content: "首页工具卡片样式丢失，先分析原因",
+      createdAt: new Date().toISOString()
+    },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      content: "需要修改 src/views/HomeView.vue 中的工具卡片样式。",
+      createdAt: new Date().toISOString()
+    }
+  ];
+  const editRequest = buildContextualEditRequest(history, "改 App.tsx", undefined);
+
+  assert.equal(editRequest, "改 App.tsx");
+});
+
 test("expands short edit follow-ups with recent conversation context", () => {
   const history: FileChatMessage[] = [
     {

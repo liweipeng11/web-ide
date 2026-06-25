@@ -17,8 +17,8 @@ import { createGitWorkflowRouter } from "./gitWorkflow/routes.js";
 import { clearPendingPatches, deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import type { ApplyPatchRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionCommand, addTaskSessionFilesChanged, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, deleteTaskPlanItem, deleteTaskSession, listTaskSessions, getTaskSession, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
+import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionCommand, addTaskSessionFilesChanged, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
@@ -90,7 +90,18 @@ async function readChatContextFiles(paths: string[]) {
 }
 
 function formatTaskSessionStatus(status: TaskSession["status"]) {
-  return status === "running" ? "运行中" : status === "success" ? "成功" : status === "failed" ? "失败" : "已取消";
+  return status === "running" ? "?????" : status === "success" ? "???" : status === "failed" ? "???" : status === "awaiting_replan" ? "??????" : "?????";
+}
+
+async function shouldAutoCancelTaskSession(taskSessionId: string | null) {
+  if (!taskSessionId) return true;
+
+  try {
+    const session = await getTaskSession(taskSessionId);
+    return session.status !== "awaiting_replan";
+  } catch {
+    return true;
+  }
 }
 
 function summarizeTaskSessionList(title: string, values: string[]) {
@@ -410,8 +421,15 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
     const message = error instanceof Error ? error.message : "Internal server error";
     logStreamRoute(streamRunId, "error", { message });
     console.error(message);
-    await advanceTaskPlanProgress(taskSessionId, clientClosed ? "task_cancelled" : "task_failed");
-    await updateTaskSessionStatus(taskSessionId, clientClosed ? "cancelled" : "failed");
+    if (clientClosed) {
+      if (await shouldAutoCancelTaskSession(taskSessionId)) {
+        await advanceTaskPlanProgress(taskSessionId, "task_cancelled");
+        await updateTaskSessionStatus(taskSessionId, "cancelled");
+      }
+    } else {
+      await advanceTaskPlanProgress(taskSessionId, "task_failed");
+      await updateTaskSessionStatus(taskSessionId, "failed");
+    }
 
     if (!response.headersSent) {
       response.status(error instanceof HttpError ? error.status : 500).json({ error: message });
@@ -525,10 +543,34 @@ app.post(
 );
 
 app.post(
+  "/api/task-sessions/:taskSessionId/plan/replan",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    const { instruction } = request.body as Partial<InterruptTaskPlanRequest>;
+    response.json({ session: await interruptTaskSessionForReplan(taskSessionId, instruction || "") });
+  })
+);
+
+app.post(
   "/api/task-sessions/:taskSessionId/plan/approve",
   asyncRoute(async (request, response) => {
     const taskSessionId = String(request.params.taskSessionId || "");
     response.json({ session: await approveTaskSessionPlan(taskSessionId) });
+  })
+);
+
+app.post(
+  "/api/task-sessions/:taskSessionId/approvals/:actionId",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    const actionId = String(request.params.actionId || "");
+    const { decision } = request.body as Partial<ApprovalDecisionRequest>;
+
+    if (decision !== "approved" && decision !== "rejected") {
+      throw new HttpError(400, "decision must be approved or rejected");
+    }
+
+    response.json({ session: await decideTaskSessionApproval(taskSessionId, actionId, decision) });
   })
 );
 
@@ -619,14 +661,19 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
   let completed = false;
   let clientClosed = false;
   let taskSessionId: string | null = null;
+  let streamChatKey: string | null = null;
+  let assistantMessageId: string | null = null;
   const controller = new AbortController();
 
   response.on("close", () => {
     if (completed) return;
     clientClosed = true;
     controller.abort();
-    void advanceTaskPlanProgress(taskSessionId, "task_cancelled");
-    void updateTaskSessionStatus(taskSessionId, "cancelled");
+    void (async () => {
+      if (!(await shouldAutoCancelTaskSession(taskSessionId))) return;
+      await advanceTaskPlanProgress(taskSessionId, "task_cancelled");
+      await updateTaskSessionStatus(taskSessionId, "cancelled");
+    })();
   });
 
   const sendEvent = (event: string, data: unknown) => {
@@ -638,6 +685,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
   try {
     const { path: selectedPath, userRequest, replayFromMessageId, approvedTaskSessionId } = request.body as Partial<FileChatRequest>;
     const chatKey = requireChatKey(request.body as Partial<FileChatRequest>);
+    streamChatKey = chatKey;
 
     if (!userRequest?.trim()) {
       throw new HttpError(400, "userRequest is required");
@@ -654,6 +702,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     const contextFiles = await readChatContextFiles(contextPaths);
     await addTaskSessionFilesRead(taskSession.id, contextFiles.map((file) => file.path));
     const turn = await startFileChatTurn(chatKey, userRequest.trim(), replayFromMessageId);
+    assistantMessageId = turn.assistantMessage.id;
 
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -758,8 +807,22 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       return;
     }
 
-    sendEvent("agent_step", { step: createAgentStep({ type: "error", message }) });
-    sendEvent("error", { error: message });
+    // 使用字符串拼接回填错误，避免模板字符串在编码异常时丢失真实报错内容。
+    const assistantError = "本次请求失败：" + message;
+    const messages =
+      streamChatKey && assistantMessageId
+        ? await finishFileChatTurn(streamChatKey, assistantMessageId, assistantError).catch(() => null)
+        : null;
+
+    sendEvent("agent_step", { step: createAgentStep({ type: "error", message: assistantError }) });
+    if (assistantMessageId) {
+      sendEvent("delta", { id: assistantMessageId, delta: assistantError });
+    }
+    if (messages) {
+      sendEvent("done", { messages });
+    } else {
+      sendEvent("error", { error: assistantError });
+    }
     response.end();
   }
 });

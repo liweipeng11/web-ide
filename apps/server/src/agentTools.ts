@@ -2,7 +2,7 @@ import { logAi } from "./aiHttp.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
 import { readWorkspaceFile, readWorkspaceFileRange } from "./fileTools.js";
 import { inspectCurrentProject } from "./projectInspector.js";
-import { createAgentStep } from "./routeAgentSteps.js";
+import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
 
 export type AgentContext = {
@@ -311,6 +311,68 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
   return `Use ${toolName}.`;
 }
 
+function createToolApprovalStep(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "inspectProject") {
+    return createApprovalRequestStep({
+      actionType: "inspect_project",
+      title: "检查项目结构",
+      summary: "读取 package 信息、依赖和框架线索，帮助智能体选择合适实现方式。",
+      status: "auto_approved"
+    });
+  }
+
+  if (toolName === "searchCode") {
+    const query = String(args.query || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "search_code",
+      title: "搜索代码库",
+      summary: `准备用关键词“${query}”搜索当前工作区。`,
+      status: "auto_approved",
+      targets: query ? [query] : undefined,
+      details: { query }
+    });
+  }
+
+  if (toolName === "readFile") {
+    const filePath = String(args.filePath || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "read_file",
+      title: "读取文件",
+      summary: `准备用作上下文读取 ${filePath || "目标文件"}。`,
+      status: "auto_approved",
+      targets: filePath ? [filePath] : undefined,
+      details: { filePath }
+    });
+  }
+
+  if (toolName === "readFileRange") {
+    const filePath = String(args.filePath || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "read_file",
+      title: "读取文件片段",
+      summary: `准备用作上下文读取 ${filePath || "目标文件"} 的指定行范围。`,
+      status: "auto_approved",
+      targets: filePath ? [filePath] : undefined,
+      details: {
+        filePath,
+        startLine: args.startLine,
+        endLine: args.endLine
+      }
+    });
+  }
+
+  return createApprovalRequestStep({
+    actionType: "inspect_project",
+    title: "调用工具",
+    summary: `准备用工具 ${toolName} 获取上下文。`,
+    status: "auto_approved",
+    details: args
+  });
+}
+
 export function createAgentToolRuntime(options: Omit<AgentToolRuntime, "cache">): AgentToolRuntime {
   return { ...options, cache: new Map<string, unknown>() };
 }
@@ -320,6 +382,7 @@ export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: Age
   const args = parseArguments(toolCall.function.arguments);
   const definition = registry.get(toolName);
   logAi(runtime.runId, "tool.call", { name: toolName, arguments: args });
+  runtime.onAgentStep?.(createToolApprovalStep(toolName, args));
   runtime.onAgentStep?.(
     createAgentStep({
       type: "tool_call",

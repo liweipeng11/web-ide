@@ -4,7 +4,7 @@ import { createDiffHtml, createMultiFileDiffHtml } from "./diffTools.js";
 import { HttpError } from "./errors.js";
 import { listFiles, readWorkspaceFile, safeResolve } from "./fileTools.js";
 import { createPendingPatch } from "./patchStore.js";
-import { createAgentStep } from "./routeAgentSteps.js";
+import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import type { AiEditResult, FileTreeNode } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { isValidationCommand, selectDefaultValidationCommand } from "./validationCommand.js";
@@ -167,6 +167,16 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   let oldContent = "";
 
   if (selectedFilePath) {
+    onAgentStep?.(
+      createApprovalRequestStep({
+        actionType: "read_file",
+        title: "读取当前文件",
+        summary: `准备用作编辑上下文读取 ${selectedFilePath}。`,
+        status: "auto_approved",
+        targets: [selectedFilePath],
+        details: { selected: true }
+      })
+    );
     onAgentStep?.(createAgentStep({ type: "tool_call", toolName: "readFile", input: { filePath: selectedFilePath, selected: true } }));
     oldContent = await readWorkspaceFile(selectedFilePath);
     onAgentStep?.(createAgentStep({ type: "tool_result", toolName: "readFile", output: { filePath: selectedFilePath, chars: oldContent.length, selected: true } }));
@@ -229,6 +239,17 @@ export async function createEditPatchResponse(filePath: string | null | undefine
 
   const uniqueChanges = [...new Map((validatedPaths.files || []).map((change) => [change.path, change])).values()];
   logRoute(runId, "patch.prepare", { files: uniqueChanges.map((change) => change.path) });
+  onAgentStep?.(
+    createApprovalRequestStep({
+      actionType: "edit_files",
+      title: "生成文件修改",
+      summary: `准备生成 ${uniqueChanges.length} 个文件的补丁，用户审核后才会写入工作区。`,
+      riskLevel: "medium",
+      status: "pending",
+      targets: uniqueChanges.map((change) => change.path),
+      details: { files: uniqueChanges.map((change) => ({ path: change.path, status: change.status, summary: change.summary })) }
+    })
+  );
   onAgentStep?.(createAgentStep({ type: "edit", files: uniqueChanges.map((change) => change.path) }));
   const files = (
     await Promise.all(
@@ -260,6 +281,19 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   const defaultValidationCommand = await selectDefaultValidationCommand();
   const suggestedValidationCommands = aiResult.commandsToRun?.filter(isValidationCommand) || [];
   const commandsToRun = suggestedValidationCommands.length ? suggestedValidationCommands : defaultValidationCommand ? [defaultValidationCommand] : undefined;
+  for (const command of commandsToRun || []) {
+    onAgentStep?.(
+      createApprovalRequestStep({
+        actionType: "run_command",
+        title: "建议运行验证命令",
+        summary: "补丁生成后建议运行验证命令，执行前仍由用户确认。",
+        riskLevel: "medium",
+        status: "pending",
+        command,
+        details: { source: suggestedValidationCommands.includes(command) ? "ai" : "default" }
+      })
+    );
+  }
   const patch = createPendingPatch(files, taskSessionId, commandsToRun);
   const selectedFileChange = (selectedFilePath ? files.find((change) => change.path === selectedFilePath) : null) || files[0];
   logRoute(runId, "done", { elapsedMs: Date.now() - startedAt, patchId: patch.patchId, files: files.map((file) => file.path) });

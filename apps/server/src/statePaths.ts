@@ -6,6 +6,8 @@ import { safeResolve } from "./fileTools.js";
 const projectRuntimeRoot = ".mini-ai/state/runtime";
 const legacyProjectRuntimeRoot = ".ai-agent";
 
+type RuntimeDirectoryName = "checkpoints" | "task-sessions" | "ai-logs";
+
 export function appStatePath(fileName: string) {
   return path.join(config.stateDirectory, fileName);
 }
@@ -14,11 +16,11 @@ export function legacyAppStatePath(fileName: string) {
   return path.join(config.legacyStateDirectory, fileName);
 }
 
-export function projectRuntimeDirectory(name: "checkpoints" | "task-sessions") {
+export function projectRuntimeDirectory(name: RuntimeDirectoryName) {
   return safeResolve(`${projectRuntimeRoot}/${name}`, { allowIgnored: true });
 }
 
-export function legacyProjectRuntimeDirectory(name: "checkpoints" | "task-sessions") {
+export function legacyProjectRuntimeDirectory(name: RuntimeDirectoryName) {
   return safeResolve(`${legacyProjectRuntimeRoot}/${name}`, { allowIgnored: true });
 }
 

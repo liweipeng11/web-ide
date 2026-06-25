@@ -1,5 +1,5 @@
 import type { Dispatch, PointerEvent, SetStateAction } from "react";
-import type { CommandResult, FileTreeNode, TaskPlanItemStatus } from "../api";
+import type { AgentStep, CommandResult, FileTreeNode, TaskPlanItemStatus } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
 import GitWorkflowPanel from "../gitWorkflow/GitWorkflowPanel";
@@ -48,6 +48,7 @@ type Props = {
   onDeletePlanItem: (taskSessionId: string, planItemId: string) => Promise<void>;
   onRewritePlan: (taskSessionId: string, instruction: string) => Promise<void>;
   onApprovePlan: (taskSessionId: string) => Promise<void>;
+  onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
   onNewChat: () => void;
   onDeleteChatHistory: (path: string) => Promise<void>;
   onStopChat: () => void;
@@ -60,6 +61,7 @@ type Props = {
   onApplyPatch: (filePath?: string) => Promise<void>;
   onRejectPatch: (filePath?: string) => Promise<void>;
   onRollbackCheckpoint: (checkpointId: string) => Promise<void>;
+  onDecideApproval: (step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") => Promise<void>;
 };
 
 export default function AppLayout({
@@ -98,6 +100,7 @@ export default function AppLayout({
   onDeletePlanItem,
   onRewritePlan,
   onApprovePlan,
+  onInterruptTaskForReplan,
   onNewChat,
   onDeleteChatHistory,
   onStopChat,
@@ -109,7 +112,8 @@ export default function AppLayout({
   onGenerate,
   onApplyPatch,
   onRejectPatch,
-  onRollbackCheckpoint
+  onRollbackCheckpoint,
+  onDecideApproval
 }: Props) {
   // 优先展示当前正在运行的任务计划，历史任务详情仍在展开面板里维护。
   const activeTaskSession = state.taskSessions.find((session) => session.id === state.currentTaskSessionId) || state.selectedTaskSession || null;
@@ -274,6 +278,7 @@ export default function AppLayout({
               onDeletePlanItem={onDeletePlanItem}
               onRewritePlan={onRewritePlan}
               onApprovePlan={onApprovePlan}
+              onInterruptTaskForReplan={onInterruptTaskForReplan}
               onRollbackCheckpoint={(checkpointId) => void onRollbackCheckpoint(checkpointId)}
               onNewChat={onNewChat}
               onDeleteHistory={(path) => void onDeleteChatHistory(path)}
@@ -298,6 +303,7 @@ export default function AppLayout({
                 onRerunMessage(message.content, message.id);
               }}
               onGenerate={onGenerate}
+              onDecideApproval={onDecideApproval}
             />
           </div>
         </section>

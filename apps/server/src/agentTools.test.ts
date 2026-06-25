@@ -70,3 +70,28 @@ test("readFileRange caps very large line ranges", async () => {
   assert.equal(data.hasMoreAfter, true);
   assert.equal(data.truncated, true);
 });
+
+test("emits an approval request before running a read tool", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "hello\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const steps: Array<{ type: string; actionType?: string; status?: string; toolName?: string }> = [];
+  await executeAgentToolCall(
+    createToolCall("readFile", { filePath: "sample.txt" }),
+    createAgentToolRuntime({
+      agentContext: createAgentContext(),
+      runId: "test-read-approval",
+      onAgentStep(step) {
+        steps.push(step);
+      }
+    })
+  );
+
+  // 工具真正执行前先生成动作预告，让前端能展示类似 Cline 的审批卡片。
+  assert.equal(steps[0].type, "approval_request");
+  assert.equal(steps[0].actionType, "read_file");
+  assert.equal(steps[0].status, "auto_approved");
+  assert.equal(steps[1].type, "tool_call");
+  assert.equal(steps[1].toolName, "readFile");
+});

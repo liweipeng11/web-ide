@@ -633,6 +633,105 @@
   word-break: break-word;
 }
 
+.agent-step-approval_request > span {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.agent-approval-card {
+  border: 1px solid #d8dee5;
+  border-left: 4px solid #94a3b8;
+  border-radius: 6px;
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 8px;
+}
+
+.agent-approval-card.risk-low {
+  border-left-color: #17613a;
+}
+
+.agent-approval-card.risk-medium {
+  border-left-color: #c05621;
+}
+
+.agent-approval-card.risk-high {
+  border-left-color: #b42318;
+}
+
+.agent-approval-card-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.agent-approval-card-header span,
+.agent-approval-card-header small {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.agent-approval-card-header small {
+  color: #647181;
+}
+
+.agent-approval-card strong {
+  color: #1f2d3d;
+  font-size: 11px;
+}
+
+.agent-approval-card p {
+  color: #475569;
+  font-size: 10px;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.agent-approval-card ul {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.agent-approval-card code {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  color: #334155;
+  display: block;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  overflow: hidden;
+  padding: 4px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-approval-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.agent-approval-actions button {
+  background: #1d6fd8;
+  border-color: #1d6fd8;
+  color: #ffffff;
+  font-size: 10px;
+  min-height: 26px;
+  padding: 0 10px;
+}
+
+.agent-approval-actions button.secondary {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+
 .chat-message {
   border-bottom: 1px solid #edf1f5;
   padding: 8px 0;

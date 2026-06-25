@@ -288,6 +288,7 @@ export async function approveTaskSessionPlan(taskSessionId: string | null | unde
 
   return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
     ...session,
+    status: session.status === "awaiting_replan" ? "running" : session.status,
     planApproval: {
       required: Boolean(session.planApproval?.required),
       status: "approved",
@@ -296,6 +297,47 @@ export async function approveTaskSessionPlan(taskSessionId: string | null | unde
     },
     updatedAt: Date.now()
   }));
+}
+
+// ???????????????? Claude Code ????????????
+export async function interruptTaskSessionForReplan(taskSessionId: string | null | undefined, instruction = "") {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const now = Date.now();
+    const previousItems = normalizeTaskPlanItems(session.planItems);
+    const nextItems = previousItems.map((item) => ({ ...item }));
+    const activeIndex = nextItems.findIndex((item) => item.status === "in_progress");
+
+    if (activeIndex !== -1) {
+      nextItems[activeIndex] = {
+        ...nextItems[activeIndex],
+        status: "blocked",
+        note: "?????????????????????",
+        updatedAt: now
+      };
+    }
+
+    const revision = createTaskPlanRevision({
+      trigger: "user",
+      reason: instruction.trim() || "???????????????",
+      beforeItems: previousItems,
+      afterItems: nextItems
+    });
+
+    return {
+      ...session,
+      status: "awaiting_replan",
+      planItems: nextItems,
+      planRevisions: [revision, ...normalizeTaskPlanRevisions(session.planRevisions)].slice(0, 20),
+      planApproval: {
+        required: true,
+        status: "pending",
+        requestedAt: now
+      },
+      updatedAt: now
+    };
+  });
 }
 
 export type TaskPlanProgressPhase = "patch_generated" | "patch_applied" | "validation_failed" | "validation_success" | "task_failed" | "task_cancelled";
@@ -596,6 +638,39 @@ export async function appendTaskSessionStep(taskSessionId: string | null | undef
       filesChanged: unique([...session.filesChanged, ...filesChanged]),
       commandsRun: unique([...session.commandsRun, ...commands]),
       planItems,
+      updatedAt: Date.now()
+    };
+  });
+}
+
+export async function decideTaskSessionApproval(taskSessionId: string | null | undefined, actionId: string, decision: "approved" | "rejected") {
+  if (!taskSessionId) return null;
+
+  if (!actionId.trim()) {
+    throw new HttpError(400, "actionId is required");
+  }
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    let matched = false;
+    const steps = session.steps.map((step) => {
+      if (step.type !== "approval_request" || step.actionId !== actionId) {
+        return step;
+      }
+
+      matched = true;
+      return {
+        ...step,
+        status: decision
+      };
+    });
+
+    if (!matched) {
+      throw new HttpError(404, "Approval request not found");
+    }
+
+    return {
+      ...session,
+      steps,
       updatedAt: Date.now()
     };
   });

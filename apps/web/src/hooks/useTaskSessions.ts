@@ -1,5 +1,5 @@
-import type { Dispatch, SetStateAction } from "react";
-import { approveTaskPlan, createTaskPlanItem, deleteTaskPlanItem, deleteTaskSession, fetchTaskSession, fetchTaskSessions, rewriteTaskPlan, updateTaskPlanItem, type TaskPlanItemStatus, type TaskSession } from "../api";
+﻿import type { Dispatch, SetStateAction } from "react";
+import { approveTaskPlan, createTaskPlanItem, deleteTaskPlanItem, deleteTaskSession, fetchTaskSession, fetchTaskSessions, interruptTaskSessionPlan, rewriteTaskPlan, updateTaskPlanItem, type TaskPlanItemStatus, type TaskSession } from "../api";
 import { createChatId, type AppState } from "../appState";
 
 type UseTaskSessionsOptions = {
@@ -21,7 +21,7 @@ export function useTaskSessions({ state, setState }: UseTaskSessionsOptions) {
     }));
   }
 
-  // 计划项更新后同步任务列表和详情，避免两个区域显示不同版本。
+  // 计划更新后同步任务列表和详情，避免两个区域显示不同版本。
   function mergeTaskSession(session: TaskSession) {
     setState((current) => ({
       ...current,
@@ -88,6 +88,20 @@ export function useTaskSessions({ state, setState }: UseTaskSessionsOptions) {
     }
   }
 
+  async function handleInterruptTaskPlan(taskSessionId: string, instruction: string) {
+    if (!state.workspaceRoot || !state.streaming) return null;
+
+    try {
+      const { session } = await interruptTaskSessionPlan(taskSessionId, instruction);
+      if (!session) return null;
+      mergeTaskSession(session);
+      return session;
+    } catch (error) {
+      setState((current) => ({ ...current, error: error instanceof Error ? error.message : "中断并转入计划模式失败" }));
+      return null;
+    }
+  }
+
   async function handleOpenTaskSession(taskSessionId: string) {
     if (!state.workspaceRoot) return null;
 
@@ -150,6 +164,7 @@ export function useTaskSessions({ state, setState }: UseTaskSessionsOptions) {
     handleDeletePlanItem,
     handleRewritePlan,
     handleApprovePlan,
+    handleInterruptTaskPlan,
     handleOpenTaskSession,
     handleDeleteTaskSession,
     handleRefreshTaskSessions

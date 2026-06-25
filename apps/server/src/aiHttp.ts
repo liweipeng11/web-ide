@@ -1,5 +1,8 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
+import { projectRuntimeDirectory } from "./statePaths.js";
 
 type ChatCompletionResponse = {
   choices?: Array<{
@@ -18,6 +21,24 @@ type ChatCompletionResponse = {
   }>;
 };
 
+type AiExchangeLog = {
+  id: string;
+  createdAt: string;
+  mode: "non_stream" | "stream";
+  url: string;
+  attempt: number;
+  model?: unknown;
+  requestBody: unknown;
+  status?: number;
+  ok?: boolean;
+  responseBody?: unknown;
+  responseText?: string;
+  outputText?: string;
+  aborted?: boolean;
+  error?: string;
+  durationMs: number;
+};
+
 const AI_LOG_PREVIEW_CHARS = 500;
 const AI_FETCH_ATTEMPTS_PER_URL = 2;
 
@@ -32,7 +53,7 @@ function getChatCompletionUrls() {
       urls.push(`${normalizedBaseUrl}/v1/chat/completions`);
     }
   } catch {
-    // Let fetch surface the invalid URL error with a useful message.
+    // 让 fetch 自己抛出更明确的 URL 错误。
   }
 
   return urls;
@@ -106,15 +127,65 @@ function isProviderCompatibilityError(error: unknown) {
   );
 }
 
+function getBodyModel(body: unknown) {
+  return typeof body === "object" && body && "model" in body ? (body as { model?: unknown }).model : undefined;
+}
+
+function serializeForFullLog(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value)) as unknown;
+  } catch {
+    return previewForLog(value, 4000);
+  }
+}
+
+function createAiLogFileName(id: string) {
+  const iso = new Date().toISOString().replace(/[:.]/g, "-");
+  return `${iso}-${id}.json`;
+}
+
+async function persistAiExchangeLog(entry: Omit<AiExchangeLog, "id" | "createdAt">) {
+  if (!config.aiFullIoLogging) {
+    return;
+  }
+
+  try {
+    const directory = projectRuntimeDirectory("ai-logs");
+    await fs.mkdir(directory, { recursive: true });
+
+    const payload: AiExchangeLog = {
+      id: createAiRunId("ai-io"),
+      createdAt: new Date().toISOString(),
+      ...entry,
+      // 完整日志只记录请求体/响应体，不写入 Authorization 等敏感请求头。
+      requestBody: serializeForFullLog(entry.requestBody),
+      responseBody: serializeForFullLog(entry.responseBody)
+    };
+
+    const filePath = path.join(directory, createAiLogFileName(payload.id));
+    await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  } catch (error) {
+    console.warn("[ai:http] failed to persist full AI exchange log", error instanceof Error ? error.message : String(error));
+  }
+}
+
 export async function requestChatCompletion(body: unknown) {
   let lastErrorText = "";
 
   for (const url of getChatCompletionUrls()) {
     let response: Response | null = null;
+    let responseAttempt = 1;
 
     for (let attempt = 1; attempt <= AI_FETCH_ATTEMPTS_PER_URL; attempt += 1) {
+      const startedAt = Date.now();
+
       try {
-        logAi("http", "request", { url, attempt, model: typeof body === "object" && body && "model" in body ? (body as { model?: unknown }).model : undefined });
+        logAi("http", "request", { url, attempt, model: getBodyModel(body) });
+        responseAttempt = attempt;
         response = await fetch(url, {
           method: "POST",
           headers: {
@@ -128,6 +199,15 @@ export async function requestChatCompletion(body: unknown) {
         const message = formatFetchError(error);
         lastErrorText = message;
         logAi("http", "fetch.error", { url, attempt, error: message });
+        await persistAiExchangeLog({
+          mode: "non_stream",
+          url,
+          attempt,
+          model: getBodyModel(body),
+          requestBody: body,
+          error: message,
+          durationMs: Date.now() - startedAt
+        });
 
         if (attempt < AI_FETCH_ATTEMPTS_PER_URL) {
           await delay(400 * attempt);
@@ -142,11 +222,58 @@ export async function requestChatCompletion(body: unknown) {
       continue;
     }
 
+    const startedAt = Date.now();
+
     if (response.ok) {
-      return (await response.json()) as ChatCompletionResponse;
+      const responseText = await response.text();
+      let parsed: ChatCompletionResponse;
+
+      try {
+        parsed = (responseText ? JSON.parse(responseText) : {}) as ChatCompletionResponse;
+      } catch (error) {
+        await persistAiExchangeLog({
+          mode: "non_stream",
+          url,
+          attempt: 1,
+          model: getBodyModel(body),
+          requestBody: body,
+          status: response.status,
+          ok: true,
+          responseText,
+          error: error instanceof Error ? error.message : "Failed to parse AI response JSON",
+          durationMs: Date.now() - startedAt
+        });
+        throw error;
+      }
+
+      await persistAiExchangeLog({
+        mode: "non_stream",
+        url,
+        attempt: 1,
+        model: getBodyModel(body),
+        requestBody: body,
+        status: response.status,
+        ok: true,
+        responseBody: parsed,
+        responseText,
+        durationMs: Date.now() - startedAt
+      });
+      return parsed;
     }
 
     lastErrorText = await response.text();
+    await persistAiExchangeLog({
+      mode: "non_stream",
+      url,
+      attempt: 1,
+      model: getBodyModel(body),
+      requestBody: body,
+      status: response.status,
+      ok: false,
+      responseText: lastErrorText,
+      error: lastErrorText || `AI request failed with status ${response.status}`,
+      durationMs: Date.now() - startedAt
+    });
 
     if (response.status !== 404 && response.status !== 405) {
       throw new HttpError(response.status, lastErrorText || `AI request failed with status ${response.status}`);
@@ -239,9 +366,11 @@ export async function requestChatCompletionStream(body: unknown, onDelta: (delta
   let lastErrorText = "";
 
   for (const url of getChatCompletionUrls()) {
+    const startedAt = Date.now();
     let response: Response;
 
     try {
+      logAi("http", "stream.request", { url, model: getBodyModel(body) });
       response = await fetch(url, {
         method: "POST",
         headers: {
@@ -253,15 +382,46 @@ export async function requestChatCompletionStream(body: unknown, onDelta: (delta
       });
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
+        await persistAiExchangeLog({
+          mode: "stream",
+          url,
+          attempt: 1,
+          model: getBodyModel(body),
+          requestBody: body,
+          aborted: true,
+          outputText: "",
+          durationMs: Date.now() - startedAt
+        });
         return "";
       }
 
-      const message = error instanceof Error ? error.message : "AI request failed";
+      const message = formatFetchError(error);
+      await persistAiExchangeLog({
+        mode: "stream",
+        url,
+        attempt: 1,
+        model: getBodyModel(body),
+        requestBody: body,
+        error: message,
+        durationMs: Date.now() - startedAt
+      });
       throw new HttpError(502, `AI request failed: ${message}`);
     }
 
     if (!response.ok) {
       lastErrorText = await response.text();
+      await persistAiExchangeLog({
+        mode: "stream",
+        url,
+        attempt: 1,
+        model: getBodyModel(body),
+        requestBody: body,
+        status: response.status,
+        ok: false,
+        responseText: lastErrorText,
+        error: lastErrorText || `AI request failed with status ${response.status}`,
+        durationMs: Date.now() - startedAt
+      });
 
       if (response.status === 404 || response.status === 405) {
         continue;
@@ -271,6 +431,17 @@ export async function requestChatCompletionStream(body: unknown, onDelta: (delta
     }
 
     if (!response.body) {
+      await persistAiExchangeLog({
+        mode: "stream",
+        url,
+        attempt: 1,
+        model: getBodyModel(body),
+        requestBody: body,
+        status: response.status,
+        ok: false,
+        error: "AI response did not include a stream body",
+        durationMs: Date.now() - startedAt
+      });
       throw new HttpError(502, "AI response did not include a stream body");
     }
 
@@ -279,33 +450,80 @@ export async function requestChatCompletionStream(body: unknown, onDelta: (delta
     let buffer = "";
     let answer = "";
 
-    while (true) {
-      const { value, done } = await reader.read();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
 
-      if (done) break;
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-      for (const line of lines) {
-        const trimmed = line.trim();
+        for (const line of lines) {
+          const trimmed = line.trim();
 
-        if (!trimmed.startsWith("data:")) continue;
+          if (!trimmed.startsWith("data:")) continue;
 
-        const payload = trimmed.slice(5).trim();
+          const payload = trimmed.slice(5).trim();
 
-        if (!payload || payload === "[DONE]") continue;
+          if (!payload || payload === "[DONE]") continue;
 
-        const data = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
-        const delta = data.choices?.[0]?.delta?.content || "";
+          const data = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+          const delta = data.choices?.[0]?.delta?.content || "";
 
-        if (delta) {
-          answer += delta;
-          onDelta(delta);
+          if (delta) {
+            answer += delta;
+            onDelta(delta);
+          }
         }
       }
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        await persistAiExchangeLog({
+          mode: "stream",
+          url,
+          attempt: 1,
+          model: getBodyModel(body),
+          requestBody: body,
+          status: response.status,
+          ok: true,
+          aborted: true,
+          outputText: answer,
+          responseText: answer,
+          durationMs: Date.now() - startedAt
+        });
+        return answer;
+      }
+
+      await persistAiExchangeLog({
+        mode: "stream",
+        url,
+        attempt: 1,
+        model: getBodyModel(body),
+        requestBody: body,
+        status: response.status,
+        ok: false,
+        outputText: answer,
+        responseText: answer,
+        error: error instanceof Error ? error.message : "AI stream parsing failed",
+        durationMs: Date.now() - startedAt
+      });
+      throw error;
     }
+
+    await persistAiExchangeLog({
+      mode: "stream",
+      url,
+      attempt: 1,
+      model: getBodyModel(body),
+      requestBody: body,
+      status: response.status,
+      ok: true,
+      outputText: answer,
+      responseText: answer,
+      durationMs: Date.now() - startedAt
+    });
 
     return answer;
   }

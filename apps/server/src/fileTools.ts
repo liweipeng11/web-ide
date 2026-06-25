@@ -83,13 +83,11 @@ export async function listFiles(dir = "", includeIgnored = false): Promise<FileT
       const relativePath = toWorkspaceRelative(absolutePath);
 
       if (entry.isDirectory()) {
-        const shouldSkipChildren = includeIgnored && hasIgnoredSegment(relativePath);
-
         return {
           name: entry.name,
           path: relativePath,
           type: "directory" as const,
-          children: shouldSkipChildren ? [] : await listFiles(relativePath, includeIgnored)
+          children: await listFiles(relativePath, includeIgnored)
         };
       }
 

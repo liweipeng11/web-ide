@@ -45,6 +45,18 @@ type AgentStepPayload =
       content: string;
     }
   | {
+      type: "approval_request";
+      actionId: string;
+      actionType: "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch";
+      title: string;
+      summary: string;
+      riskLevel: "low" | "medium" | "high";
+      status: "pending" | "approved" | "rejected" | "auto_approved";
+      targets?: string[];
+      command?: string;
+      details?: unknown;
+    }
+  | {
       type: "tool_call";
       toolName: string;
       input: unknown;
@@ -225,37 +237,62 @@ export async function classifyAgentIntent(history: FileChatMessage[], userReques
   return (await classifyAgentRequest(history, userRequest)).intent;
 }
 
-function isShortEditFollowUp(userRequest: string) {
-  const normalized = userRequest.trim().toLowerCase();
-
-  if (normalized.length > 30) return false;
-
-  return [
-    "进行修复",
-    "修复",
-    "按你说的改",
-    "按上面改",
-    "照你说的改",
-    "照做",
-    "继续",
-    "继续修复",
-    "修复它",
-    "应用这个修改",
-    "do it",
-    "fix it",
-    "continue"
-  ].some((phrase) => normalized === phrase || normalized.includes(phrase));
-}
-
 function latestMessageContent(history: FileChatMessage[], role: FileChatMessage["role"]) {
   return [...history].reverse().find((message) => message.role === role && message.content.trim())?.content.trim() || "";
+}
+
+function hasPriorEditableContext(previousUserRequest: string, previousAssistantAnswer: string) {
+  const previousContext = `${previousUserRequest}\n${previousAssistantAnswer}`.toLowerCase();
+
+  return explicitEditPatterns.some((pattern) => pattern.test(previousContext)) || isDiagnosticRequest(previousContext) || /(?:patch|diff|修改|修复|文件|组件|接口|样式|warning|error|failed)/i.test(previousContext);
+}
+
+function isBriefContinuationCandidate(userRequest: string) {
+  const normalized = userRequest.trim().toLowerCase();
+
+  if (!normalized || normalized.length > 36) {
+    return false;
+  }
+
+  return /^(?:请)?(?:继续|继续处理|继续修复|修复|处理|执行|应用|确认|可以|就这样|照做|按(?:你|上面|这个|刚才|前面).*(?:改|做|处理|修复)|照(?:你|上面|这个|刚才|前面).*(?:改|做|处理|修复)|do it|fix it|continue|apply(?: it| this)?|go ahead)$/i.test(normalized);
+}
+
+function hasNewStandaloneEditTarget(userRequest: string) {
+  const normalized = userRequest.trim();
+
+  // 短跟进如果带了明确文件、路径或带引号的新文案，更可能是新的独立需求。
+  return /(?:[\w-]+\.(?:ts|tsx|js|jsx|vue|css|scss|html|json|md)|\/|\\|["“”'‘’][^"“”'‘’]{2,}["“”'‘’])/.test(normalized);
+}
+
+function shouldContinueEditFromContext(history: FileChatMessage[], userRequest: string, normalizedGoal?: string) {
+  const currentRequest = userRequest.trim();
+  const previousUserRequest = latestMessageContent(history, "user");
+  const previousAssistantAnswer = latestMessageContent(history, "assistant");
+
+  if (!previousUserRequest && !previousAssistantAnswer) {
+    return false;
+  }
+
+  if (!hasPriorEditableContext(previousUserRequest, previousAssistantAnswer)) {
+    return false;
+  }
+
+  if (normalizedGoal?.trim() && normalizedGoal.trim() !== currentRequest && currentRequest.length <= 60) {
+    return true;
+  }
+
+  if (hasNewStandaloneEditTarget(currentRequest)) {
+    return false;
+  }
+
+  return isBriefContinuationCandidate(currentRequest);
 }
 
 export function buildContextualEditRequest(history: FileChatMessage[], userRequest: string, normalizedGoal?: string) {
   const currentRequest = userRequest.trim();
   const normalized = normalizedGoal?.trim();
 
-  if (!isShortEditFollowUp(currentRequest)) {
+  if (!shouldContinueEditFromContext(history, currentRequest, normalized)) {
     return normalized || currentRequest;
   }
 
@@ -346,6 +383,29 @@ function normalizeSearchKeyword(value: string) {
   return value.trim().replace(/\s+/g, " ").slice(0, 80);
 }
 
+// 提取用户显式提到的按钮、文案或引号文本，避免搜索关键词只剩英文技术词。
+function extractQuotedSearchKeywords(source: string) {
+  const keywords: string[] = [];
+  const addKeyword = (keyword: string) => {
+    const normalized = normalizeSearchKeyword(keyword.replace(/^(?:把|将|给|把它|请把)\s*/u, "").replace(/\s*(?:改成|改为|换成|设为|做成|显示为).*$/u, ""));
+
+    if (normalized && !keywords.some((item) => item.toLowerCase() === normalized.toLowerCase())) {
+      keywords.push(normalized);
+    }
+  };
+
+  for (const match of source.matchAll(/["“”'‘’]([^"“”'‘’]{2,40})["“”'‘’]/g)) {
+    addKeyword(match[1]);
+  }
+
+  // 仅保留控件名前缀，避免把“把新增工具按钮改成二级样式”整段都当成搜索词。
+  for (const match of source.matchAll(/(?:^|[\s，。、“"'‘’“”:(（【[])([\u4e00-\u9fa5A-Za-z0-9 _-]{2,24}?)(?:按钮|文案|标题|菜单|文本)/g)) {
+    addKeyword(match[1]);
+  }
+
+  return keywords;
+}
+
 export function isIntermediateEditPlanSummary(summary: string) {
   const normalized = summary.trim();
 
@@ -411,6 +471,10 @@ export function derivePlanSearchKeywords(userRequest: string, summary: string) {
     }
   }
 
+  for (const keyword of extractQuotedSearchKeywords(source)) {
+    addKeyword(keyword);
+  }
+
   for (const token of source.match(/[A-Za-z_][A-Za-z0-9_-]{2,}/g) || []) {
     addKeyword(token);
   }
@@ -432,6 +496,10 @@ function deriveFallbackSearchKeywords(userRequest: string, filePath: string | nu
     addQuery(token);
   }
 
+  for (const keyword of extractQuotedSearchKeywords(userRequest)) {
+    addQuery(keyword);
+  }
+
   for (const keyword of derivePlanSearchKeywords(userRequest, "")) {
     addQuery(keyword);
   }
@@ -450,6 +518,18 @@ function deriveFallbackSearchKeywords(userRequest: string, filePath: string | nu
   }
 
   return queries.slice(0, MAX_PREFLIGHT_EDIT_SEARCH_QUERIES);
+}
+
+function shouldRunServerPreflightSearch(userRequest: string, filePath: string | null, pathRetryContext?: EditPathRetryContext) {
+  if (pathRetryContext?.reason === "no_file_changes") {
+    return true;
+  }
+
+  if (!filePath) {
+    return true;
+  }
+
+  return /(?:按钮|文案|标题|菜单|文本|label|button|title|tooltip|placeholder)/i.test(userRequest);
 }
 
 async function generateSearchKeywords(userRequest: string, filePath: string | null, runId: string, onAgentStep?: (step: AgentStep) => void) {
@@ -1081,8 +1161,24 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, onAgentStep });
   let nullPatchRecoveryAttempts = 0;
 
+  // 先做一次服务端预搜索，降低 provider 不支持强制 tool_choice 时卡在“需要先搜索”的概率。
+  if (shouldRunServerPreflightSearch(userRequest, filePath, pathRetryContext)) {
+    const preflightSearch = await runMandatoryEditPreflightSearch(userRequest, filePath, agentContext, runId, onAgentStep);
+    const automaticContextFiles = await readEditContextFiles(getFallbackSearchFilePaths(preflightSearch), agentContext, runId, onAgentStep);
+
+    toolMessages.push({
+      role: "user",
+      content: JSON.stringify({
+        fallbackSearch: preflightSearch,
+        automaticContextFiles,
+        instruction:
+          "The server already performed a preflight search before the first model step. Use fallbackSearch and automaticContextFiles as context, continue calling tools if needed, and return a non-empty patches array instead of stopping at a search plan."
+      })
+    });
+  }
+
   for (let step = 0; step < MAX_FILE_CHAT_TOOL_STEPS; step += 1) {
-    const forceInitialSearch = step === 0;
+    const forceInitialSearch = step === 0 && !agentContext.searchResultFiles.length;
     logAi(runId, "completion.request", { step, messageCount: toolMessages.length, tools: true, forceInitialSearch });
     const completionBody = {
       model: config.aiModel,
