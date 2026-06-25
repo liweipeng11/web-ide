@@ -310,7 +310,17 @@ app.post(
       confidence: 1,
       normalizedGoal: userRequest.trim(),
       reason: "Direct edit endpoint"
-    }, { forceApproval: false });
+    }, { forceApproval: true });
+
+    if (plannedTaskSession?.planApproval?.status === "pending") {
+      response.status(202).json({
+        taskSessionId: plannedTaskSession.id,
+        planPending: true,
+        summary: "已生成文件修改计划，请先批准计划后再执行代码修改。",
+        agentSteps: []
+      });
+      return;
+    }
     const agentSteps: AgentStep[] = [];
     const taskStepWrites: Promise<unknown>[] = [];
     const pushAgentStep = (step: AgentStep) => {
@@ -370,7 +380,7 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
       confidence: 1,
       normalizedGoal: userRequest.trim(),
       reason: "Direct edit stream endpoint"
-    }, { forceApproval: false });
+    }, { forceApproval: true });
 
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -388,6 +398,16 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
     };
 
     sendEvent("task_session", { session: plannedTaskSession || taskSession });
+
+    if (plannedTaskSession?.planApproval?.status === "pending") {
+      completed = true;
+      sendEvent("plan_pending", {
+        taskSessionId: plannedTaskSession.id,
+        message: "已生成文件修改计划，请先批准计划后再执行代码修改。"
+      });
+      response.end();
+      return;
+    }
 
     pushAgentStep({
       id: `${streamRunId}:start`,

@@ -54,6 +54,20 @@ export type PatchFileChange = {
   newContent: string;
   summary: string;
   diffHtml: string;
+  editHunks?: EditHunk[];
+};
+
+export type EditHunkLine = {
+  type: "context" | "add" | "remove";
+  content: string;
+};
+
+export type EditHunk = {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: EditHunkLine[];
 };
 
 export type FileChatMessage = {
@@ -285,6 +299,7 @@ export type FileChatStreamEvent =
 export type GenerateEditStreamEvent =
   | { event: "task_session"; data: { session: TaskSession } }
   | { event: "agent_step"; data: { step: AgentStep } }
+  | { event: "plan_pending"; data: { taskSessionId: string; message: string } }
   | { event: "done"; data: { patch: GenerateEditResponse } }
   | { event: "error"; data: { error: string } };
 

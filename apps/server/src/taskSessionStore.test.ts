@@ -161,7 +161,7 @@ test("skips task plans for simple chat and command tasks", async () => {
   );
 });
 
-test("skips task plans for simple edit tasks but keeps them for complex edits", async () => {
+test("requires task plans for edit tasks before code changes", async () => {
   const { session: simpleSession } = await createIsolatedTaskSession("淇敼鎸夐挳棰滆壊");
   const simpleEditClassification = {
     intent: "edit" as const,
@@ -170,8 +170,18 @@ test("skips task plans for simple edit tasks but keeps them for complex edits", 
     reason: "test"
   };
 
-  assert.equal(shouldInitializeTaskPlan(simpleSession.userGoal, simpleEditClassification, { selectedPath: "apps/web/src/App.tsx", contextFileCount: 1 }), false);
-  assert.equal(await initializeTaskPlan(simpleSession, simpleEditClassification, { selectedPath: "apps/web/src/App.tsx", contextFileCount: 1 }), null);
+  assert.equal(shouldInitializeTaskPlan(simpleSession.userGoal, simpleEditClassification, { selectedPath: "apps/web/src/App.tsx", contextFileCount: 1 }), true);
+
+  const previousAiApiKeyForSimple = config.aiApiKey;
+  config.aiApiKey = "";
+
+  try {
+    const plannedSimple = await initializeTaskPlan(simpleSession, simpleEditClassification, { selectedPath: "apps/web/src/App.tsx", contextFileCount: 1 });
+    assert.ok((plannedSimple?.planItems?.length || 0) > 0);
+    assert.equal(plannedSimple?.planApproval?.status, "pending");
+  } finally {
+    config.aiApiKey = previousAiApiKeyForSimple;
+  }
 
   const { session: complexSession } = await createIsolatedTaskSession("淇鏋勫缓澶辫触骞舵洿鏂板涓枃浠剁殑瀵煎叆");
   const complexEditClassification = {

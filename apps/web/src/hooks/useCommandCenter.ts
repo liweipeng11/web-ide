@@ -127,6 +127,16 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
             }));
           }
 
+          if (streamEvent.event === "plan_pending") {
+            streamTaskSessionId = streamEvent.data.taskSessionId;
+            setState((current) => ({
+              ...current,
+              currentTaskSessionId: streamEvent.data.taskSessionId,
+              error: streamEvent.data.message,
+              agentSteps: [...current.agentSteps, createClientErrorStep(streamEvent.data.message)]
+            }));
+          }
+
           if (streamEvent.event === "done") {
             streamTaskSessionId = streamEvent.data.patch.taskSessionId || streamTaskSessionId;
             setState((current) => ({

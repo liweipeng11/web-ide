@@ -13,6 +13,7 @@ import { buildUserPrompt, AI_AGENT_INTENT_SYSTEM_PROMPT, AI_FILE_CHAT_SYSTEM_PRO
 import { discoverProjectCommands } from "./commandDiscovery.js";
 import { formatCommandFailureForPrompt, getLastFailedCommandResultForChat } from "./commandResults.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
+import { buildEditScope } from "./editScope.js";
 import { readWorkspaceFile } from "./fileTools.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { discoverProjectRules } from "./projectRules.js";
@@ -90,7 +91,7 @@ export type AgentStep = {
 export type EditPathRetryContext = {
   invalidFilePaths: string[];
   validFilePaths: string[];
-  reason?: "invalid_paths" | "no_file_changes";
+  reason?: "invalid_paths" | "no_file_changes" | "scope_violation";
   previousSummary?: string;
 };
 
@@ -808,6 +809,21 @@ function createNullPatchRecoveryMessage(options: { summary: string; status: AiEd
   };
 }
 
+function attachEditScope(result: AiEditResult, agentContext: AgentContext, selectedFilePath: string | null, pathRetryContext?: EditPathRetryContext): AiEditResult {
+  const retryCandidateFiles =
+    pathRetryContext?.reason === "invalid_paths" || pathRetryContext?.reason === "scope_violation" ? pathRetryContext.validFilePaths : [];
+
+  return {
+    ...result,
+    editScope: buildEditScope({
+      selectedFilePath,
+      filesRead: agentContext.filesRead,
+      retryCandidateFiles,
+      allowNewFiles: true
+    })
+  };
+}
+
 
 async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentContext, onAgentStep: ((step: AgentStep) => void) | undefined, deferFinalAnswer: boolean): Promise<FileChatToolLoopResult> {
   const runId = createAiRunId("chat");
@@ -1148,6 +1164,8 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
                 instruction:
                   pathRetryContext.reason === "no_file_changes"
                     ? "Your previous edit response returned patches:null and could not be applied. The user's request requires code changes. Use projectFacts and inspectProject for framework/API errors, search/read the relevant files if needed, then return a non-empty patches array with oldContent and newContent. Only return patches:null if the request is truly impossible or unsafe and cite concrete file evidence in summary."
+                    : pathRetryContext.reason === "scope_violation"
+                    ? "Your previous edit response touched files outside the approved editable scope. Regenerate the patch using only validFilePaths for existing-file changes. If a new file is necessary, place it next to a validFilePaths entry. Do not include opportunistic cleanup or unrelated refactors."
                     : "Your previous edit response used file paths that do not exist in the workspace. Regenerate the full edit plan using only paths from validFilePaths."
               }
             : null,
@@ -1259,7 +1277,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
       }
 
       logAi(runId, "done", { elapsedMs: Date.now() - startedAt, patches: result.patches?.map((file) => file.filePath) || null, summary: result.summary });
-      return result;
+      return attachEditScope(result, agentContext, filePath, pathRetryContext);
     }
 
     toolMessages.push({
@@ -1320,7 +1338,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
     [...agentContext.filesRead, ...agentContext.searchResultFiles, ...(pathRetryContext?.validFilePaths || [])]
   );
   logAi(runId, "done.afterLimit", { elapsedMs: Date.now() - startedAt, patches: result.patches?.map((file) => file.filePath) || null, summary: result.summary });
-  return result;
+  return attachEditScope(result, agentContext, filePath, pathRetryContext);
 }
 
 export async function generateAiEdit(filePath: string | null, content: string, userRequest: string, onAgentStep?: (step: AgentStep) => void, pathRetryContext?: EditPathRetryContext): Promise<AiEditResult> {
@@ -1376,7 +1394,14 @@ export async function generateAiEdit(filePath: string | null, content: string, u
 
   const result = await normalizeAiEditResultWithRepair(rawContent, filePath, runId);
   logAi(runId, "done", { elapsedMs: Date.now() - startedAt, patches: result.patches?.map((file) => file.filePath) || null, summary: result.summary });
-  return result;
+  return {
+    ...result,
+    editScope: buildEditScope({
+      selectedFilePath: filePath,
+      filesRead: filePath ? [filePath] : [],
+      allowNewFiles: false
+    })
+  };
 }
 
 export async function generateFileChatReply(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string, onAgentStep?: (step: AgentStep) => void) {

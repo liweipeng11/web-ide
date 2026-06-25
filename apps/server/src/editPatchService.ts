@@ -1,6 +1,7 @@
 import path from "node:path";
 import { generateAiEdit, type AgentStep, type EditPathRetryContext } from "./aiClient.js";
-import { createDiffHtml, createMultiFileDiffHtml } from "./diffTools.js";
+import { createDiffHtml, createEditHunks, createMultiFileDiffHtml } from "./diffTools.js";
+import { buildEditScope, validatePatchesAgainstEditScope } from "./editScope.js";
 import { HttpError } from "./errors.js";
 import { listFiles, readWorkspaceFile, safeResolve } from "./fileTools.js";
 import { createPendingPatch } from "./patchStore.js";
@@ -159,6 +160,25 @@ async function validateEditResultPaths(aiResult: AiEditResult, selectedFilePath:
   };
 }
 
+function validateEditScope(aiResult: AiEditResult, selectedFilePath: string | null, validatedPaths: Awaited<ReturnType<typeof validateEditResultPaths>>) {
+  const scope =
+    aiResult.editScope ||
+    buildEditScope({
+      selectedFilePath,
+      filesRead: selectedFilePath ? [selectedFilePath] : [],
+      allowNewFiles: false
+    });
+  const normalizedPatches =
+    validatedPaths.files?.map((change) => ({
+      filePath: change.path,
+      oldContent: change.status === "create" ? "" : change.oldContent,
+      newContent: change.newContent,
+      summary: change.summary
+    })) || null;
+
+  return validatePatchesAgainstEditScope(normalizedPatches, scope);
+}
+
 export async function createEditPatchResponse(filePath: string | null | undefined, userRequest: string, onAgentStep?: (step: AgentStep) => void, taskSessionId?: string) {
   const runId = createRouteRunId("edit");
   const startedAt = Date.now();
@@ -211,18 +231,34 @@ export async function createEditPatchResponse(filePath: string | null | undefine
       continue;
     }
 
-    if (!validatedPaths.invalidFilePaths.length) {
-      break;
+    if (validatedPaths.invalidFilePaths.length) {
+      retryContext = {
+        invalidFilePaths: validatedPaths.invalidFilePaths,
+        validFilePaths: validatedPaths.validFilePaths,
+        reason: "invalid_paths"
+      };
+
+      console.warn("AI returned non-existent edit paths, retrying with valid paths:", retryContext);
+      logRoute(runId, "paths.retry", retryContext);
+      continue;
     }
 
-    retryContext = {
-      invalidFilePaths: validatedPaths.invalidFilePaths,
-      validFilePaths: validatedPaths.validFilePaths,
-      reason: "invalid_paths"
-    };
+    const scopeValidation = validateEditScope(aiResult, selectedFilePath, validatedPaths);
 
-    console.warn("AI returned non-existent edit paths, retrying with valid paths:", retryContext);
-    logRoute(runId, "paths.retry", retryContext);
+    if (!scopeValidation.ok) {
+      retryContext = {
+        invalidFilePaths: scopeValidation.blockedFiles,
+        validFilePaths: scopeValidation.allowedExistingFiles,
+        reason: "scope_violation",
+        previousSummary: aiResult.summary
+      };
+
+      console.warn("AI returned out-of-scope edit paths, retrying with approved scope:", retryContext);
+      logRoute(runId, "scope.retry", retryContext);
+      continue;
+    }
+
+    break;
   }
 
   if (!aiResult || !validatedPaths) {
@@ -237,6 +273,12 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     throw new HttpError(422, `AI returned file paths that do not exist: ${validatedPaths.invalidFilePaths.join(", ")}`);
   }
 
+  const finalScopeValidation = validateEditScope(aiResult, selectedFilePath, validatedPaths);
+
+  if (!finalScopeValidation.ok) {
+    throw new HttpError(422, `AI tried to modify files outside the approved edit scope: ${finalScopeValidation.blockedFiles.join(", ")}`);
+  }
+
   const uniqueChanges = [...new Map((validatedPaths.files || []).map((change) => [change.path, change])).values()];
   logRoute(runId, "patch.prepare", { files: uniqueChanges.map((change) => change.path) });
   onAgentStep?.(
@@ -247,7 +289,10 @@ export async function createEditPatchResponse(filePath: string | null | undefine
       riskLevel: "medium",
       status: "pending",
       targets: uniqueChanges.map((change) => change.path),
-      details: { files: uniqueChanges.map((change) => ({ path: change.path, status: change.status, summary: change.summary })) }
+      details: {
+        files: uniqueChanges.map((change) => ({ path: change.path, status: change.status, summary: change.summary })),
+        editScope: aiResult.editScope || null
+      }
     })
   );
   onAgentStep?.(createAgentStep({ type: "edit", files: uniqueChanges.map((change) => change.path) }));
@@ -267,7 +312,8 @@ export async function createEditPatchResponse(filePath: string | null | undefine
           oldContent: previousContent,
           newContent: change.newContent,
           summary: change.summary,
-          diffHtml: createDiffHtml(previousContent, change.newContent)
+          diffHtml: createDiffHtml(previousContent, change.newContent),
+          editHunks: createEditHunks(previousContent, change.newContent)
         };
       })
     )

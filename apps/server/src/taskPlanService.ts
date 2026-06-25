@@ -76,6 +76,11 @@ function isComplexTaskGoal(userGoal: string, intent: AgentIntent, options: { sel
 function shouldRequirePlanApproval(classification?: AgentRequestClassification, options: { forceApproval?: boolean; selectedPath?: string | null; contextFileCount?: number } = {}) {
   if (options.forceApproval !== undefined) return options.forceApproval;
   const intent = classification?.intent || "edit";
+
+  if (intent === "edit" || intent === "diagnose_then_edit") {
+    return true;
+  }
+
   const normalizedGoal = classification?.normalizedGoal || "";
   return isComplexTaskGoal(normalizedGoal, intent, options);
 }
@@ -117,7 +122,7 @@ export function shouldInitializeTaskPlan(userGoal: string, classification?: Agen
   }
 
   if (intent === "edit" || intent === "diagnose_then_edit") {
-    return isComplexTaskGoal(normalizedGoal, intent, options);
+    return true;
   }
 
   if (intent === "command") {

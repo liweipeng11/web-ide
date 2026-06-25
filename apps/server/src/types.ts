@@ -322,6 +322,12 @@ export type FilePatch = {
   summary: string;
 };
 
+export type EditScope = {
+  allowedExistingFiles: string[];
+  allowNewFiles: boolean;
+  createdFileDirectories: string[];
+};
+
 export type Checkpoint = {
   id: string;
   taskId: string;
@@ -342,6 +348,7 @@ export type EditPlan = {
   summary: string;
   status?: "patch" | "needs_context" | "plan" | "blocked";
   patches: FilePatch[] | null;
+  editScope?: EditScope;
   nextSearchKeywords?: string[];
   commandsToRun?: string[];
 };
@@ -356,6 +363,20 @@ export type PatchFileChange = {
   newContent: string;
   summary: string;
   diffHtml: string;
+  editHunks?: EditHunk[];
+};
+
+export type EditHunkLine = {
+  type: "context" | "add" | "remove";
+  content: string;
+};
+
+export type EditHunk = {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: EditHunkLine[];
 };
 
 export type PendingPatch = {

@@ -58,6 +58,7 @@ Your task:
 - Preserve the original coding style.
 - Follow projectRules unless they conflict with higher-priority system/developer instructions or the user's explicit request.
 - Keep the change minimal and focused on the user's request.
+- Use a Cline-style scoped edit workflow: first identify the smallest set of files needed, read those files, and treat only those files as editable scope.
 - The user never needs to select a file before requesting a change. Discover the relevant files yourself with searchCode and readFile.
 - Treat selectedFile only as optional context. Do not limit edits to it and do not require it to be present.
 - Before searching code, infer 1 to 4 concise search keywords from the user's intent. Use identifiers, route names, component names, API names, domain nouns, error codes, or file-name hints.
@@ -67,6 +68,7 @@ Your task:
 - For framework, dependency, import/export, or API-not-found errors, use projectFacts and call inspectProject() before deciding which API version or import style is correct.
 - When dependency versions conflict with the code style in a file, trust the dependency versions and update the code to match the installed major version.
 - If searchCode or fallback search finds relevant files, call readFile(filePath) for the relevant existing files before producing the edit.
+- Do not modify an existing file unless it was selected by the user, returned as readable context, or read with readFile/readFileRange in this edit run.
 - Do not invent a new implementation path when search results show an existing project pattern or module.
 - Do not return patches:null just because you need more context. If more context is needed, call searchCode, readFile, or readFileRange.
 - If no file is selected, infer search keywords, call searchCode(query), choose relevant files, and call readFile(filePath) before producing the edit.
@@ -78,6 +80,7 @@ Your task:
 - readFile and readFileRange only accept workspace-relative paths. Never request absolute paths or paths outside the workspace.
 - You may modify multiple existing workspace files.
 - You may create new workspace files and folders when the requested change needs new modules, utilities, components, API clients, or tests.
+- Create new files only when the request truly needs them, and place them next to the related files you already read.
 - Return a patches array with oldContent and newContent for every modified or created file.
 - Never return the legacy top-level newContent format. Even for one file, return patches with an explicit filePath.
 - For modified files, oldContent must exactly match the content from selectedFile, readFile, automaticContextFiles, or other provided file context.
@@ -86,6 +89,7 @@ Your task:
 - Return full new file content in newContent for every created file.
 - Do not include unchanged files in the patches array.
 - Do not create files unless they are necessary for the user's request.
+- Do not include "cleanup", formatting-only, import sorting, or opportunistic refactors in unrelated files.
 - Every filePath in patches must be an existing workspace-relative path that you saw in selectedFile, readFile results, or pathRetryContext.validFilePaths.
 - For new files, every path must be a safe workspace-relative path, never absolute, and must not use ignored folders like node_modules, .git, dist, build, or .next.
 - If pathRetryContext is provided, discard invalidFilePaths. Use validFilePaths for existing-file changes, or use safe workspace-relative paths for genuinely necessary new files.
@@ -197,6 +201,8 @@ Rules:
 - Write titles in Chinese.
 - Make each step actionable and easy to track.
 - Prefer agent workflow steps: understand context, inspect relevant files, implement focused changes, review diff, run validation.
+- For edit tasks, include an explicit step for confirming the editable file scope before implementation.
+- For edit tasks, prefer wording that makes the file plan visible, such as "确认可修改文件范围" or "列出本次修改文件".
 - Do not include Markdown.
 - Do not claim work has already been completed.
 - Keep titles under 28 Chinese characters when possible.`;
