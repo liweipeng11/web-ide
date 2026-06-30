@@ -2,48 +2,12 @@ import { logAi } from "./aiHttp.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
 import { readWorkspaceFile, readWorkspaceFileRange } from "./fileTools.js";
 import { inspectCurrentProject } from "./projectInspector.js";
+import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
+import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
-export type AgentContext = {
-  userGoal: string;
-  filesRead: string[];
-  searchQueries: string[];
-  searchResultFiles: string[];
-  relevantFiles: string[];
-};
-
-export type AgentToolCall = {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-};
-
-export type AgentToolMessage = {
-  role: "tool";
-  tool_call_id: string;
-  content: string;
-};
-
-type JsonSchema = Record<string, unknown>;
-
-type AgentToolDefinition = {
-  name: string;
-  description: string;
-  parameters: JsonSchema;
-  execute: (args: Record<string, unknown>, runtime: AgentToolRuntime) => Promise<unknown>;
-  summarize: (result: unknown, cached: boolean, args: Record<string, unknown>) => unknown;
-};
-
-export type AgentToolRuntime = {
-  agentContext: AgentContext;
-  runId: string;
-  cache: Map<string, unknown>;
-  onAgentStep?: (step: AgentStep) => void;
-};
+export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
 const MAX_AUTO_READ_FILES = 5;
 const MAX_READ_FILE_LINES = 240;
@@ -88,7 +52,7 @@ function truncateFileForPrompt(content: string) {
   };
 }
 
-const definitions: AgentToolDefinition[] = [
+export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
   {
     name: "inspectProject",
     description: "Inspect package.json and project metadata, including scripts, dependencies, devDependencies, package manager, and framework hints.",
@@ -263,16 +227,9 @@ const definitions: AgentToolDefinition[] = [
   }
 ];
 
-const registry = new Map(definitions.map((definition) => [definition.name, definition]));
+export const readonlyAgentToolRegistry = createAgentToolRegistry(readonlyAgentToolDefinitions);
 
-export const agentToolSchemas = definitions.map((definition) => ({
-  type: "function" as const,
-  function: {
-    name: definition.name,
-    description: definition.description,
-    parameters: definition.parameters
-  }
-}));
+export const agentToolSchemas = readonlyAgentToolRegistry.schemas;
 
 function parseArguments(rawArguments: string) {
   try {
@@ -373,13 +330,14 @@ function createToolApprovalStep(toolName: string, args: Record<string, unknown>)
   });
 }
 
-export function createAgentToolRuntime(options: Omit<AgentToolRuntime, "cache">): AgentToolRuntime {
+export function createAgentToolRuntime(options: Omit<AgentToolRuntime, "cache"> & { registry?: AgentToolRegistry }): AgentToolRuntime & { registry?: AgentToolRegistry } {
   return { ...options, cache: new Map<string, unknown>() };
 }
 
 export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: AgentToolRuntime): Promise<AgentToolMessage> {
   const toolName = toolCall.function.name;
   const args = parseArguments(toolCall.function.arguments);
+  const registry = (runtime as AgentToolRuntime & { registry?: AgentToolRegistry }).registry || readonlyAgentToolRegistry;
   const definition = registry.get(toolName);
   logAi(runtime.runId, "tool.call", { name: toolName, arguments: args });
   runtime.onAgentStep?.(createToolApprovalStep(toolName, args));

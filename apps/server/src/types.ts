@@ -315,11 +315,18 @@ export type RejectPatchRequest = {
   filePath?: string;
 };
 
+export type SearchReplaceEdit = {
+  search: string;
+  replace: string;
+  replaceAll?: boolean;
+};
+
 export type FilePatch = {
   filePath: string;
   oldContent: string;
   newContent: string;
   summary: string;
+  edits?: SearchReplaceEdit[];
 };
 
 export type EditScope = {

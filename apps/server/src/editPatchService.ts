@@ -6,7 +6,8 @@ import { HttpError } from "./errors.js";
 import { listFiles, readWorkspaceFile, safeResolve } from "./fileTools.js";
 import { createPendingPatch } from "./patchStore.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
-import type { AiEditResult, FileTreeNode } from "./types.js";
+import { resolvePatchNewContent, StaleFullFileRewriteError } from "./searchReplacePatch.js";
+import type { AiEditResult, FileTreeNode, PatchFileChange } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { isValidationCommand, selectDefaultValidationCommand } from "./validationCommand.js";
 
@@ -173,10 +174,45 @@ function validateEditScope(aiResult: AiEditResult, selectedFilePath: string | nu
       filePath: change.path,
       oldContent: change.status === "create" ? "" : change.oldContent,
       newContent: change.newContent,
-      summary: change.summary
+      summary: change.summary,
+      edits: change.edits
     })) || null;
 
   return validatePatchesAgainstEditScope(normalizedPatches, scope);
+}
+
+type ValidatedFileChange = NonNullable<Awaited<ReturnType<typeof validateEditResultPaths>>["files"]>[number];
+
+async function buildPatchFileChanges(changes: ValidatedFileChange[], userRequest: string): Promise<PatchFileChange[]> {
+  const files = (
+    await Promise.all(
+      changes.map(async (change) => {
+        const previousContent = change.status === "create" ? "" : await readWorkspaceFile(change.path);
+        const newContent = change.status === "create" ? change.newContent : resolvePatchNewContent(change.path, change, previousContent, userRequest);
+
+        if (previousContent === newContent) {
+          return null;
+        }
+
+        return {
+          path: change.path,
+          filePath: change.path,
+          status: change.status,
+          oldContent: previousContent,
+          newContent,
+          summary: change.summary,
+          diffHtml: createDiffHtml(previousContent, newContent),
+          editHunks: createEditHunks(previousContent, newContent)
+        };
+      })
+    )
+  ).filter((change): change is NonNullable<typeof change> => Boolean(change));
+
+  if (!files.length) {
+    throw new HttpError(422, "AI did not return any file changes");
+  }
+
+  return files;
 }
 
 export async function createEditPatchResponse(filePath: string | null | undefined, userRequest: string, onAgentStep?: (step: AgentStep) => void, taskSessionId?: string) {
@@ -205,6 +241,7 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   let retryContext: EditPathRetryContext | undefined;
   let aiResult: AiEditResult | null = null;
   let validatedPaths: Awaited<ReturnType<typeof validateEditResultPaths>> | null = null;
+  let files: PatchFileChange[] | null = null;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     logRoute(runId, "ai.generate.start", { attempt, retryContext });
@@ -258,6 +295,25 @@ export async function createEditPatchResponse(filePath: string | null | undefine
       continue;
     }
 
+    try {
+      files = await buildPatchFileChanges([...new Map((validatedPaths.files || []).map((change) => [change.path, change])).values()], userRequest);
+    } catch (error) {
+      if (error instanceof StaleFullFileRewriteError && attempt < 2) {
+        retryContext = {
+          invalidFilePaths: [],
+          validFilePaths: (validatedPaths.files || []).map((file) => file.path),
+          reason: "stale_full_rewrite",
+          previousSummary: aiResult.summary
+        };
+
+        console.warn("AI returned stale full-file rewrite, retrying with search/replace instruction:", retryContext);
+        logRoute(runId, "staleFullRewrite.retry", retryContext);
+        continue;
+      }
+
+      throw error;
+    }
+
     break;
   }
 
@@ -271,6 +327,10 @@ export async function createEditPatchResponse(filePath: string | null | undefine
 
   if (validatedPaths.invalidFilePaths.length) {
     throw new HttpError(422, `AI returned file paths that do not exist: ${validatedPaths.invalidFilePaths.join(", ")}`);
+  }
+
+  if (!files) {
+    throw new HttpError(422, "AI did not return any file changes");
   }
 
   const finalScopeValidation = validateEditScope(aiResult, selectedFilePath, validatedPaths);
@@ -296,28 +356,6 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     })
   );
   onAgentStep?.(createAgentStep({ type: "edit", files: uniqueChanges.map((change) => change.path) }));
-  const files = (
-    await Promise.all(
-      uniqueChanges.map(async (change) => {
-        const previousContent = change.status === "create" ? "" : await readWorkspaceFile(change.path);
-
-        if (previousContent === change.newContent) {
-          return null;
-        }
-
-        return {
-          path: change.path,
-          filePath: change.path,
-          status: change.status,
-          oldContent: previousContent,
-          newContent: change.newContent,
-          summary: change.summary,
-          diffHtml: createDiffHtml(previousContent, change.newContent),
-          editHunks: createEditHunks(previousContent, change.newContent)
-        };
-      })
-    )
-  ).filter((change): change is NonNullable<typeof change> => Boolean(change));
 
   if (!files.length) {
     logRoute(runId, "patch.empty");

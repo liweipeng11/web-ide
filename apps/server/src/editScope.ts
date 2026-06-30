@@ -98,7 +98,7 @@ export function validatePatchesAgainstEditScope(patches: FilePatch[] | null, sco
 
   const blockedFiles = patches
     .filter((patch) => {
-      const isCreate = patch.oldContent === "";
+      const isCreate = patch.oldContent === "" && !patch.edits?.length;
       return isCreate ? !isNewFileAllowed(patch.filePath, scope) : !isExistingFileAllowed(patch.filePath, scope);
     })
     .map((patch) => normalizeScopePath(patch.filePath));

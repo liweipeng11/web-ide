@@ -91,7 +91,7 @@ export type AgentStep = {
 export type EditPathRetryContext = {
   invalidFilePaths: string[];
   validFilePaths: string[];
-  reason?: "invalid_paths" | "no_file_changes" | "scope_violation";
+  reason?: "invalid_paths" | "no_file_changes" | "scope_violation" | "stale_full_rewrite";
   previousSummary?: string;
 };
 
@@ -102,7 +102,7 @@ const AI_LOG_PREVIEW_CHARS = 500;
 const AI_FETCH_ATTEMPTS_PER_URL = 2;
 const MAX_PREFLIGHT_EDIT_SEARCH_QUERIES = 4;
 const MAX_PREFLIGHT_EDIT_SEARCH_RESULTS = 30;
-const MAX_AUTO_EDIT_CONTEXT_FILES = 3;
+const MAX_AUTO_EDIT_CONTEXT_FILES = MAX_AUTO_READ_FILES;
 const MAX_PLAN_EDIT_SEARCH_QUERIES = 6;
 
 const MAX_FILE_CHAT_TOOL_STEPS = 8;
@@ -422,8 +422,13 @@ export function isIntermediateEditPlanSummary(summary: string) {
     /(?:\u641c\u7d22|\u67e5\u627e|\u67e5\u770b|\u8bfb\u53d6|\u5206\u6790|\u521b\u5efa|\u65b0\u589e|\u4fee\u6539|\u96c6\u6210|\u751f\u6210|\u5b9e\u73b0|\u5f15\u5165|\u6ce8\u518c)/,
     /\b(?:search|inspect|read|analy[sz]e|create|add|modify|integrate|implement|generate|import|register)\b/i
   ].some((pattern) => pattern.test(normalized));
+  const hasContextRequestLanguage = [
+    // 兼容 Cline 式“先读上下文再编辑”的中间回复，避免把只缺上下文误判成最终失败。
+    /(?:\u9700\u8981|\u9700|\u8fd8\u9700|\u5148)?(?:\u8bfb\u53d6|\u67e5\u770b|\u67e5\u627e|\u641c\u7d22|\u4e86\u89e3|\u786e\u8ba4|\u68c0\u67e5).*(?:\u6587\u4ef6|\u4e0a\u4e0b\u6587|\u7ed3\u6784|\u6a21\u5f0f|\u6570\u636e\u5c42|mock|api|store|view|route|router|component)/i,
+    /\b(?:need|needs|required|requires|must)\b.*\b(?:read|inspect|search|check|understand)\b.*\b(?:file|context|structure|pattern|mock|api|store|view|route|router|component)\b/i
+  ].some((pattern) => pattern.test(normalized));
 
-  return hasPlanningLanguage && hasActionLanguage;
+  return hasActionLanguage && (hasPlanningLanguage || hasContextRequestLanguage);
 }
 
 export function isIntermediateEditStatus(status: AiEditResult["status"]) {
@@ -462,6 +467,7 @@ export function derivePlanSearchKeywords(userRequest: string, summary: string) {
   const mappings: Array<[RegExp, string[]]> = [
     [/(?:\u8def\u7531|\u83dc\u5355|\u8df3\u8f6c|route|router)/i, ["router", "routes"]],
     [/(?:\u9996\u9875|\u4e3b\u9875|home)/i, ["HomeView", "home"]],
+    [/(?:\u56fd\u9645\u5316|\u8bed\u8a00|\u7ffb\u8bd1|lang|i18n|locale)/i, ["lang", "i18n", "locale"]],
     [/(?:header|\u5bfc\u822a|\u9875\u5934|\u9876\u90e8)/i, ["Header", "header"]],
     [/(?:\u7ec4\u4ef6|component)/i, ["components"]]
   ];
@@ -505,7 +511,7 @@ function deriveFallbackSearchKeywords(userRequest: string, filePath: string | nu
     addQuery(keyword);
   }
 
-  const commonTerms = ["login", "鐧诲綍", "auth", "mock", "api", "鎺ュ彛", "user", "鐢ㄦ埛", "route", "router", "store", "鑿滃崟", "鏉冮檺", "琛ㄦ牸", "鍒楄〃", "璇︽儏", "閰嶇疆"];
+  const commonTerms = ["login", "\u767b\u5f55", "auth", "mock", "api", "\u63a5\u53e3", "user", "\u7528\u6237", "route", "router", "store", "lang", "i18n", "locale", "\u56fd\u9645\u5316", "\u8bed\u8a00", "\u7ffb\u8bd1", "\u83dc\u5355", "\u6743\u9650", "\u8868\u683c", "\u5217\u8868", "\u8be6\u60c5", "\u914d\u7f6e"];
 
   for (const term of commonTerms) {
     if (userRequest.toLowerCase().includes(term.toLowerCase())) {
@@ -786,7 +792,7 @@ function createAutomaticEditContextMessage(files: Awaited<ReturnType<typeof read
     content: JSON.stringify({
       automaticContextFiles: files,
       instruction:
-        "The server has already read likely edit target files. Use automaticContextFiles as editable context and return a non-empty patches array with oldContent and newContent. Only return patches:null if none of these files can possibly satisfy the request."
+        "The server has already read likely edit target files. Use automaticContextFiles as editable context and return a non-empty patches array. Prefer edits search/replace blocks for existing-file changes; use full oldContent/newContent only for true full-file rewrites. Only return patches:null if none of these files can possibly satisfy the request."
     })
   };
 }
@@ -794,7 +800,7 @@ function createAutomaticEditContextMessage(files: Awaited<ReturnType<typeof read
 function createNullPatchRecoveryMessage(options: { summary: string; status: AiEditResult["status"]; automaticContextFiles: Awaited<ReturnType<typeof readEditContextFiles>>; candidateFilePaths: string[]; intermediate: boolean }): ChatMessage {
   const instruction = options.intermediate
     ? "The previous response used an intermediate edit status, not a final edit result. Continue the agent loop now: use nextSearchKeywords, automaticContextFiles, and tools as needed, then return status \"patch\" with a non-empty patches array. Do not finish by restating the plan."
-    : "The previous response returned patches:null because more context was needed. The user requested a code fix, so do not finish with patches:null for that reason. Use projectFacts and automaticContextFiles as editable context and return a non-empty patches array with exact oldContent and newContent. For framework/API errors, verify dependency versions before choosing imports. If no patch is possible, cite concrete file evidence in the summary.";
+    : "The previous response returned patches:null because more context was needed. The user requested a code fix, so do not finish with patches:null for that reason. Use projectFacts and automaticContextFiles as editable context and return a non-empty patches array. Prefer exact edits search/replace blocks; use full oldContent/newContent only for true full-file rewrites. For framework/API errors, verify dependency versions before choosing imports. If no patch is possible, cite concrete file evidence in the summary.";
 
   return {
     role: "user",
@@ -954,7 +960,53 @@ async function streamFileChatFinalAnswer(messages: ChatMessage[], onDelta: (delt
   }
 }
 
-function parseAiEditResult(rawContent: string): AiEditResult {
+function parseSearchReplaceEdits(value: unknown) {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const edits = value.map((item) => {
+    if (!item || typeof item !== "object") {
+      throw new HttpError(502, "Failed to parse AI response");
+    }
+
+    const edit = item as { search?: unknown; replace?: unknown; replaceAll?: unknown };
+
+    if (typeof edit.search !== "string" || typeof edit.replace !== "string") {
+      throw new HttpError(502, "Failed to parse AI response");
+    }
+
+    return {
+      search: edit.search,
+      replace: edit.replace,
+      replaceAll: typeof edit.replaceAll === "boolean" ? edit.replaceAll : undefined
+    };
+  });
+
+  return edits.length ? edits : undefined;
+}
+
+function parsePatchFilePath(change: {
+  path?: unknown;
+  filePath?: unknown;
+  file?: unknown;
+  filename?: unknown;
+  targetPath?: unknown;
+  relativePath?: unknown;
+  file_path?: unknown;
+  target_file?: unknown;
+  target?: unknown;
+}) {
+  for (const value of [change.filePath, change.path, change.file, change.filename, change.targetPath, change.relativePath, change.file_path, change.target_file, change.target]) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  return "";
+}
+
+export function parseAiEditResult(rawContent: string): AiEditResult {
   let parsed: unknown;
 
   try {
@@ -1006,13 +1058,27 @@ function parseAiEditResult(rawContent: string): AiEditResult {
         throw new HttpError(502, "Failed to parse AI response");
       }
 
-      const change = file as { path?: unknown; filePath?: unknown; file?: unknown; oldContent?: unknown; newContent?: unknown; content?: unknown; summary?: unknown };
-      const path = typeof change.path === "string" ? change.path : typeof change.filePath === "string" ? change.filePath : typeof change.file === "string" ? change.file : "";
-      const oldContent = change.oldContent;
+      const change = file as {
+        path?: unknown;
+        filePath?: unknown;
+        file?: unknown;
+        filename?: unknown;
+        targetPath?: unknown;
+        relativePath?: unknown;
+        oldContent?: unknown;
+        newContent?: unknown;
+        content?: unknown;
+        summary?: unknown;
+        edits?: unknown;
+      };
+      const path = parsePatchFilePath(change);
+      const edits = parseSearchReplaceEdits(change.edits);
+      const oldContent = typeof change.oldContent === "string" ? change.oldContent : edits ? "" : undefined;
+      const hasFullNewContent = typeof change.newContent === "string" || typeof change.content === "string";
       const newContent = typeof change.newContent === "string" ? change.newContent : typeof change.content === "string" ? change.content : "";
       const summary = typeof change.summary === "string" ? change.summary : planSummary;
 
-      if (!path || typeof oldContent !== "string" || typeof newContent !== "string") {
+      if (!path || typeof oldContent !== "string" || (!edits && !hasFullNewContent)) {
         console.error("Failed to parse AI edit response file shape:", JSON.stringify(file).slice(0, 1000));
         throw new HttpError(502, "Failed to parse AI response");
       }
@@ -1021,7 +1087,8 @@ function parseAiEditResult(rawContent: string): AiEditResult {
         filePath: path,
         oldContent,
         newContent,
-        summary
+        summary,
+        edits
       };
     });
 
@@ -1035,14 +1102,8 @@ function parseAiEditResult(rawContent: string): AiEditResult {
   }
 
   if (typeof result.newContent === "string") {
-    const patches: FilePatch[] = [];
-    return {
-      status: parseEditStatus(result.status, patches),
-      summary: planSummary,
-      patches,
-      nextSearchKeywords: parseNextSearchKeywords(result.nextSearchKeywords),
-      commandsToRun: parseCommandsToRun(result.commandsToRun)
-    };
+    console.error("Failed to parse AI edit response missing patch path:", JSON.stringify(parsed).slice(0, 1000));
+    throw new HttpError(502, "AI edit response is missing patches[].filePath");
   }
 
   throw new HttpError(502, "Failed to parse AI response");
@@ -1067,12 +1128,90 @@ function normalizeAiEditResult(rawContent: string) {
   return result;
 }
 
+export function normalizeLegacySingleFileEdit(rawContent: string, filePath?: string | null, candidateFilePaths: string[] = []): AiEditResult | null {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(extractJsonContent(rawContent));
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  const result = parsed as {
+    status?: unknown;
+    summary?: unknown;
+    oldContent?: unknown;
+    newContent?: unknown;
+    content?: unknown;
+    nextSearchKeywords?: unknown;
+    commandsToRun?: unknown;
+    patches?: unknown;
+    files?: unknown;
+    changes?: unknown;
+  };
+  const uniqueCandidates = [...new Set([filePath || "", ...candidateFilePaths].filter(Boolean))];
+  const inferredFilePath = uniqueCandidates.length === 1 ? uniqueCandidates[0] : "";
+
+  if (typeof result.summary !== "string" || !inferredFilePath) {
+    return null;
+  }
+
+  const fileChanges = Array.isArray(result.patches) ? result.patches : Array.isArray(result.files) ? result.files : Array.isArray(result.changes) ? result.changes : null;
+  const legacyChange = fileChanges?.length === 1 && fileChanges[0] && typeof fileChanges[0] === "object" ? (fileChanges[0] as { oldContent?: unknown; newContent?: unknown; content?: unknown; summary?: unknown; edits?: unknown }) : null;
+  const changeEdits = legacyChange ? parseSearchReplaceEdits(legacyChange.edits) : undefined;
+  const newContent = legacyChange
+    ? typeof legacyChange.newContent === "string"
+      ? legacyChange.newContent
+      : typeof legacyChange.content === "string"
+      ? legacyChange.content
+      : ""
+    : typeof result.newContent === "string"
+    ? result.newContent
+    : typeof result.content === "string"
+    ? result.content
+    : "";
+
+  if (!newContent && !changeEdits) {
+    return null;
+  }
+
+  // 兼容旧版单文件协议：模型漏掉 filePath 时，使用已选文件或唯一候选文件补出路径。
+  const patches: FilePatch[] = [
+    {
+      filePath: inferredFilePath,
+      oldContent: typeof legacyChange?.oldContent === "string" ? legacyChange.oldContent : typeof result.oldContent === "string" ? result.oldContent : changeEdits ? "" : "",
+      newContent,
+      summary: typeof legacyChange?.summary === "string" ? legacyChange.summary : result.summary,
+      edits: changeEdits
+    }
+  ];
+
+  return {
+    status: parseEditStatus(result.status, patches),
+    summary: result.summary,
+    patches,
+    nextSearchKeywords: parseNextSearchKeywords(result.nextSearchKeywords),
+    commandsToRun: parseCommandsToRun(result.commandsToRun)
+  };
+}
+
 async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: string | null, runId = "edit", candidateFilePaths: string[] = []) {
   try {
     return normalizeAiEditResult(rawContent);
   } catch (error) {
     if (!(error instanceof HttpError) || error.status !== 502) {
       throw error;
+    }
+
+    const legacySingleFileEdit = normalizeLegacySingleFileEdit(rawContent, filePath, candidateFilePaths);
+
+    if (legacySingleFileEdit) {
+      logAi(runId, "edit.parse.legacySingleFile", { patches: legacySingleFileEdit.patches?.map((file) => file.filePath) || null });
+      return legacySingleFileEdit;
     }
 
     logAi(runId, "edit.parse.repair.start", { rawPreview: rawContent });
@@ -1087,10 +1226,13 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
             "Return ONLY valid JSON.",
             "Do not change the intended code content except to make it valid JSON.",
             "The required schema is:",
-            '{"status":"patch|needs_context|plan|blocked","summary":"short summary","patches":[{"filePath":"existing/workspace/path","oldContent":"exact original file content","newContent":"full updated file content","summary":"short file-level summary"}],"nextSearchKeywords":["optional keyword"],"commandsToRun":["optional validation command"]}',
+            '{"status":"patch|needs_context|plan|blocked","summary":"short summary","patches":[{"filePath":"existing/workspace/path","oldContent":"exact original file content for full rewrite or empty for local edits","newContent":"full updated file content for full rewrite or empty for local edits","edits":[{"search":"exact existing text","replace":"replacement text"}],"summary":"short file-level summary"}],"nextSearchKeywords":["optional keyword"],"commandsToRun":["optional validation command"]}',
             "The selected file is optional context, not a required edit target.",
+            "Prefer edits search/replace blocks for existing-file modifications. Use full newContent only when the whole file must be rewritten.",
             "For an existing file, choose filePath from candidateFilePaths. For a genuinely new file requested by the user, use a safe workspace-relative path.",
-            "If the malformed response uses the legacy single-file newContent format, convert it to patches with an explicit filePath inferred from the selected context or candidateFilePaths.",
+            "If the malformed response uses legacy single-file output, convert it to the required patches array with explicit patches[].filePath inferred from selectedFilePath or candidateFilePaths.",
+            "Do not preserve legacy path aliases such as path, file, filename, targetPath, relativePath, file_path, target_file, or target; normalize them to filePath.",
+            "Do not return top-level oldContent, newContent, or content; those fields must be inside patches[].",
             "If the original response needs more search/read work, return status \"needs_context\" or \"plan\" with patches:null and nextSearchKeywords.",
             "If the original response says the edit cannot be done, return {\"status\":\"blocked\",\"summary\":\"reason\",\"patches\":null}."
           ].join("\n")
@@ -1163,7 +1305,9 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
                 ...pathRetryContext,
                 instruction:
                   pathRetryContext.reason === "no_file_changes"
-                    ? "Your previous edit response returned patches:null and could not be applied. The user's request requires code changes. Use projectFacts and inspectProject for framework/API errors, search/read the relevant files if needed, then return a non-empty patches array with oldContent and newContent. Only return patches:null if the request is truly impossible or unsafe and cite concrete file evidence in summary."
+                    ? "Your previous edit response returned patches:null and could not be applied. The user's request requires code changes. Use projectFacts and inspectProject for framework/API errors, search/read the relevant files if needed, then return a non-empty patches array. Prefer edits search/replace blocks; use full oldContent/newContent only for true full-file rewrites. Only return patches:null if the request is truly impossible or unsafe and cite concrete file evidence in summary."
+                    : pathRetryContext.reason === "stale_full_rewrite"
+                    ? "Your previous edit returned a full-file rewrite based on stale or truncated content. Do not return full oldContent/newContent again. Regenerate using edits search/replace blocks copied exactly from the file context. If a full-file rewrite is unavoidable, first read the missing file ranges so oldContent is the exact current full file."
                     : pathRetryContext.reason === "scope_violation"
                     ? "Your previous edit response touched files outside the approved editable scope. Regenerate the patch using only validFilePaths for existing-file changes. If a new file is necessary, place it next to a validFilePaths entry. Do not include opportunistic cleanup or unrelated refactors."
                     : "Your previous edit response used file paths that do not exist in the workspace. Regenerate the full edit plan using only paths from validFilePaths."
@@ -1232,10 +1376,11 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
       );
 
       const intermediateStatus = result.patches === null && isIntermediateEditStatus(result.status);
-      const legacyPlanSummary = result.patches === null && !result.status && isIntermediateEditPlanSummary(result.summary);
-      const shouldContinueEditLoop = intermediateStatus || legacyPlanSummary;
+      const contextRequestSummary = result.patches === null && isIntermediateEditPlanSummary(result.summary);
+      const shouldContinueEditLoop = intermediateStatus || contextRequestSummary;
+      const canRecoverNullPatch = result.patches === null && (result.status !== "blocked" || contextRequestSummary);
 
-      if (result.patches === null && result.status !== "blocked" && nullPatchRecoveryAttempts < MAX_NULL_PATCH_RECOVERY_ATTEMPTS) {
+      if (canRecoverNullPatch && nullPatchRecoveryAttempts < MAX_NULL_PATCH_RECOVERY_ATTEMPTS) {
         nullPatchRecoveryAttempts += 1;
         const planSearchKeywords = shouldContinueEditLoop ? result.nextSearchKeywords?.length ? result.nextSearchKeywords : derivePlanSearchKeywords(userRequest, result.summary) : [];
         const additionalSearchResults = planSearchKeywords.length ? await runAdditionalEditSearch(planSearchKeywords, agentContext, runId, onAgentStep) : [];
@@ -1249,7 +1394,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
           status: result.status,
           summary: result.summary,
           intermediateStatus,
-          legacyPlanSummary,
+          contextRequestSummary,
           planSearchKeywords,
           automaticContextFiles: automaticContextFiles.map((file) => file.filePath),
           candidateFileCount: candidateFilePaths.length
@@ -1307,7 +1452,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
           fallbackSearch,
           automaticContextFiles,
           instruction:
-            "The required first searchCode call did not find matching files. If automaticContextFiles is non-empty, use those files as editable context and return a non-empty patches array with oldContent and newContent. If it is empty, use fallbackSearch results and call readFile for relevant files before returning the final edit."
+            "The required first searchCode call did not find matching files. If automaticContextFiles is non-empty, use those files as editable context and return a non-empty patches array. Prefer edits search/replace blocks for existing-file changes; use full oldContent/newContent only for true full-file rewrites. If it is empty, use fallbackSearch results and call readFile for relevant files before returning the final edit."
         })
       });
     }
