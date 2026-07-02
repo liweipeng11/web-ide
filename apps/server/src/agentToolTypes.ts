@@ -38,6 +38,8 @@ export type AgentToolRuntime = {
   agentContext: AgentContext;
   runId: string;
   cache: Map<string, unknown>;
+  // 连续 Agent Runtime 会统一生成审批步骤，旧编辑链路仍保留工具内部的自动审批步骤。
+  emitToolApprovalSteps?: boolean;
   onAgentStep?: (step: AgentStep) => void;
 };
 
@@ -69,3 +71,5 @@ export type AgentCompletionResponse = {
     message?: AgentCompletionMessage;
   }>;
 };
+
+

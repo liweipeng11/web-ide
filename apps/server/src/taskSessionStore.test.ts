@@ -4,8 +4,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
+import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, setTaskPlanItems, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
+import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 
@@ -62,10 +63,72 @@ test("normalizes legacy task sessions without plan items", async () => {
 
   // 旧版本任务记录没有 planItems 字段，读取时需要补成空数组。
   delete persisted.planItems;
+  delete persisted.agentMessages;
+  delete persisted.pendingToolCall;
   await fs.writeFile(sessionPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 
   const loaded = await getTaskSession(session.id);
   assert.deepEqual(loaded.planItems, []);
+  assert.deepEqual(loaded.agentMessages, []);
+  assert.equal(loaded.pendingToolCall, null);
+});
+
+test("persists agent messages in task sessions", async () => {
+  const { session } = await createIsolatedTaskSession("存储 Agent 消息");
+
+  await appendTaskSessionAgentMessage(session.id, {
+    id: "assistant-message",
+    role: "assistant",
+    content: "I will inspect the project.",
+    createdAt: 20
+  });
+  await appendTaskSessionAgentMessage(session.id, {
+    id: "user-message",
+    role: "user",
+    content: "Please continue.",
+    createdAt: 10
+  });
+
+  const loaded = await getTaskSession(session.id);
+
+  assert.deepEqual(
+    loaded.agentMessages?.map((message) => [message.id, message.role, message.content]),
+    [
+      ["user-message", "user", "Please continue."],
+      ["assistant-message", "assistant", "I will inspect the project."]
+    ]
+  );
+});
+
+test("agent message store wraps task session persistence", async () => {
+  const { session } = await createIsolatedTaskSession("封装 Agent 消息存储");
+
+  await appendAgentMessage(session.id, {
+    id: "tool-result-message",
+    role: "tool",
+    toolCallId: "call-read",
+    content: "{\"ok\":true}",
+    createdAt: 1
+  });
+
+  assert.deepEqual(
+    (await listAgentMessages(session.id)).map((message) => ({
+      id: message.id,
+      role: message.role,
+      toolCallId: message.toolCallId,
+      content: message.content,
+      createdAt: message.createdAt
+    })),
+    [
+      {
+        id: "tool-result-message",
+        role: "tool",
+        toolCallId: "call-read",
+        content: "{\"ok\":true}",
+        createdAt: 1
+      }
+    ]
+  );
 });
 
 test("deletes task session history entries", async () => {
@@ -283,6 +346,56 @@ test("updates approval request status by action id", async () => {
   assert.equal(step?.type, "approval_request");
   assert.equal(step?.status, "approved");
   assert.equal((await getTaskSession(session.id)).steps.find((item) => item.id === "approval-step")?.type, "approval_request");
+});
+
+test("stores and clears pending tool calls for approval resume", async () => {
+  const { session } = await createIsolatedTaskSession("等待工具审批");
+  await appendTaskSessionStep(session.id, {
+    id: "approval-step",
+    type: "approval_request",
+    actionId: "run_command:test-action",
+    actionType: "run_command",
+    title: "运行验证",
+    summary: "等待用户批准命令。",
+    riskLevel: "medium",
+    status: "pending",
+    command: "pnpm test",
+    createdAt: Date.now()
+  });
+
+  const pending = await setTaskSessionPendingToolCall(session.id, {
+    actionId: "run_command:test-action",
+    toolCallId: "tool-call-1",
+    toolName: "runCommand",
+    arguments: { command: "pnpm test" },
+    riskLevel: "medium"
+  });
+
+  assert.equal(pending?.status, "awaiting_approval");
+  assert.equal(pending?.pendingToolCall?.toolName, "runCommand");
+  assert.deepEqual(await getPendingAgentToolCall(session.id), pending?.pendingToolCall);
+
+  const approved = await decideTaskSessionApproval(session.id, "run_command:test-action", "approved");
+
+  assert.equal(approved?.status, "running");
+  assert.equal(approved?.pendingToolCall, null);
+  assert.equal(await getPendingAgentToolCall(session.id), null);
+});
+
+test("clears pending tool calls through agent message store facade", async () => {
+  const { session } = await createIsolatedTaskSession("清理等待工具调用");
+  await setPendingAgentToolCall(session.id, {
+    actionId: "edit_files:test-action",
+    toolCallId: "tool-call-2",
+    toolName: "proposePatch",
+    arguments: { files: ["src/App.tsx"] },
+    riskLevel: "medium"
+  });
+
+  const cleared = await clearPendingAgentToolCall(session.id, "edit_files:test-action");
+
+  assert.equal(cleared?.status, "running");
+  assert.equal(cleared?.pendingToolCall, null);
 });
 
 test("links agent steps to active task plan item evidence", async () => {

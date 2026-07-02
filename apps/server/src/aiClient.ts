@@ -1,4 +1,4 @@
-﻿import { config } from "./config.js";
+import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import {
   createAiRunId,
@@ -17,9 +17,10 @@ import { buildEditScope } from "./editScope.js";
 import { readWorkspaceFile } from "./fileTools.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { discoverProjectRules } from "./projectRules.js";
-import type { AiEditResult, ChatContextFile, CommandPolicyResult, CommandResult, FileChatMessage, FilePatch } from "./types.js";
+import type { AgentStep, AiEditResult, ChatContextFile, FileChatMessage, FilePatch } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { agentToolSchemas, createAgentToolRuntime, executeAgentToolCall, type AgentContext, type AgentToolCall } from "./agentTools.js";
+import { createAgentStep } from "./routeAgentSteps.js";
 
 type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
@@ -39,54 +40,7 @@ type FileChatToolLoopResult =
     };
 
 export type { AgentContext } from "./agentTools.js";
-
-type AgentStepPayload =
-  | {
-      type: "message";
-      content: string;
-    }
-  | {
-      type: "approval_request";
-      actionId: string;
-      actionType: "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch";
-      title: string;
-      summary: string;
-      riskLevel: "low" | "medium" | "high";
-      status: "pending" | "approved" | "rejected" | "auto_approved";
-      targets?: string[];
-      command?: string;
-      details?: unknown;
-    }
-  | {
-      type: "tool_call";
-      toolName: string;
-      input: unknown;
-    }
-  | {
-      type: "tool_result";
-      toolName: string;
-      output: unknown;
-    }
-  | {
-      type: "edit";
-      files: string[];
-    }
-  | {
-      type: "command";
-      command: string;
-      policy?: CommandPolicyResult;
-      status?: "suggested" | "running" | "success" | "failed" | "blocked" | "cancelled";
-      result?: CommandResult | null;
-    }
-  | {
-      type: "error";
-      message: string;
-    };
-
-export type AgentStep = {
-  id: string;
-  createdAt: number;
-} & AgentStepPayload;
+export type { AgentStep } from "./types.js";
 
 export type EditPathRetryContext = {
   invalidFilePaths: string[];
@@ -370,14 +324,6 @@ function uniquePush(target: string[], value: string) {
   if (!target.includes(value)) {
     target.push(value);
   }
-}
-
-function createAgentStep(step: AgentStepPayload): AgentStep {
-  return {
-    id: `${step.type}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
-    createdAt: Date.now(),
-    ...step
-  };
 }
 
 function normalizeSearchKeyword(value: string) {

@@ -88,7 +88,7 @@ export type AgentStep = {
   | {
       type: "approval_request";
       actionId: string;
-      actionType: "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch";
+      actionType: "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch" | "write_file" | "delete_file" | "ask_user" | "tool_call";
       title: string;
       summary: string;
       riskLevel: "low" | "medium" | "high";

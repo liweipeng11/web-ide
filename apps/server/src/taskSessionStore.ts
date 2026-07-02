@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
-import type { AgentStep, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
+import type { AgentMessage, AgentMessageRole, AgentStep, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 
 function taskSessionDirectory() {
@@ -141,6 +141,70 @@ function isTaskPlanRevisionTrigger(value: unknown): value is TaskPlanRevisionTri
   return value === "user" || value === "agent" || value === "validation" || value === "system";
 }
 
+function isAgentMessageRole(value: unknown): value is AgentMessageRole {
+  return value === "system" || value === "user" || value === "assistant" || value === "tool";
+}
+
+function normalizeAgentMessages(messages: unknown): AgentMessage[] {
+  if (!Array.isArray(messages)) return [];
+
+  return messages
+    .filter((message): message is Partial<AgentMessage> => Boolean(message && typeof message === "object" && !Array.isArray(message)))
+    .map((message) => ({
+      id: typeof message.id === "string" && message.id.trim() ? message.id : `agent-message-${crypto.randomUUID()}`,
+      role: isAgentMessageRole(message.role) ? message.role : "assistant",
+      content: typeof message.content === "string" || message.content === null ? message.content : "",
+      toolCallId: typeof message.toolCallId === "string" && message.toolCallId.trim() ? message.toolCallId : undefined,
+      toolCalls: Array.isArray(message.toolCalls)
+        ? message.toolCalls
+            .filter((toolCall) => Boolean(toolCall && typeof toolCall === "object" && !Array.isArray(toolCall)))
+            .map((toolCall) => {
+              const record = toolCall as Record<string, unknown>;
+
+              return {
+                id: typeof record.id === "string" && record.id.trim() ? record.id : `tool-call-${crypto.randomUUID()}`,
+                name: typeof record.name === "string" ? record.name : "unknown",
+                arguments: record.arguments
+              };
+            })
+        : undefined,
+      createdAt: typeof message.createdAt === "number" ? message.createdAt : Date.now()
+    }))
+    .sort((left, right) => left.createdAt - right.createdAt);
+}
+
+function normalizePendingToolCall(value: unknown): PendingAgentToolCall | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const record = value as Partial<PendingAgentToolCall>;
+  const riskLevel = record.riskLevel === "high" || record.riskLevel === "medium" || record.riskLevel === "low" ? record.riskLevel : "medium";
+
+  if (typeof record.actionId !== "string" || !record.actionId.trim() || typeof record.toolCallId !== "string" || !record.toolCallId.trim() || typeof record.toolName !== "string" || !record.toolName.trim()) {
+    return null;
+  }
+
+  return {
+    actionId: record.actionId,
+    toolCallId: record.toolCallId,
+    toolName: record.toolName,
+    arguments: record.arguments,
+    riskLevel,
+    status: "pending",
+    createdAt: typeof record.createdAt === "number" ? record.createdAt : Date.now()
+  };
+}
+
+function normalizeTaskSession(session: TaskSession): TaskSession {
+  return {
+    ...session,
+    // 旧任务记录没有 Agent 消息字段，读取时补齐，后续 runtime 可以直接追加和恢复。
+    agentMessages: normalizeAgentMessages(session.agentMessages),
+    pendingToolCall: normalizePendingToolCall(session.pendingToolCall),
+    planItems: normalizeTaskPlanItems(session.planItems),
+    planRevisions: normalizeTaskPlanRevisions(session.planRevisions)
+  };
+}
+
 function createTaskPlanRevision(input: { trigger: TaskPlanRevisionTrigger; reason: string; beforeItems: unknown; afterItems: unknown }): TaskPlanRevision {
   return {
     id: `revision-${Date.now().toString(36)}-${crypto.randomUUID()}`,
@@ -166,13 +230,7 @@ async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
     throw error;
   });
 
-  const session = JSON.parse(content) as TaskSession;
-  return {
-    ...session,
-    // 旧任务记录没有计划字段，读取时补齐可以让前端和 API 逻辑保持简单。
-    planItems: normalizeTaskPlanItems(session.planItems),
-    planRevisions: normalizeTaskPlanRevisions(session.planRevisions)
-  };
+  return normalizeTaskSession(JSON.parse(content) as TaskSession);
 }
 
 async function writeTaskSession(session: TaskSession) {
@@ -192,6 +250,8 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     filesChanged: [],
     commandsRun: [],
     steps: [],
+    agentMessages: [],
+    pendingToolCall: null,
     planItems: [],
     planRevisions: [],
     planApproval: { required: false, status: "not_required" },
@@ -558,7 +618,7 @@ export async function listTaskSessions() {
   const sessions = await Promise.all(
     files.map(async (filePath) => {
       const content = await fs.readFile(filePath, "utf8");
-      return JSON.parse(content) as TaskSession;
+      return normalizeTaskSession(JSON.parse(content) as TaskSession);
     })
   );
 
@@ -643,6 +703,77 @@ export async function appendTaskSessionStep(taskSessionId: string | null | undef
   });
 }
 
+type AgentMessageInput = Omit<AgentMessage, "id" | "createdAt"> & Partial<Pick<AgentMessage, "id" | "createdAt">>;
+type PendingToolCallInput = Omit<PendingAgentToolCall, "status" | "createdAt"> & Partial<Pick<PendingAgentToolCall, "createdAt">>;
+
+function createPersistedAgentMessage(message: AgentMessageInput): AgentMessage {
+  return {
+    id: message.id?.trim() || `agent-message-${Date.now().toString(36)}-${crypto.randomUUID()}`,
+    role: message.role,
+    content: message.content,
+    toolCallId: message.toolCallId?.trim() || undefined,
+    toolCalls: message.toolCalls,
+    createdAt: message.createdAt || Date.now()
+  };
+}
+
+function createPendingToolCall(input: PendingToolCallInput): PendingAgentToolCall {
+  return {
+    actionId: input.actionId,
+    toolCallId: input.toolCallId,
+    toolName: input.toolName,
+    arguments: input.arguments,
+    riskLevel: input.riskLevel,
+    status: "pending",
+    createdAt: input.createdAt || Date.now()
+  };
+}
+
+export async function appendTaskSessionAgentMessage(taskSessionId: string | null | undefined, message: AgentMessageInput) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const nextMessage = createPersistedAgentMessage(message);
+
+    return {
+      ...session,
+      // 连续 Agent 依赖完整消息链恢复上下文，这里按 createdAt 保持稳定顺序。
+      agentMessages: [...normalizeAgentMessages(session.agentMessages).filter((item) => item.id !== nextMessage.id), nextMessage].sort((left, right) => left.createdAt - right.createdAt),
+      updatedAt: Date.now()
+    };
+  });
+}
+
+export async function setTaskSessionPendingToolCall(taskSessionId: string | null | undefined, input: PendingToolCallInput) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    status: "awaiting_approval",
+    pendingToolCall: createPendingToolCall(input),
+    updatedAt: Date.now()
+  }));
+}
+
+export async function clearTaskSessionPendingToolCall(taskSessionId: string | null | undefined, actionId?: string) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const pendingToolCall = normalizePendingToolCall(session.pendingToolCall);
+
+    if (actionId && pendingToolCall?.actionId !== actionId) {
+      throw new HttpError(404, "Pending tool call not found");
+    }
+
+    return {
+      ...session,
+      status: session.status === "awaiting_approval" ? "running" : session.status,
+      pendingToolCall: null,
+      updatedAt: Date.now()
+    };
+  });
+}
+
 export async function decideTaskSessionApproval(taskSessionId: string | null | undefined, actionId: string, decision: "approved" | "rejected") {
   if (!taskSessionId) return null;
 
@@ -668,8 +799,13 @@ export async function decideTaskSessionApproval(taskSessionId: string | null | u
       throw new HttpError(404, "Approval request not found");
     }
 
+    const pendingToolCall = normalizePendingToolCall(session.pendingToolCall);
+    const clearsPendingToolCall = pendingToolCall?.actionId === actionId;
+
     return {
       ...session,
+      status: clearsPendingToolCall && session.status === "awaiting_approval" ? "running" : session.status,
+      pendingToolCall: clearsPendingToolCall ? null : pendingToolCall,
       steps,
       updatedAt: Date.now()
     };
@@ -751,7 +887,7 @@ export async function updateTaskSessionStatus(taskSessionId: string | null | und
   if (!taskSessionId) return null;
 
   return enqueueTaskSessionUpdate(taskSessionId, (session) => {
-    if (session.status !== "running" && status === "cancelled") {
+    if (!["running", "awaiting_approval", "awaiting_user", "paused"].includes(session.status) && status === "cancelled") {
       return session;
     }
 

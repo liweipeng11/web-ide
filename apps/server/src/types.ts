@@ -172,7 +172,7 @@ export type AgentStep = {
   | {
       type: "approval_request";
       actionId: string;
-      actionType: "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch";
+      actionType: "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch" | "write_file" | "delete_file" | "ask_user" | "tool_call";
       title: string;
       summary: string;
       riskLevel: "low" | "medium" | "high";
@@ -208,6 +208,32 @@ export type AgentStep = {
     }
 );
 
+export type AgentMessageRole = "system" | "user" | "assistant" | "tool";
+
+export type AgentMessageToolCall = {
+  id: string;
+  name: string;
+  arguments: unknown;
+};
+
+export type AgentMessage = {
+  id: string;
+  role: AgentMessageRole;
+  content: string | null;
+  toolCallId?: string;
+  toolCalls?: AgentMessageToolCall[];
+  createdAt: number;
+};
+
+export type PendingAgentToolCall = {
+  actionId: string;
+  toolCallId: string;
+  toolName: string;
+  arguments: unknown;
+  riskLevel: "low" | "medium" | "high";
+  status: "pending";
+  createdAt: number;
+};
 export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
 
 export type TaskPlanItem = {
@@ -248,8 +274,8 @@ export type TaskPlanApproval = {
   approvedAt?: number;
 };
 
-// ?????????????????????????
-export type TaskSessionStatus = "running" | "success" | "failed" | "cancelled" | "awaiting_replan";
+// 任务会话状态会被连续 Agent 暂停/恢复复用，后续工具审批和用户追问都依赖这些状态。
+export type TaskSessionStatus = "running" | "awaiting_approval" | "awaiting_user" | "paused" | "success" | "failed" | "cancelled" | "awaiting_replan";
 
 export type TaskSession = {
   id: string;
@@ -261,6 +287,8 @@ export type TaskSession = {
   filesChanged: string[];
   commandsRun: string[];
   steps: AgentStep[];
+  agentMessages?: AgentMessage[];
+  pendingToolCall?: PendingAgentToolCall | null;
   planItems?: TaskPlanItem[];
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
@@ -393,3 +421,5 @@ export type PendingPatch = {
   commandsToRun?: string[];
   createdAt: number;
 };
+
+

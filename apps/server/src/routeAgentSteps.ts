@@ -1,7 +1,7 @@
 import type { CommandPolicyResult, CommandResult } from "./types.js";
 import type { AgentStep } from "./types.js";
 
-export type ApprovalActionType = "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch";
+export type ApprovalActionType = "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch" | "write_file" | "delete_file" | "ask_user" | "tool_call";
 export type ApprovalRiskLevel = "low" | "medium" | "high";
 export type ApprovalRequestStatus = "pending" | "approved" | "rejected" | "auto_approved";
 
@@ -79,3 +79,4 @@ export function createApprovalRequestStep(input: {
     details: input.details
   });
 }
+

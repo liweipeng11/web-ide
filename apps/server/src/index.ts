@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import { buildContextualEditRequest, classifyAgentRequest, generateFileChatReply, shouldGeneratePatchForIntent, streamFileChatReply, type AgentStep } from "./aiClient.js";
+import { resumeAgentRuntimeAfterApproval } from "./agentRuntime.js";
 import { appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, ensureFileChatMessages, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
 import { createCheckpoint, getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
@@ -590,7 +591,36 @@ app.post(
       throw new HttpError(400, "decision must be approved or rejected");
     }
 
-    response.json({ session: await decideTaskSessionApproval(taskSessionId, actionId, decision) });
+    const sessionBeforeDecision = await getTaskSession(taskSessionId);
+    const pendingToolCall = sessionBeforeDecision.pendingToolCall?.actionId === actionId ? sessionBeforeDecision.pendingToolCall : null;
+    const decidedSession = await decideTaskSessionApproval(taskSessionId, actionId, decision);
+
+    if (!pendingToolCall) {
+      response.json({ session: decidedSession });
+      return;
+    }
+
+    const taskStepWrites: Promise<unknown>[] = [];
+    const runtimeResult = await resumeAgentRuntimeAfterApproval({
+      taskSessionId,
+      userRequest: sessionBeforeDecision.userGoal,
+      persistedMessages: sessionBeforeDecision.agentMessages || [],
+      pendingToolCall,
+      decision,
+      onAgentStep(step) {
+        taskStepWrites.push(appendTaskSessionStep(taskSessionId, step));
+      }
+    });
+
+    await Promise.all(taskStepWrites);
+    response.json({
+      session: await getTaskSession(taskSessionId),
+      runtime: {
+        status: runtimeResult.status,
+        content: runtimeResult.content,
+        pendingToolCall: runtimeResult.pendingToolCall || null
+      }
+    });
   })
 );
 

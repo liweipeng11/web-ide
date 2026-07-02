@@ -74,13 +74,16 @@ export default function App() {
 
     if (!taskSessionId) return;
 
-    if (step.actionType === "edit_files") {
+    const details = step.details && typeof step.details === "object" && !Array.isArray(step.details) ? (step.details as { approvalSource?: unknown }) : null;
+    const isAgentRuntimeApproval = details?.approvalSource === "agent_runtime";
+
+    if (!isAgentRuntimeApproval && step.actionType === "edit_files") {
       if (decision === "approved") {
         await patchActions.handleApply(undefined, commandCenter.handleValidateAndFix);
       } else {
         await patchActions.handleReject();
       }
-    } else if (step.actionType === "run_command" && decision === "approved" && step.command) {
+    } else if (!isAgentRuntimeApproval && step.actionType === "run_command" && decision === "approved" && step.command) {
       await commandCenter.handleValidateAndFix(step.command);
     }
 
