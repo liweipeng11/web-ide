@@ -1,10 +1,38 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 import { HttpError } from "./errors.js";
 import type { FileTreeNode } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
 const IGNORED_NAMES = new Set(["node_modules", ".git", ".ai-agent", ".mini-ai-web-editor", "dist", "build", ".next"]);
+const BINARY_EXTENSIONS = new Set([
+  ".7z",
+  ".avif",
+  ".bmp",
+  ".class",
+  ".dll",
+  ".doc",
+  ".docx",
+  ".exe",
+  ".gif",
+  ".gz",
+  ".ico",
+  ".jar",
+  ".jpeg",
+  ".jpg",
+  ".mov",
+  ".mp3",
+  ".mp4",
+  ".pdf",
+  ".png",
+  ".rar",
+  ".tar",
+  ".webp",
+  ".xls",
+  ".xlsx",
+  ".zip"
+]);
 
 type ResolveOptions = {
   allowIgnored?: boolean;
@@ -55,6 +83,29 @@ function toWorkspaceRelative(absolutePath: string) {
   }
 
   return path.relative(workspaceRoot, absolutePath).split(path.sep).join("/");
+}
+
+function assertWorkspaceFile(absolutePath: string) {
+  return fs.stat(absolutePath).then((stat) => {
+    if (!stat.isFile()) {
+      throw new HttpError(400, "Path is not a file");
+    }
+
+    return stat;
+  });
+}
+
+function isLikelyBinaryBuffer(buffer: Buffer) {
+  if (buffer.includes(0)) {
+    return true;
+  }
+
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 export async function listFiles(dir = "", includeIgnored = false): Promise<FileTreeNode[]> {
@@ -116,6 +167,31 @@ export async function readWorkspaceFile(filePath: string, options: ResolveOption
   }
 
   return fs.readFile(absolutePath, "utf8");
+}
+
+export async function readWorkspaceFileBuffer(filePath: string, options: ResolveOptions = {}) {
+  const absolutePath = safeResolve(filePath, options);
+  await assertWorkspaceFile(absolutePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") {
+      throw new HttpError(404, "File not found");
+    }
+    throw error;
+  });
+
+  return fs.readFile(absolutePath);
+}
+
+export async function readWorkspaceFileForDiff(filePath: string, options: ResolveOptions = {}) {
+  const buffer = await readWorkspaceFileBuffer(filePath, options);
+  const extension = path.extname(filePath).toLowerCase();
+  const isBinary = BINARY_EXTENSIONS.has(extension) || isLikelyBinaryBuffer(buffer);
+
+  return {
+    content: isBinary ? "" : buffer.toString("utf8"),
+    contentBase64: buffer.toString("base64"),
+    isBinary,
+    size: buffer.length
+  };
 }
 
 export type WorkspaceFileRange = {
@@ -187,6 +263,23 @@ export async function createWorkspaceFile(filePath: string, content: string) {
 
   await fs.mkdir(path.dirname(absolutePath), { recursive: true });
   await fs.writeFile(absolutePath, content, "utf8");
+}
+
+export async function deleteWorkspaceFile(filePath: string) {
+  const absolutePath = safeResolve(filePath);
+  const stat = await fs.stat(absolutePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") {
+      throw new HttpError(404, "File not found");
+    }
+    throw error;
+  });
+
+  if (!stat.isFile()) {
+    throw new HttpError(400, "Path is not a file");
+  }
+
+  // 删除能力只允许作用于工作区内的普通文件，目录删除继续交给更显式的命令审批。
+  await fs.rm(absolutePath, { force: true });
 }
 
 export async function workspacePathExists(filePath: string) {

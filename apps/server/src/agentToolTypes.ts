@@ -37,16 +37,29 @@ export type JsonSchema = Record<string, unknown>;
 export type AgentToolRuntime = {
   agentContext: AgentContext;
   runId: string;
+  // 记录本轮连续 Agent 中生成的待审核补丁，路由层据此把 diff 推送给前端。
+  generatedPatchIds?: string[];
+  // 关联任务会话，用于把副作用工具的文件、命令和 checkpoint 记录回任务历史。
+  taskSessionId?: string | null;
   cache: Map<string, unknown>;
-  // 连续 Agent Runtime 会统一生成审批步骤，旧编辑链路仍保留工具内部的自动审批步骤。
+  // 记录当前工具调用来源，副作用工具会写入 checkpoint，方便从任务步骤追溯和回滚。
+  currentToolCall?: {
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+    actionId?: string | null;
+  };
+  pendingActionId?: string | null;
+  // 连续 Agent Runtime 会统一生成审批步骤，旧编辑链路仍可保留工具内部的自动审批步骤。
   emitToolApprovalSteps?: boolean;
   onAgentStep?: (step: AgentStep) => void;
 };
-
 export type AgentToolDefinition = {
   name: string;
   description: string;
   parameters: JsonSchema;
+  // 副作用工具必须关闭缓存，避免审批后拿到旧结果却没有真实执行。
+  cacheable?: boolean;
   execute: (args: Record<string, unknown>, runtime: AgentToolRuntime) => Promise<unknown>;
   summarize: (result: unknown, cached: boolean, args: Record<string, unknown>) => unknown;
 };
@@ -71,5 +84,3 @@ export type AgentCompletionResponse = {
     message?: AgentCompletionMessage;
   }>;
 };
-
-

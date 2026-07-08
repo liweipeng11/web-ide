@@ -43,6 +43,27 @@ test("parseAiEditResult rejects full-file patches without explicit newContent", 
   );
 });
 
+test("parseAiEditResult parses explicit delete patches without full newContent", () => {
+  const result = parseAiEditResult(
+    JSON.stringify({
+      status: "patch",
+      summary: "remove obsolete module",
+      patches: [
+        {
+          filePath: "src/obsolete.ts",
+          status: "delete",
+          oldContent: "export const obsolete = true;\n",
+          summary: "delete obsolete module"
+        }
+      ]
+    })
+  );
+
+  assert.equal(result.patches?.[0]?.filePath, "src/obsolete.ts");
+  assert.equal(result.patches?.[0]?.status, "delete");
+  assert.equal(result.patches?.[0]?.newContent, "");
+});
+
 test("normalizeLegacySingleFileEdit converts top-level newContent when selected file is known", () => {
   const result = normalizeLegacySingleFileEdit(
     JSON.stringify({

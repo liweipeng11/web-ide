@@ -1,3 +1,4 @@
+import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { createApprovalRequestStep, type ApprovalActionType, type ApprovalRiskLevel } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
 import type { AgentToolCall, AgentToolDefinition } from "./agentToolTypes.js";
@@ -35,6 +36,7 @@ function getActionType(toolName: string): ApprovalActionType {
   if (toolName === "searchCode") return "search_code";
   if (toolName === "readFile" || toolName === "readFileRange") return "read_file";
   if (toolName === "runCommand") return "run_command";
+  if (toolName === "proposePatch") return "edit_files";
   if (toolName === "applyPatch") return "apply_patch";
   if (toolName === "writeFile") return "write_file";
   if (toolName === "deleteFile") return "delete_file";
@@ -45,6 +47,7 @@ function getActionType(toolName: string): ApprovalActionType {
 function getTargets(toolName: string, args: Record<string, unknown>) {
   if (toolName === "searchCode") return getStringArg(args, "query") ? [getStringArg(args, "query")] : undefined;
   if (toolName === "runCommand") return getStringArg(args, "command") ? [getStringArg(args, "command")] : undefined;
+  if (toolName === "applyPatch") return getStringArg(args, "filePath") ? [getStringArg(args, "filePath")] : getStringArg(args, "patchId") ? [getStringArg(args, "patchId")] : undefined;
 
   const filePath = getStringArg(args, "filePath") || getStringArg(args, "path");
   return filePath ? [filePath] : undefined;
@@ -54,6 +57,11 @@ function isReadonlyTool(toolName: string) {
   return toolName === "inspectProject" || toolName === "searchCode" || toolName === "readFile" || toolName === "readFileRange";
 }
 
+function isAutoApprovedTool(toolName: string) {
+  // proposePatch 只生成待审核 diff，不直接写入工作区，因此可以自动执行。
+  return isReadonlyTool(toolName) || toolName === "proposePatch";
+}
+
 function requiresUserApproval(toolName: string) {
   return toolName === "runCommand" || toolName === "applyPatch" || toolName === "writeFile" || toolName === "deleteFile";
 }
@@ -61,10 +69,12 @@ function requiresUserApproval(toolName: string) {
 function getRiskLevel(toolName: string, args: Record<string, unknown>): ApprovalRiskLevel {
   if (toolName === "deleteFile") return "high";
   if (toolName === "runCommand") {
-    const command = getStringArg(args, "command").toLowerCase();
+    const command = getStringArg(args, "command");
+    const policy = evaluateCommandPolicy(command);
 
-    // 命令工具先做轻量风险分层，真正执行时仍需要复用 commandPolicy 做二次校验。
-    if (/\b(rm|del|rmdir|git\s+reset|git\s+clean|format)\b/.test(command)) return "high";
+    // 命令工具先按 commandPolicy 做风险分层；真正执行时 commandRunner 仍会二次校验。
+    if (policy.level === "blocked") return "high";
+    if (policy.level === "confirm") return "medium";
     return "medium";
   }
 
@@ -86,7 +96,7 @@ function getApprovalTitle(toolName: string) {
 }
 
 function getApprovalSummary(toolName: string, args: Record<string, unknown>) {
-  if (toolName === "inspectProject") return "读取 package 信息、依赖和框架线索，用于选择合适实现方式。";
+  if (toolName === "inspectProject") return "读取 package 信息、依赖和框架线索，用于选择合适的实现方式。";
   if (toolName === "searchCode") return `准备使用关键词“${getStringArg(args, "query") || "未提供"}”搜索当前工作区。`;
   if (toolName === "readFile") return `准备读取文件“${getStringArg(args, "filePath") || "未提供"}”作为上下文。`;
   if (toolName === "readFileRange") return `准备读取文件“${getStringArg(args, "filePath") || "未提供"}”的指定行范围。`;
@@ -112,13 +122,25 @@ export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: 
     };
   }
 
+  if (toolName === "runCommand") {
+    const command = getStringArg(args, "command");
+    const policy = evaluateCommandPolicy(command);
+
+    if (policy.level === "blocked") {
+      return {
+        status: "blocked",
+        reason: policy.reason
+      };
+    }
+  }
+
   const riskLevel = getRiskLevel(toolName, args);
   const step = createApprovalRequestStep({
     actionType: getActionType(toolName),
     title: getApprovalTitle(toolName),
     summary: getApprovalSummary(toolName, args),
     riskLevel,
-    status: isReadonlyTool(toolName) ? "auto_approved" : "pending",
+    status: isAutoApprovedTool(toolName) ? "auto_approved" : "pending",
     targets: getTargets(toolName, args),
     command: toolName === "runCommand" ? getStringArg(args, "command") : undefined,
     details: {
@@ -128,7 +150,7 @@ export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: 
     }
   });
 
-  if (isReadonlyTool(toolName)) {
+  if (isAutoApprovedTool(toolName)) {
     return { status: "auto_approved", step };
   }
 

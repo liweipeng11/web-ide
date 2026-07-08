@@ -1,9 +1,9 @@
 import path from "node:path";
 import { generateAiEdit, type AgentStep, type EditPathRetryContext } from "./aiClient.js";
-import { createDiffHtml, createEditHunks, createMultiFileDiffHtml } from "./diffTools.js";
+import { createBinaryDiffHtml, createDiffHtml, createEditHunks, createMultiFileDiffHtml } from "./diffTools.js";
 import { buildEditScope, validatePatchesAgainstEditScope } from "./editScope.js";
 import { HttpError } from "./errors.js";
-import { listFiles, readWorkspaceFile, safeResolve } from "./fileTools.js";
+import { listFiles, readWorkspaceFile, readWorkspaceFileForDiff, safeResolve } from "./fileTools.js";
 import { createPendingPatch } from "./patchStore.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import { resolvePatchNewContent, StaleFullFileRewriteError } from "./searchReplacePatch.js";
@@ -85,6 +85,10 @@ function resolveExistingEditPath(rawPath: string, existingPaths: string[]) {
   return suffixMatches.length === 1 ? suffixMatches[0] : null;
 }
 
+function isDeletePatch(change: { status?: string }) {
+  return change.status === "delete";
+}
+
 function getPathRetryCandidates(invalidPaths: string[], existingPaths: string[], selectedFilePath: string | null) {
   const candidateSet = new Set<string>();
 
@@ -127,8 +131,13 @@ async function validateEditResultPaths(aiResult: AiEditResult, selectedFilePath:
           ...change,
           path: existingPath,
           filePath: existingPath,
-          status: "modify" as const
+          status: isDeletePatch(change) ? ("delete" as const) : ("modify" as const)
         };
+      }
+
+      if (isDeletePatch(change)) {
+        invalidFilePaths.push(change.filePath);
+        return null;
       }
 
       const createPath = normalizeCandidateEditPath(change.filePath);
@@ -173,7 +182,8 @@ function validateEditScope(aiResult: AiEditResult, selectedFilePath: string | nu
     validatedPaths.files?.map((change) => ({
       filePath: change.path,
       oldContent: change.status === "create" ? "" : change.oldContent,
-      newContent: change.newContent,
+      newContent: change.status === "delete" ? "" : change.newContent,
+      status: change.status,
       summary: change.summary,
       edits: change.edits
     })) || null;
@@ -183,16 +193,32 @@ function validateEditScope(aiResult: AiEditResult, selectedFilePath: string | nu
 
 type ValidatedFileChange = NonNullable<Awaited<ReturnType<typeof validateEditResultPaths>>["files"]>[number];
 
+function assertNoDeletePatches(aiResult: AiEditResult) {
+  const deletePaths = aiResult.patches?.filter((patch) => patch.status === "delete").map((patch) => patch.filePath) || [];
+
+  if (deletePaths.length) {
+    throw new HttpError(422, `Whole-file deletion must use runCommand with user approval, not a diff patch: ${deletePaths.join(", ")}`);
+  }
+}
+
 async function buildPatchFileChanges(changes: ValidatedFileChange[], userRequest: string): Promise<PatchFileChange[]> {
   const files = (
     await Promise.all(
       changes.map(async (change) => {
-        const previousContent = change.status === "create" ? "" : await readWorkspaceFile(change.path);
-        const newContent = change.status === "create" ? change.newContent : resolvePatchNewContent(change.path, change, previousContent, userRequest);
+        const previousFile = change.status === "create" ? null : await readWorkspaceFileForDiff(change.path);
 
-        if (previousContent === newContent) {
+        if (previousFile?.isBinary && change.status !== "delete") {
+          throw new HttpError(415, `Cannot modify binary file through text diff: ${change.path}`);
+        }
+
+        const previousContent = previousFile?.content || "";
+        const newContent = change.status === "delete" ? "" : change.status === "create" ? change.newContent : resolvePatchNewContent(change.path, change, previousContent, userRequest);
+
+        if (change.status !== "delete" && previousContent === newContent) {
           return null;
         }
+
+        const isBinary = Boolean(previousFile?.isBinary);
 
         return {
           path: change.path,
@@ -200,9 +226,12 @@ async function buildPatchFileChanges(changes: ValidatedFileChange[], userRequest
           status: change.status,
           oldContent: previousContent,
           newContent,
+          oldContentBase64: previousFile?.contentBase64,
+          newContentBase64: isBinary ? "" : undefined,
+          isBinary,
           summary: change.summary,
-          diffHtml: createDiffHtml(previousContent, newContent),
-          editHunks: createEditHunks(previousContent, newContent)
+          diffHtml: isBinary ? createBinaryDiffHtml(change.status) : createDiffHtml(previousContent, newContent),
+          editHunks: isBinary ? [] : createEditHunks(previousContent, newContent)
         };
       })
     )
@@ -247,6 +276,7 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     logRoute(runId, "ai.generate.start", { attempt, retryContext });
     aiResult = await generateAiEdit(selectedFilePath, oldContent, userRequest, onAgentStep, retryContext);
     logRoute(runId, "ai.generate.done", { attempt, summary: aiResult.summary, patches: aiResult.patches?.map((file) => file.filePath) || null });
+    assertNoDeletePatches(aiResult);
     validatedPaths = await validateEditResultPaths(aiResult, selectedFilePath);
     logRoute(runId, "paths.validated", { attempt, validFiles: validatedPaths.files?.map((file) => file.path) || null, invalidFilePaths: validatedPaths.invalidFilePaths });
 
@@ -340,13 +370,14 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   }
 
   const uniqueChanges = [...new Map((validatedPaths.files || []).map((change) => [change.path, change])).values()];
+  const hasDeleteChange = uniqueChanges.some((change) => change.status === "delete");
   logRoute(runId, "patch.prepare", { files: uniqueChanges.map((change) => change.path) });
   onAgentStep?.(
     createApprovalRequestStep({
-      actionType: "edit_files",
+      actionType: hasDeleteChange ? "delete_file" : "edit_files",
       title: "生成文件修改",
       summary: `准备生成 ${uniqueChanges.length} 个文件的补丁，用户审核后才会写入工作区。`,
-      riskLevel: "medium",
+      riskLevel: hasDeleteChange ? "high" : "medium",
       status: "pending",
       targets: uniqueChanges.map((change) => change.path),
       details: {

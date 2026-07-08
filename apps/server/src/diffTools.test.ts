@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createEditHunks } from "./diffTools.js";
+import { createBinaryDiffHtml, createEditHunks } from "./diffTools.js";
 
 test("createEditHunks returns structured local diff hunks", () => {
   const hunks = createEditHunks("one\ntwo\nthree\n", "one\ntwo updated\nthree\n");
@@ -10,4 +10,11 @@ test("createEditHunks returns structured local diff hunks", () => {
   assert.equal(hunks[0].newStart, 1);
   assert.ok(hunks[0].lines.some((line) => line.type === "remove" && line.content === "two"));
   assert.ok(hunks[0].lines.some((line) => line.type === "add" && line.content === "two updated"));
+});
+
+test("createBinaryDiffHtml hides binary file content", () => {
+  const diffHtml = createBinaryDiffHtml("delete");
+
+  assert.match(diffHtml, /Content preview is hidden/);
+  assert.doesNotMatch(diffHtml, /PK\u0003\u0004/);
 });

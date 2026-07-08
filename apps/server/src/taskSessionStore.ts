@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
-import type { AgentMessage, AgentMessageRole, AgentStep, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
+import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 
 function taskSessionDirectory() {
@@ -73,7 +73,9 @@ function getFilesReadFromStep(step: AgentStep) {
 }
 
 function getFilesChangedFromStep(step: AgentStep) {
-  return step.type === "edit" ? step.files : [];
+  if (step.type === "edit") return step.files;
+  if (step.type === "checkpoint") return step.files;
+  return [];
 }
 
 function getCommandsFromStep(step: AgentStep) {
@@ -145,6 +147,10 @@ function isAgentMessageRole(value: unknown): value is AgentMessageRole {
   return value === "system" || value === "user" || value === "assistant" || value === "tool";
 }
 
+function isAgentMode(value: unknown): value is AgentMode {
+  return value === "plan" || value === "act";
+}
+
 function normalizeAgentMessages(messages: unknown): AgentMessage[] {
   if (!Array.isArray(messages)) return [];
 
@@ -197,6 +203,7 @@ function normalizePendingToolCall(value: unknown): PendingAgentToolCall | null {
 function normalizeTaskSession(session: TaskSession): TaskSession {
   return {
     ...session,
+    agentMode: isAgentMode(session.agentMode) ? session.agentMode : "act",
     // 旧任务记录没有 Agent 消息字段，读取时补齐，后续 runtime 可以直接追加和恢复。
     agentMessages: normalizeAgentMessages(session.agentMessages),
     pendingToolCall: normalizePendingToolCall(session.pendingToolCall),
@@ -238,11 +245,12 @@ async function writeTaskSession(session: TaskSession) {
   await fs.writeFile(taskSessionPath(session.id), `${JSON.stringify(session, null, 2)}\n`, "utf8");
 }
 
-export async function createTaskSession(userGoal: string, options: { chatId?: string; messageIds?: string[] } = {}): Promise<TaskSession> {
+export async function createTaskSession(userGoal: string, options: { chatId?: string; messageIds?: string[]; agentMode?: AgentMode } = {}): Promise<TaskSession> {
   const now = Date.now();
   const session: TaskSession = {
     id: `task-${now.toString(36)}-${crypto.randomUUID()}`,
     userGoal,
+    agentMode: options.agentMode || "act",
     chatId: options.chatId,
     messageIds: options.messageIds,
     status: "running",
@@ -348,6 +356,7 @@ export async function approveTaskSessionPlan(taskSessionId: string | null | unde
 
   return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
     ...session,
+    agentMode: "act",
     status: session.status === "awaiting_replan" ? "running" : session.status,
     planApproval: {
       required: Boolean(session.planApproval?.required),
@@ -387,6 +396,7 @@ export async function interruptTaskSessionForReplan(taskSessionId: string | null
 
     return {
       ...session,
+      agentMode: "plan",
       status: "awaiting_replan",
       planItems: nextItems,
       planRevisions: [revision, ...normalizeTaskPlanRevisions(session.planRevisions)].slice(0, 20),
@@ -879,6 +889,17 @@ export async function updateTaskSessionChatId(taskSessionId: string | null | und
   return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
     ...session,
     chatId: chatId.trim(),
+    updatedAt: Date.now()
+  }));
+}
+
+export async function updateTaskSessionAgentMode(taskSessionId: string | null | undefined, agentMode: AgentMode) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    // Plan/Act 切换只改变后续 Agent 可用工具，不改写历史步骤。
+    agentMode,
     updatedAt: Date.now()
   }));
 }

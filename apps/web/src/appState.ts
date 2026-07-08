@@ -1,4 +1,4 @@
-import type { AgentStep, Checkpoint, CommandPolicyResult, CommandResult, FileChatHistoryItem, FileChatMessage, FileTreeNode, GenerateEditResponse, ProjectRulesResponse, TaskSession } from "./api";
+import type { AgentMode, AgentStep, Checkpoint, CommandPolicyResult, CommandResult, FileChatHistoryItem, FileChatMessage, FileTreeNode, GenerateEditResponse, ProjectRulesResponse, TaskSession } from "./api";
 
 export type OpenFileTab = {
   path: string;
@@ -12,6 +12,7 @@ export type AppState = {
   savedFileContent: string;
   openFiles: OpenFileTab[];
   userRequest: string;
+  agentMode: AgentMode;
   chatId: string;
   chatMessages: FileChatMessage[];
   agentSteps: AgentStep[];
@@ -82,6 +83,7 @@ export const initialState: AppState = {
   savedFileContent: "",
   openFiles: [],
   userRequest: "",
+  agentMode: "act",
   chatId: createChatId(),
   chatMessages: [],
   agentSteps: [],

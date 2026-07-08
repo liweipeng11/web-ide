@@ -1,5 +1,5 @@
 ﻿import type { Dispatch, SetStateAction } from "react";
-import { approveTaskPlan, createTaskPlanItem, deleteTaskPlanItem, deleteTaskSession, fetchTaskSession, fetchTaskSessions, interruptTaskSessionPlan, rewriteTaskPlan, updateTaskPlanItem, type TaskPlanItemStatus, type TaskSession } from "../api";
+import { approveTaskPlan, createTaskPlanItem, deleteTaskPlanItem, deleteTaskSession, fetchTaskSession, fetchTaskSessions, interruptTaskSessionPlan, rewriteTaskPlan, updateTaskPlanItem, updateTaskSessionMode, type AgentMode, type TaskPlanItemStatus, type TaskSession } from "../api";
 import { createChatId, type AppState } from "../appState";
 
 type UseTaskSessionsOptions = {
@@ -102,6 +102,22 @@ export function useTaskSessions({ state, setState }: UseTaskSessionsOptions) {
     }
   }
 
+  async function handleUpdateAgentMode(taskSessionId: string | null, mode: AgentMode) {
+    if (!state.workspaceRoot || state.loading || state.streaming) return;
+
+    // 当前会话尚未创建任务时，只更新本地首选模式；已有任务则同步到服务端。
+    setState((current) => ({ ...current, agentMode: mode }));
+
+    if (!taskSessionId) return;
+
+    try {
+      const { session } = await updateTaskSessionMode(taskSessionId, mode);
+      mergeTaskSession(session);
+    } catch (error) {
+      setState((current) => ({ ...current, error: error instanceof Error ? error.message : "切换智能体模式失败" }));
+    }
+  }
+
   async function handleOpenTaskSession(taskSessionId: string) {
     if (!state.workspaceRoot) return null;
 
@@ -165,6 +181,7 @@ export function useTaskSessions({ state, setState }: UseTaskSessionsOptions) {
     handleRewritePlan,
     handleApprovePlan,
     handleInterruptTaskPlan,
+    handleUpdateAgentMode,
     handleOpenTaskSession,
     handleDeleteTaskSession,
     handleRefreshTaskSessions

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { AgentStep, CommandResult, FileChatHistoryItem, FileChatMessage, TaskPlanItemStatus, TaskSession } from "../api";
+import type { AgentMode, AgentStep, CommandResult, FileChatHistoryItem, FileChatMessage, TaskPlanItemStatus, TaskSession } from "../api";
 import AgentStepsPanel from "./chat/AgentStepsPanel";
 import { formatMessageForDisplay, parseCommandSuggestion, type CommandRunState, type CommandSuggestion } from "./chat/chatUtils";
 import Icon from "./Icon";
@@ -8,6 +8,7 @@ import TaskPlanPanel from "./TaskPlanPanel";
 
 type Props = {
   chatId: string;
+  agentMode: AgentMode;
   value: string;
   messages: FileChatMessage[];
   agentSteps: AgentStep[];
@@ -33,6 +34,7 @@ type Props = {
   onRewritePlan: (taskSessionId: string, instruction: string) => Promise<void>;
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
+  onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
   onRollbackCheckpoint: (checkpointId: string) => void;
   onNewChat: () => void;
   onDeleteHistory: (path: string) => void;
@@ -49,6 +51,7 @@ type Props = {
 
 export default function ChatPanel({
   chatId,
+  agentMode,
   value,
   messages,
   agentSteps,
@@ -74,6 +77,7 @@ export default function ChatPanel({
   onRewritePlan,
   onApprovePlan,
   onInterruptTaskForReplan,
+  onUpdateAgentMode,
   onRollbackCheckpoint,
   onNewChat,
   onDeleteHistory,
@@ -122,6 +126,7 @@ export default function ChatPanel({
   const activePlanCompletedCount = activePlanItems.filter((item) => item.status === "completed").length;
   const activePlanBlockedCount = activePlanItems.filter((item) => item.status === "blocked").length;
   const activePlanPendingApproval = activeTaskSession?.planApproval?.status === "pending";
+  const effectiveAgentMode = activeTaskSession?.agentMode || agentMode;
 
   useEffect(() => {
     if (!historyRef.current) return;
@@ -311,6 +316,7 @@ export default function ChatPanel({
       <TaskPlanPanel
         session={session}
         compact={compact}
+        agentMode={effectiveAgentMode}
         loading={loading}
         streaming={streaming && session?.id === activeTaskSession?.id}
         disabled={disabled}
@@ -358,6 +364,21 @@ export default function ChatPanel({
           <span>{chatId.startsWith("chat:") ? "新对话" : "历史对话"}</span>
         </div>
         <div className="chat-heading-actions">
+          <div className="agent-mode-toggle" role="group" aria-label="Agent mode">
+            {(["plan", "act"] as AgentMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={effectiveAgentMode === mode ? "active" : ""}
+                disabled={disabled || loading || streaming}
+                title={mode === "plan" ? "Plan 模式只读分析并输出方案" : "Act 模式可生成补丁并请求验证"}
+                aria-pressed={effectiveAgentMode === mode}
+                onClick={() => void onUpdateAgentMode(activeTaskSession?.id || selectedTaskSession?.id || null, mode)}
+              >
+                {mode === "plan" ? "Plan" : "Act"}
+              </button>
+            ))}
+          </div>
           <button type="button" className="icon-button" disabled={loading} title="New chat" aria-label="New chat" onClick={onNewChat}>
             <Icon name="chat" />
           </button>
@@ -498,7 +519,7 @@ export default function ChatPanel({
               </section>
               <section>
                 <h3>完整过程</h3>
-                <AgentStepsPanel steps={selectedTaskSession.steps} disabled={disabled || loading} onDecideApproval={onDecideApproval} />
+                <AgentStepsPanel steps={selectedTaskSession.steps} disabled={disabled || loading} onDecideApproval={onDecideApproval} onRollbackCheckpoint={onRollbackCheckpoint} />
               </section>
             </div>
           )}
@@ -517,7 +538,7 @@ export default function ChatPanel({
             return (
               <article key={message.id} className={"chat-message " + message.role}>
                 <strong className="chat-message-role">{message.role === "user" ? "用户" : "智能体"}</strong>
-                <AgentStepsPanel inline steps={messageAgentSteps} disabled={disabled || loading} onDecideApproval={onDecideApproval} />
+                <AgentStepsPanel inline steps={messageAgentSteps} disabled={disabled || loading} onDecideApproval={onDecideApproval} onRollbackCheckpoint={onRollbackCheckpoint} />
                 {editingMessageId === message.id ? (
                   <div className="chat-message-edit">
                     <textarea value={editingDraft} onChange={(event) => setEditingDraft(event.target.value)} />

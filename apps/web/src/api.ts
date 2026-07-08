@@ -38,20 +38,37 @@ export type Checkpoint = {
   id: string;
   taskId: string;
   createdAt: number;
+  source?: CheckpointSource;
   files: {
     filePath: string;
     beforeContent: string;
     afterContent: string;
+    beforeContentBase64?: string;
+    afterContentBase64?: string;
+    isBinary?: boolean;
     beforeExists?: boolean;
+    afterExists?: boolean;
   }[];
+};
+
+export type CheckpointSource = {
+  taskSessionId?: string | null;
+  toolCallId?: string | null;
+  toolName?: string | null;
+  actionId?: string | null;
+  patchId?: string | null;
+  reason?: string | null;
 };
 
 export type PatchFileChange = {
   path: string;
   filePath: string;
-  status: "create" | "modify";
+  status: "create" | "modify" | "delete";
   oldContent: string;
   newContent: string;
+  oldContentBase64?: string;
+  newContentBase64?: string;
+  isBinary?: boolean;
   summary: string;
   diffHtml: string;
   editHunks?: EditHunk[];
@@ -119,6 +136,12 @@ export type AgentStep = {
       result?: CommandResult | null;
     }
   | {
+      type: "checkpoint";
+      checkpointId: string;
+      files: string[];
+      source?: CheckpointSource;
+    }
+  | {
       type: "error";
       message: string;
     }
@@ -164,12 +187,15 @@ export type TaskPlanApproval = {
   approvedAt?: number;
 };
 
-// ?????????????????????
-export type TaskSessionStatus = "running" | "success" | "failed" | "cancelled" | "awaiting_replan";
+export type AgentMode = "plan" | "act";
+
+// 任务状态会被连续 Agent 的审批、暂停和重规划流程复用。
+export type TaskSessionStatus = "running" | "awaiting_approval" | "awaiting_user" | "paused" | "success" | "failed" | "cancelled" | "awaiting_replan";
 
 export type TaskSession = {
   id: string;
   userGoal: string;
+  agentMode?: AgentMode;
   chatId?: string;
   messageIds?: string[];
   status: TaskSessionStatus;
@@ -283,6 +309,17 @@ export type ResumeTaskSessionChatResponse = {
   session: TaskSession;
   chatId: string;
   messages: FileChatMessage[];
+};
+
+export type DecideApprovalRequestResponse = {
+  session: TaskSession;
+  messages?: FileChatMessage[];
+  patch?: GenerateEditResponse | null;
+  runtime?: {
+    status: "completed" | "awaiting_approval" | "step_limit_reached";
+    content: string;
+    pendingToolCall: unknown | null;
+  };
 };
 
 export type FileChatStreamEvent =
@@ -523,8 +560,15 @@ export function approveTaskPlan(taskSessionId: string) {
   });
 }
 
+export function updateTaskSessionMode(taskSessionId: string, mode: AgentMode) {
+  return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/mode`, {
+    method: "POST",
+    body: JSON.stringify({ mode })
+  });
+}
+
 export function decideApprovalRequest(taskSessionId: string, actionId: string, decision: "approved" | "rejected") {
-  return request<{ session: TaskSession }>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/approvals/${encodeURIComponent(actionId)}`, {
+  return request<DecideApprovalRequestResponse>(`/api/task-sessions/${encodeURIComponent(taskSessionId)}/approvals/${encodeURIComponent(actionId)}`, {
     method: "POST",
     body: JSON.stringify({ decision })
   });
@@ -536,21 +580,21 @@ export function deleteFileChatHistory(path: string) {
   });
 }
 
-export function sendFileChatMessage(userRequest: string, paths: string[] = [], chatId?: string) {
+export function sendFileChatMessage(userRequest: string, paths: string[] = [], chatId?: string, agentMode: AgentMode = "act") {
   return request<FileChatResponse>("/api/ai/file-chat", {
     method: "POST",
-    body: JSON.stringify({ chatId, paths, userRequest })
+    body: JSON.stringify({ chatId, paths, userRequest, agentMode })
   });
 }
 
-export async function streamFileChatMessage(userRequest: string, paths: string[], chatId: string, onEvent: (event: FileChatStreamEvent) => void, signal?: AbortSignal, replayFromMessageId?: string, path?: string | null, approvedTaskSessionId?: string) {
+export async function streamFileChatMessage(userRequest: string, paths: string[], chatId: string, agentMode: AgentMode, onEvent: (event: FileChatStreamEvent) => void, signal?: AbortSignal, replayFromMessageId?: string, path?: string | null, approvedTaskSessionId?: string) {
   const response = await fetch("/api/ai/file-chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     signal,
-    body: JSON.stringify({ chatId, path, paths, userRequest, replayFromMessageId, approvedTaskSessionId })
+    body: JSON.stringify({ chatId, path, paths, userRequest, replayFromMessageId, approvedTaskSessionId, agentMode })
   });
 
   if (!response.ok || !response.body) {

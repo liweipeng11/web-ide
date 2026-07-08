@@ -1,5 +1,5 @@
 import type { Dispatch, PointerEvent, SetStateAction } from "react";
-import type { AgentStep, CommandResult, FileTreeNode, TaskPlanItemStatus } from "../api";
+import type { AgentMode, AgentStep, CommandResult, FileTreeNode, TaskPlanItemStatus } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
 import GitWorkflowPanel from "../gitWorkflow/GitWorkflowPanel";
@@ -49,6 +49,7 @@ type Props = {
   onRewritePlan: (taskSessionId: string, instruction: string) => Promise<void>;
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
+  onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
   onNewChat: () => void;
   onDeleteChatHistory: (path: string) => Promise<void>;
   onStopChat: () => void;
@@ -101,6 +102,7 @@ export default function AppLayout({
   onRewritePlan,
   onApprovePlan,
   onInterruptTaskForReplan,
+  onUpdateAgentMode,
   onNewChat,
   onDeleteChatHistory,
   onStopChat,
@@ -254,6 +256,7 @@ export default function AppLayout({
             <div className="chat-resizer" role="separator" aria-orientation="vertical" title="调整智能体面板宽度" onPointerDown={onStartChatResize} />
             <ChatPanel
               value={state.userRequest}
+              agentMode={state.agentMode}
               chatId={state.chatId}
               messages={state.chatMessages}
               agentSteps={state.agentSteps}
@@ -279,6 +282,7 @@ export default function AppLayout({
               onRewritePlan={onRewritePlan}
               onApprovePlan={onApprovePlan}
               onInterruptTaskForReplan={onInterruptTaskForReplan}
+              onUpdateAgentMode={onUpdateAgentMode}
               onRollbackCheckpoint={(checkpointId) => void onRollbackCheckpoint(checkpointId)}
               onNewChat={onNewChat}
               onDeleteHistory={(path) => void onDeleteChatHistory(path)}

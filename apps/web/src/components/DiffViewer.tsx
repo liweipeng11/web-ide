@@ -12,6 +12,12 @@ type Props = {
   autoFix: AutoFixState | null;
 };
 
+function getPatchFileLabel(file: { path: string; status: "create" | "modify" | "delete" }) {
+  if (file.status === "create") return `${file.path} (new file)`;
+  if (file.status === "delete") return `${file.path} (deleted file)`;
+  return file.path;
+}
+
 export default function DiffViewer({ patch, loading, onApply, onReject, onRunCommand, autoFix }: Props) {
   const [open, setOpen] = useState(false);
 
@@ -65,7 +71,7 @@ export default function DiffViewer({ patch, loading, onApply, onReject, onRunCom
                 <section className="diff-file" key={file.path}>
                   <div className="diff-file-toolbar">
                     <div>
-                      <strong>{file.path}{file.status === "create" ? " (new file)" : ""}</strong>
+                      <strong>{getPatchFileLabel(file)}</strong>
                       <span>{file.summary}</span>
                     </div>
                     <div className="diff-file-actions">

@@ -44,6 +44,19 @@ export type AgentStepPayload =
       result?: CommandResult | null;
     }
   | {
+      type: "checkpoint";
+      checkpointId: string;
+      files: string[];
+      source?: {
+        taskSessionId?: string | null;
+        toolCallId?: string | null;
+        toolName?: string | null;
+        actionId?: string | null;
+        patchId?: string | null;
+        reason?: string | null;
+      };
+    }
+  | {
       type: "error";
       message: string;
     };

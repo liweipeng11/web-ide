@@ -41,6 +41,8 @@ function formatAgentStepDetail(step: AgentStep) {
     detail = { type: step.type, files: step.files };
   } else if (step.type === "command") {
     detail = { type: step.type, command: step.command, status: step.status, policy: step.policy, result: sanitizedResult(step.result) };
+  } else if (step.type === "checkpoint") {
+    detail = { type: step.type, checkpointId: step.checkpointId, files: step.files, source: step.source };
   } else if (step.type === "message") {
     detail = { type: step.type, content: step.content };
   } else {
@@ -59,16 +61,16 @@ function formatAgentStepDetail(step: AgentStep) {
 }
 
 function getApprovalStatusText(status: ApprovalStep["status"]) {
-  if (status === "auto_approved") return "Auto approved";
-  if (status === "approved") return "Approved";
-  if (status === "rejected") return "Rejected";
-  return "Awaiting approval";
+  if (status === "auto_approved") return "已自动批准";
+  if (status === "approved") return "已批准";
+  if (status === "rejected") return "已拒绝";
+  return "等待审批";
 }
 
 function getRiskText(riskLevel: ApprovalStep["riskLevel"]) {
-  if (riskLevel === "high") return "High risk";
-  if (riskLevel === "medium") return "Medium risk";
-  return "Low risk";
+  if (riskLevel === "high") return "高风险";
+  if (riskLevel === "medium") return "中风险";
+  return "低风险";
 }
 
 function getCommandStatusText(step: Extract<AgentStep, { type: "command" }>) {
@@ -136,7 +138,46 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
     return { label: "Command", title: `${getCommandStatusText(step)}: ${step.command}`, detail: pieces.join(" / ") };
   }
 
+  if (step.type === "checkpoint") {
+    const sourceTool = step.source?.toolName || "workspace change";
+    return { label: "Checkpoint", title: `Created checkpoint ${step.checkpointId}`, detail: `${sourceTool} / ${step.files.length} file(s)` };
+  }
+
   return { label: "Error", title: "Tool failed", detail: step.message };
+}
+
+function CheckpointCard({
+  disabled = false,
+  step,
+  onRollbackCheckpoint
+}: {
+  disabled?: boolean;
+  step: Extract<AgentStep, { type: "checkpoint" }>;
+  onRollbackCheckpoint?: (checkpointId: string) => void;
+}) {
+  return (
+    <article className="agent-checkpoint-card">
+      <strong>Checkpoint {step.checkpointId}</strong>
+      <p>{step.source?.toolName ? `Created by ${step.source.toolName}.` : "Created after workspace changes."}</p>
+      {step.files.length > 0 && (
+        <ul>
+          {step.files.slice(0, 5).map((filePath) => (
+            <li key={filePath}>
+              <code>{filePath}</code>
+            </li>
+          ))}
+        </ul>
+      )}
+      {step.files.length > 5 && <small>{step.files.length - 5} more file(s)</small>}
+      {onRollbackCheckpoint && (
+        <div className="agent-approval-actions">
+          <button type="button" className="secondary" disabled={disabled} onClick={() => onRollbackCheckpoint(step.checkpointId)}>
+            Roll back
+          </button>
+        </div>
+      )}
+    </article>
+  );
 }
 
 function ApprovalRequestCard({
@@ -152,12 +193,13 @@ function ApprovalRequestCard({
 }) {
   const targets = step.command ? [step.command] : step.targets || [];
   const canDecide = step.status === "pending" && Boolean(onDecideApproval);
+  const processing = pending && canDecide;
 
   return (
     <article className={`agent-approval-card risk-${step.riskLevel} status-${step.status}`}>
       <div className="agent-approval-card-header">
         <span>{getRiskText(step.riskLevel)}</span>
-        <small>{getApprovalStatusText(step.status)}</small>
+        <small>{processing ? "处理中..." : getApprovalStatusText(step.status)}</small>
       </div>
       <strong>{step.title}</strong>
       <p>{step.summary}</p>
@@ -174,10 +216,10 @@ function ApprovalRequestCard({
       {canDecide && (
         <div className="agent-approval-actions">
           <button type="button" className="secondary" disabled={disabled || pending} onClick={() => void onDecideApproval?.(step, "rejected")}>
-            Reject
+            {processing ? "处理中..." : "拒绝"}
           </button>
           <button type="button" disabled={disabled || pending} onClick={() => void onDecideApproval?.(step, "approved")}>
-            Approve
+            {processing ? "处理中..." : "批准"}
           </button>
         </div>
       )}
@@ -191,9 +233,10 @@ type Props = {
   steps: AgentStep[];
   title?: string;
   onDecideApproval?: (step: ApprovalStep, decision: "approved" | "rejected") => Promise<void>;
+  onRollbackCheckpoint?: (checkpointId: string) => void;
 };
 
-export default function AgentStepsPanel({ disabled = false, inline = false, steps, title = "Agent Steps", onDecideApproval }: Props) {
+export default function AgentStepsPanel({ disabled = false, inline = false, steps, title = "Agent Steps", onDecideApproval, onRollbackCheckpoint }: Props) {
   const [pendingActionId, setPendingActionId] = useState<string | null>(null);
 
   if (!steps.length) return null;
@@ -226,6 +269,7 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
                   {view.detail && <small>{view.detail}</small>}
                 </summary>
                 {step.type === "approval_request" && <ApprovalRequestCard disabled={disabled} pending={pendingActionId === step.actionId} step={step} onDecideApproval={decideApproval} />}
+                {step.type === "checkpoint" && <CheckpointCard disabled={disabled} step={step} onRollbackCheckpoint={onRollbackCheckpoint} />}
                 <pre>{formatAgentStepDetail(step)}</pre>
               </details>
             </li>

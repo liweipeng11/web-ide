@@ -26,8 +26,19 @@ export function createDiffHtml(oldContent: string, newContent: string) {
     .join("");
 }
 
+export function createBinaryDiffHtml(status: PatchFileChange["status"]) {
+  const label = status === "delete" ? "Binary file will be deleted. Content preview is hidden." : "Binary file changed. Content preview is hidden.";
+  return `<span class="diff-line unchanged">${escapeHtml(label)}</span>`;
+}
+
 export function createMultiFileDiffHtml(files: PatchFileChange[]) {
-  return files.map((file) => `<div class="diff-file-header">${escapeHtml(file.status === "create" ? `${file.path} (new file)` : file.path)}</div>${file.diffHtml}`).join("");
+  return files.map((file) => `<div class="diff-file-header">${escapeHtml(formatDiffFileTitle(file))}</div>${file.isBinary ? createBinaryDiffHtml(file.status) : file.diffHtml}`).join("");
+}
+
+export function formatDiffFileTitle(file: Pick<PatchFileChange, "path" | "status">) {
+  if (file.status === "create") return `${file.path} (new file)`;
+  if (file.status === "delete") return `${file.path} (deleted file)`;
+  return file.path;
 }
 
 export function createEditHunks(oldContent: string, newContent: string): EditHunk[] {

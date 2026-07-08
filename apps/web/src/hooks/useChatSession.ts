@@ -63,6 +63,7 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
         chatId: resumed.chatId,
         chatMessages: resumed.messages,
         agentSteps: resumed.session.steps,
+        agentMode: resumed.session.agentMode || current.agentMode,
         currentTaskSessionId: resumed.session.id,
         selectedTaskSession: resumed.session,
         taskSessions: [resumed.session, ...current.taskSessions.filter((session) => session.id !== resumed.session.id)].sort((left, right) => right.createdAt - left.createdAt),
@@ -175,12 +176,14 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
         content.trim(),
         state.chatContextPaths,
         state.chatId,
+        state.agentMode,
         (streamEvent) => {
           if (streamEvent.event === "task_session") {
             streamTaskSessionId = streamEvent.data.session.id;
             setState((current) => ({
               ...current,
               currentTaskSessionId: streamEvent.data.session.id,
+              agentMode: streamEvent.data.session.agentMode || current.agentMode,
               taskSessions: [streamEvent.data.session, ...current.taskSessions.filter((session) => session.id !== streamEvent.data.session.id)]
             }));
           }

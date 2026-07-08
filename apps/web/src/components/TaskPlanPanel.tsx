@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from "react";
-import type { TaskPlanItem, TaskPlanItemStatus, TaskSession } from "../api";
+import type { AgentMode, TaskPlanItem, TaskPlanItemStatus, TaskSession } from "../api";
 import Icon from "./Icon";
 
 type Props = {
@@ -7,6 +7,7 @@ type Props = {
   loading: boolean;
   streaming: boolean;
   disabled: boolean;
+  agentMode?: AgentMode;
   compact?: boolean;
   onAddItem: (title: string) => Promise<void>;
   onUpdateItem: (itemId: string, updates: { title?: string; status?: TaskPlanItemStatus; note?: string }) => Promise<void>;
@@ -55,6 +56,7 @@ export default function TaskPlanPanel({
   loading,
   streaming,
   disabled,
+  agentMode,
   compact = false,
   onAddItem,
   onUpdateItem,
@@ -71,6 +73,7 @@ export default function TaskPlanPanel({
   const planItems = session?.planItems || [];
   const planRevisions = session?.planRevisions || [];
   const isAwaitingReplan = session?.status === "awaiting_replan";
+  const effectiveAgentMode = session?.agentMode || agentMode || "act";
   const canEdit = Boolean(session) && !disabled && !loading;
   const canInterruptForReplan = Boolean(session) && Boolean(onInterruptForReplan) && streaming && !disabled;
   const canSubmitPlanAction = canEdit || canInterruptForReplan;
@@ -140,12 +143,13 @@ export default function TaskPlanPanel({
             {planItems.length ? `${completedCount}/${planItems.length} 完成 · ${inProgressCount} 进行中 · ${blockedCount} 受阻` : session ? "暂无计划步骤" : "选择任务后可维护计划"}
           </span>
         </div>
+        <span className={`task-plan-mode ${effectiveAgentMode}`}>{effectiveAgentMode === "plan" ? "Plan" : "Act"}</span>
       </div>
 
       {session?.planApproval?.status === "pending" && (
         <div className="task-plan-approval">
           <strong>{isAwaitingReplan ? "已进入计划模式" : "计划等待批准"}</strong>
-          <p>{isAwaitingReplan ? "当前执行已暂停，请先调整计划；确认后会按新计划继续。" : "确认后智能体会按当前计划继续执行代码修改。"}</p>
+          <p>{isAwaitingReplan ? "当前执行已暂停，请先调整计划；确认后会切换到 Act 模式继续。" : "确认后智能体会进入 Act 模式，并按当前计划继续执行代码修改。"}</p>
           <button type="button" disabled={!canEdit} onClick={() => void onApprovePlan()}>
             {isAwaitingReplan ? "批准继续执行" : "批准执行"}
           </button>

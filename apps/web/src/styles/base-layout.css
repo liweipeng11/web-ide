@@ -343,8 +343,34 @@ body.resizing-chat .chat-resizer::after {
 }
 
 .chat-heading-actions {
+  align-items: center;
   display: flex;
   gap: 6px;
+}
+
+.agent-mode-toggle {
+  background: #eef2f7;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px;
+}
+
+.agent-mode-toggle button {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: #475569;
+  font-size: 11px;
+  min-height: 24px;
+  padding: 0 8px;
+}
+
+.agent-mode-toggle button.active {
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
 }
 
 .chat-heading-actions button,

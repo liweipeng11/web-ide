@@ -121,6 +121,27 @@ export async function appendFileChatTurn(filePath: string, userContent: string, 
   return nextMessages;
 }
 
+export async function appendFileChatMessage(
+  filePath: string,
+  message: Omit<FileChatMessage, "id" | "createdAt"> & Partial<Pick<FileChatMessage, "id" | "createdAt">>
+) {
+  const store = await readChatStore();
+  const key = conversationKey(filePath);
+  const messages = store.conversations[key] || [];
+  const nextMessage: FileChatMessage = {
+    id: message.id || crypto.randomUUID(),
+    role: message.role,
+    content: message.content,
+    createdAt: message.createdAt || new Date().toISOString()
+  };
+  const nextMessages = [...messages, nextMessage].slice(-40);
+
+  store.conversations[key] = nextMessages;
+  await writeChatStore(store);
+
+  return nextMessages;
+}
+
 export async function startFileChatTurn(filePath: string, userContent: string, replayFromMessageId = "") {
   const store = await readChatStore();
   const key = conversationKey(filePath);

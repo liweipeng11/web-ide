@@ -24,7 +24,7 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
 
     try {
       const result = await applyPatch(patchToApply.patchId, filePath);
-      const nodes = targetFiles.some((file) => file.status === "create") ? await fetchFiles("", state.showIgnoredFiles) : null;
+      const nodes = targetFiles.some((file) => file.status === "create" || file.status === "delete") ? await fetchFiles("", state.showIgnoredFiles) : null;
       if (nodes) {
         setFiles(nodes);
       }
@@ -34,16 +34,20 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
       setState((current) => {
         const selectedFileChange = targetFiles.find((file) => file.path === current.selectedPath);
         const fallbackSelectedChange = current.selectedPath === selectedPathToApply && !filePath ? patchToApply : null;
-        const nextSelectedContent = selectedFileChange?.newContent ?? fallbackSelectedChange?.newContent;
+        const selectedFileDeleted = selectedFileChange?.status === "delete" || (fallbackSelectedChange?.files || []).some((file) => file.path === current.selectedPath && file.status === "delete");
+        const nextSelectedContent = selectedFileDeleted ? "" : selectedFileChange?.newContent ?? fallbackSelectedChange?.newContent;
 
         return {
           ...current,
+          selectedPath: selectedFileDeleted ? null : current.selectedPath,
           fileContent: nextSelectedContent ?? current.fileContent,
           savedFileContent: nextSelectedContent ?? current.savedFileContent,
-          openFiles: current.openFiles.map((openFile) => {
-            const appliedFile = targetFiles.find((file) => file.path === openFile.path);
-            return appliedFile ? { ...openFile, content: appliedFile.newContent, savedContent: appliedFile.newContent } : openFile;
-          }),
+          openFiles: current.openFiles
+            .filter((openFile) => !targetFiles.some((file) => file.path === openFile.path && file.status === "delete"))
+            .map((openFile) => {
+              const appliedFile = targetFiles.find((file) => file.path === openFile.path);
+              return appliedFile ? { ...openFile, content: appliedFile.newContent, savedContent: appliedFile.newContent } : openFile;
+            }),
           loading: false,
           lastCheckpoint: result.checkpoint,
           dismissedCheckpointId: null,
@@ -53,7 +57,7 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
                 files: remainingFiles,
                 oldContent: remainingFiles[0].oldContent,
                 newContent: remainingFiles[0].newContent,
-                diffHtml: remainingFiles.map((file) => '<div class="diff-file-header">' + file.path + "</div>" + file.diffHtml).join("")
+                diffHtml: remainingFiles.map((file) => '<div class="diff-file-header">' + (file.status === "delete" ? file.path + " (deleted file)" : file.status === "create" ? file.path + " (new file)" : file.path) + "</div>" + file.diffHtml).join("")
               }
             : null
         };
@@ -143,7 +147,7 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
               files: remainingFiles,
               oldContent: remainingFiles[0].oldContent,
               newContent: remainingFiles[0].newContent,
-              diffHtml: remainingFiles.map((file) => '<div class="diff-file-header">' + file.path + "</div>" + file.diffHtml).join("")
+              diffHtml: remainingFiles.map((file) => '<div class="diff-file-header">' + (file.status === "delete" ? file.path + " (deleted file)" : file.status === "create" ? file.path + " (new file)" : file.path) + "</div>" + file.diffHtml).join("")
             }
           : null
       }));

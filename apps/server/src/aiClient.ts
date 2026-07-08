@@ -1016,21 +1016,27 @@ export function parseAiEditResult(rawContent: string): AiEditResult {
         content?: unknown;
         summary?: unknown;
         edits?: unknown;
+        status?: unknown;
+        action?: unknown;
+        operation?: unknown;
       };
       const path = parsePatchFilePath(change);
       const edits = parseSearchReplaceEdits(change.edits);
-      const oldContent = typeof change.oldContent === "string" ? change.oldContent : edits ? "" : undefined;
+      const status = parsePatchStatus(change);
+      const isDelete = isDeletePatchStatus(status);
+      const oldContent = typeof change.oldContent === "string" ? change.oldContent : edits || isDelete ? "" : undefined;
       const hasFullNewContent = typeof change.newContent === "string" || typeof change.content === "string";
       const newContent = typeof change.newContent === "string" ? change.newContent : typeof change.content === "string" ? change.content : "";
       const summary = typeof change.summary === "string" ? change.summary : planSummary;
 
-      if (!path || typeof oldContent !== "string" || (!edits && !hasFullNewContent)) {
+      if (!path || typeof oldContent !== "string" || (!isDelete && !edits && !hasFullNewContent)) {
         console.error("Failed to parse AI edit response file shape:", JSON.stringify(file).slice(0, 1000));
         throw new HttpError(502, "Failed to parse AI response");
       }
 
       return {
         filePath: path,
+        status,
         oldContent,
         newContent,
         summary,
@@ -1062,6 +1068,29 @@ function parseCommandsToRun(value: unknown) {
 
   const commands = value.filter((command): command is string => typeof command === "string" && Boolean(command.trim())).map((command) => command.trim());
   return commands.length ? commands : undefined;
+}
+
+function parsePatchStatus(change: { status?: unknown; action?: unknown; operation?: unknown }) {
+  const rawStatus = [change.status, change.action, change.operation].find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+  const normalizedStatus = rawStatus?.trim().toLowerCase();
+
+  if (normalizedStatus === "delete" || normalizedStatus === "remove" || normalizedStatus === "removed") {
+    return "delete" as const;
+  }
+
+  if (normalizedStatus === "create" || normalizedStatus === "new") {
+    return "create" as const;
+  }
+
+  if (normalizedStatus === "modify" || normalizedStatus === "edit" || normalizedStatus === "update") {
+    return "modify" as const;
+  }
+
+  return undefined;
+}
+
+function isDeletePatchStatus(status: ReturnType<typeof parsePatchStatus>) {
+  return status === "delete";
 }
 
 function normalizeAiEditResult(rawContent: string) {
@@ -1172,9 +1201,10 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
             "Return ONLY valid JSON.",
             "Do not change the intended code content except to make it valid JSON.",
             "The required schema is:",
-            '{"status":"patch|needs_context|plan|blocked","summary":"short summary","patches":[{"filePath":"existing/workspace/path","oldContent":"exact original file content for full rewrite or empty for local edits","newContent":"full updated file content for full rewrite or empty for local edits","edits":[{"search":"exact existing text","replace":"replacement text"}],"summary":"short file-level summary"}],"nextSearchKeywords":["optional keyword"],"commandsToRun":["optional validation command"]}',
+            '{"status":"patch|needs_context|plan|blocked","summary":"short summary","patches":[{"filePath":"existing/workspace/path","status":"modify|create","oldContent":"exact original file content for full rewrite or empty for local edits","newContent":"full updated file content for full rewrite/new files or empty for local edits","edits":[{"search":"exact existing text","replace":"replacement text"}],"summary":"short file-level summary"}],"nextSearchKeywords":["optional keyword"],"commandsToRun":["optional validation command"]}',
             "The selected file is optional context, not a required edit target.",
             "Prefer edits search/replace blocks for existing-file modifications. Use full newContent only when the whole file must be rewritten.",
+            "For a whole-file deletion, do not create a patch. Return patches:null with a summary telling the agent to use runCommand so the runtime can request user approval before deletion.",
             "For an existing file, choose filePath from candidateFilePaths. For a genuinely new file requested by the user, use a safe workspace-relative path.",
             "If the malformed response uses legacy single-file output, convert it to the required patches array with explicit patches[].filePath inferred from selectedFilePath or candidateFilePaths.",
             "Do not preserve legacy path aliases such as path, file, filename, targetPath, relativePath, file_path, target_file, or target; normalize them to filePath.",

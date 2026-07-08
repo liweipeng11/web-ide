@@ -9,7 +9,9 @@ import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage
 
 export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
-const MAX_AUTO_READ_FILES = 5;
+// 中等复杂度任务经常需要同时比对多个入口、路由和组件文件，5 个文件的上限过于激进，
+// 容易在真正进入修改/审批前就提前失败。
+const MAX_AUTO_READ_FILES = 8;
 const MAX_READ_FILE_LINES = 240;
 const MAX_READ_FILE_CHARS = 20_000;
 const MAX_READ_RANGE_LINES = 240;
@@ -121,7 +123,7 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
   },
   {
     name: "readFile",
-    description: "Read a relevant file from the current workspace. The path must be relative to the workspace. At most 5 files can be read automatically.",
+    description: "Read a relevant file from the current workspace. The path must be relative to the workspace. At most 8 files can be read automatically.",
     parameters: {
       type: "object",
       properties: {
@@ -365,10 +367,20 @@ export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: Age
   const cacheKey = getCacheKey(toolName, args);
 
   try {
-    const cached = runtime.cache.has(cacheKey);
-    const result = cached ? runtime.cache.get(cacheKey) : await definition.execute(args, runtime);
+    const cacheable = definition.cacheable !== false;
+    const cached = cacheable && runtime.cache.has(cacheKey);
+    const perToolRuntime = {
+      ...runtime,
+      currentToolCall: {
+        id: toolCall.id,
+        name: toolName,
+        arguments: args,
+        actionId: runtime.pendingActionId || null
+      }
+    };
+    const result = cached ? runtime.cache.get(cacheKey) : await definition.execute(args, perToolRuntime);
 
-    if (!cached) runtime.cache.set(cacheKey, result);
+    if (cacheable && !cached) runtime.cache.set(cacheKey, result);
 
     const summary = definition.summarize(result, cached, args);
     logAi(runtime.runId, `tool.${toolName}.${cached ? "cacheHit" : "ok"}`, summary);

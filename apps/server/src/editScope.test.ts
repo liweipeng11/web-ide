@@ -46,6 +46,24 @@ test("allows new files next to files already in scope", () => {
   assert.equal(result.ok, true);
 });
 
+test("treats explicit delete patches as existing-file changes", () => {
+  const scope = buildEditScope({
+    selectedFilePath: "src/obsolete.ts",
+    allowNewFiles: false
+  });
+  const result = validatePatchesAgainstEditScope([
+    {
+      filePath: "src/obsolete.ts",
+      status: "delete",
+      oldContent: "",
+      newContent: "",
+      summary: "删除不再使用的文件"
+    }
+  ], scope);
+
+  assert.equal(result.ok, true);
+});
+
 test("blocks new files in unrelated directories", () => {
   const scope = buildEditScope({
     filesRead: ["src/features/user/userService.ts"]

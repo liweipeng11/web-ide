@@ -74,21 +74,34 @@ export default function App() {
 
     if (!taskSessionId) return;
 
+    setState((current) => ({ ...current, loading: true, error: null }));
+
     const details = step.details && typeof step.details === "object" && !Array.isArray(step.details) ? (step.details as { approvalSource?: unknown }) : null;
     const isAgentRuntimeApproval = details?.approvalSource === "agent_runtime";
 
-    if (!isAgentRuntimeApproval && step.actionType === "edit_files") {
-      if (decision === "approved") {
-        await patchActions.handleApply(undefined, commandCenter.handleValidateAndFix);
-      } else {
-        await patchActions.handleReject();
+    try {
+      if (!isAgentRuntimeApproval && step.actionType === "edit_files") {
+        if (decision === "approved") {
+          await patchActions.handleApply(undefined, commandCenter.handleValidateAndFix);
+        } else {
+          await patchActions.handleReject();
+        }
+      } else if (!isAgentRuntimeApproval && step.actionType === "run_command" && decision === "approved" && step.command) {
+        await commandCenter.handleValidateAndFix(step.command);
       }
-    } else if (!isAgentRuntimeApproval && step.actionType === "run_command" && decision === "approved" && step.command) {
-      await commandCenter.handleValidateAndFix(step.command);
-    }
 
-    const { session } = await decideApprovalRequest(taskSessionId, step.actionId, decision);
-    upsertTaskSession(session);
+      const result = await decideApprovalRequest(taskSessionId, step.actionId, decision);
+      upsertTaskSession(result.session);
+      setState((current) => ({
+        ...current,
+        chatMessages: result.messages || current.chatMessages,
+        patch: result.patch ?? current.patch
+      }));
+    } catch (error) {
+      setState((current) => ({ ...current, error: error instanceof Error ? error.message : "处理审批失败" }));
+    } finally {
+      setState((current) => ({ ...current, loading: false }));
+    }
   }
 
   return (
@@ -129,6 +142,7 @@ export default function App() {
       onRewritePlan={taskSessions.handleRewritePlan}
       onApprovePlan={handleApprovePlan}
       onInterruptTaskForReplan={handleInterruptTaskForReplan}
+      onUpdateAgentMode={taskSessions.handleUpdateAgentMode}
       onNewChat={chatSession.handleNewChat}
       onDeleteChatHistory={chatSession.handleDeleteChatHistory}
       onStopChat={chatSession.handleStopChat}

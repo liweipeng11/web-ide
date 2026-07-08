@@ -131,6 +131,7 @@ export type FileChatRequest = {
   userRequest: string;
   replayFromMessageId?: string;
   approvedTaskSessionId?: string;
+  agentMode?: AgentMode;
 };
 
 export type FileChatResponse = {
@@ -203,6 +204,12 @@ export type AgentStep = {
       result?: CommandResult | null;
     }
   | {
+      type: "checkpoint";
+      checkpointId: string;
+      files: string[];
+      source?: CheckpointSource;
+    }
+  | {
       type: "error";
       message: string;
     }
@@ -234,6 +241,9 @@ export type PendingAgentToolCall = {
   status: "pending";
   createdAt: number;
 };
+
+export type AgentMode = "plan" | "act";
+
 export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
 
 export type TaskPlanItem = {
@@ -280,6 +290,7 @@ export type TaskSessionStatus = "running" | "awaiting_approval" | "awaiting_user
 export type TaskSession = {
   id: string;
   userGoal: string;
+  agentMode?: AgentMode;
   chatId?: string;
   messageIds?: string[];
   status: TaskSessionStatus;
@@ -328,6 +339,10 @@ export type ApprovalDecisionRequest = {
   decision: "approved" | "rejected";
 };
 
+export type UpdateAgentModeRequest = {
+  mode: AgentMode;
+};
+
 export type ApplyPatchRequest = {
   patchId: string;
   filePath?: string;
@@ -351,10 +366,23 @@ export type SearchReplaceEdit = {
 
 export type FilePatch = {
   filePath: string;
+  status?: "create" | "modify" | "delete";
   oldContent: string;
   newContent: string;
+  oldContentBase64?: string;
+  newContentBase64?: string;
+  isBinary?: boolean;
   summary: string;
   edits?: SearchReplaceEdit[];
+};
+
+export type CheckpointSource = {
+  taskSessionId?: string | null;
+  toolCallId?: string | null;
+  toolName?: string | null;
+  actionId?: string | null;
+  patchId?: string | null;
+  reason?: string | null;
 };
 
 export type EditScope = {
@@ -367,11 +395,16 @@ export type Checkpoint = {
   id: string;
   taskId: string;
   createdAt: number;
+  source?: CheckpointSource;
   files: {
     filePath: string;
     beforeContent: string;
     afterContent: string;
+    beforeContentBase64?: string;
+    afterContentBase64?: string;
+    isBinary?: boolean;
     beforeExists?: boolean;
+    afterExists?: boolean;
   }[];
 };
 
@@ -393,9 +426,12 @@ export type AiEditResult = EditPlan;
 export type PatchFileChange = {
   path: string;
   filePath: string;
-  status: "create" | "modify";
+  status: "create" | "modify" | "delete";
   oldContent: string;
   newContent: string;
+  oldContentBase64?: string;
+  newContentBase64?: string;
+  isBinary?: boolean;
   summary: string;
   diffHtml: string;
   editHunks?: EditHunk[];
@@ -421,5 +457,3 @@ export type PendingPatch = {
   commandsToRun?: string[];
   createdAt: number;
 };
-
-

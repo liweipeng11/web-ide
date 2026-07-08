@@ -3,23 +3,26 @@ import { createServer } from "node:http";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import { buildContextualEditRequest, classifyAgentRequest, generateFileChatReply, shouldGeneratePatchForIntent, streamFileChatReply, type AgentStep } from "./aiClient.js";
-import { resumeAgentRuntimeAfterApproval } from "./agentRuntime.js";
-import { appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, ensureFileChatMessages, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
-import { createCheckpoint, getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
+import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime.js";
+import { normalizeAgentMode } from "./agentModes.js";
+import { appendFileChatMessage, appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, ensureFileChatMessages, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
+import { getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
 import { discoverProjectCommands } from "./commandDiscovery.js";
 import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { getRecentCommandResults } from "./commandResults.js";
 import { runProjectCommand } from "./commandRunner.js";
+import { createMultiFileDiffHtml } from "./diffTools.js";
 import { createEditPatchResponse } from "./editPatchService.js";
 import { runAutoValidation } from "./autoValidationService.js";
-import { createWorkspaceFile, listFiles, readWorkspaceFile, workspacePathExists, writeWorkspaceFile } from "./fileTools.js";
+import { listFiles, readWorkspaceFile, writeWorkspaceFile } from "./fileTools.js";
 import { createGitWorkflowRouter } from "./gitWorkflow/routes.js";
 import { clearPendingPatches, deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
+import { applyPendingPatch } from "./patchApplyService.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionCommand, addTaskSessionFilesChanged, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
+import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
+import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
@@ -108,7 +111,29 @@ async function shouldAutoCancelTaskSession(taskSessionId: string | null) {
 function summarizeTaskSessionList(title: string, values: string[]) {
   if (!values.length) return "";
 
-  return [`${title}：`, ...values.slice(0, 8).map((value) => `- ${value}`), values.length > 8 ? `- 另有 ${values.length - 8} 项` : ""].filter(Boolean).join("\n");
+  return [title + "?", ...values.slice(0, 8).map((value) => "- " + value), values.length > 8 ? "- ?? " + (values.length - 8) + " ?" : ""].filter(Boolean).join("\n");
+}
+
+function createPatchStreamResponse(patchId: string | undefined, taskSessionId: string, summary: string, agentSteps: AgentStep[]): GenerateEditResponse | null {
+  if (!patchId) return null;
+
+  const patch = getPendingPatch(patchId);
+  const selectedFileChange = patch?.files[0];
+
+  if (!patch || !selectedFileChange) return null;
+
+  // Runtime 中的 proposePatch 仍生成 pending patch，这里把它还原成前端现有 diff 面板能消费的响应结构。
+  return {
+    taskSessionId,
+    patchId: patch.patchId,
+    summary,
+    files: patch.files,
+    commandsToRun: patch.commandsToRun,
+    oldContent: selectedFileChange.oldContent,
+    newContent: selectedFileChange.newContent,
+    diffHtml: createMultiFileDiffHtml(patch.files),
+    agentSteps
+  };
 }
 
 function createTaskSessionFallbackMessages(session: TaskSession): FileChatMessage[] {
@@ -137,6 +162,16 @@ function createTaskSessionFallbackMessages(session: TaskSession): FileChatMessag
       createdAt: updatedAt
     }
   ];
+}
+
+function buildRuntimeFollowupAnswer(runtimeResult: Awaited<ReturnType<typeof runAgentRuntime>>, runtimePatch: GenerateEditResponse | null) {
+  if (runtimePatch) {
+    const changedFiles = runtimePatch.files.map((file) => `- ${file.path}`).join("\n");
+
+    return [runtimeResult.content || runtimePatch.summary, "", `已生成 ${runtimePatch.files.length} 个文件的修改，请在下方审核后应用：`, changedFiles].join("\n");
+  }
+
+  return runtimeResult.content || "审批已处理，任务继续执行完成。";
 }
 
 app.get(
@@ -581,6 +616,16 @@ app.post(
 );
 
 app.post(
+  "/api/task-sessions/:taskSessionId/mode",
+  asyncRoute(async (request, response) => {
+    const taskSessionId = String(request.params.taskSessionId || "");
+    const { mode } = request.body as Partial<UpdateAgentModeRequest>;
+
+    response.json({ session: await updateTaskSessionAgentMode(taskSessionId, normalizeAgentMode(mode)) });
+  })
+);
+
+app.post(
   "/api/task-sessions/:taskSessionId/approvals/:actionId",
   asyncRoute(async (request, response) => {
     const taskSessionId = String(request.params.taskSessionId || "");
@@ -604,6 +649,7 @@ app.post(
     const runtimeResult = await resumeAgentRuntimeAfterApproval({
       taskSessionId,
       userRequest: sessionBeforeDecision.userGoal,
+      mode: sessionBeforeDecision.agentMode || "act",
       persistedMessages: sessionBeforeDecision.agentMessages || [],
       pendingToolCall,
       decision,
@@ -613,8 +659,26 @@ app.post(
     });
 
     await Promise.all(taskStepWrites);
+    const resumedSession = await getTaskSession(taskSessionId);
+    const runtimePatch = createPatchStreamResponse(runtimeResult.generatedPatchIds.at(-1), taskSessionId, runtimeResult.content || "已生成待审核补丁。", resumedSession?.steps || []);
+    const runtimeStatus = runtimePatch
+      ? await advanceTaskPlanProgress(taskSessionId, "patch_generated")
+      : await updateTaskSessionStatus(
+          taskSessionId,
+          runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : runtimeResult.status === "completed" ? "success" : "failed"
+        );
+    const chatId = sessionBeforeDecision.chatId?.trim() || `chat:${taskSessionId}`;
+    const messages = await appendFileChatMessage(chatId, {
+      role: "assistant",
+      // 审批恢复后补一条新的 assistant 消息，避免前端看起来“审批结束但没有继续”。
+      content: buildRuntimeFollowupAnswer(runtimeResult, runtimePatch)
+    });
+    const finalSession = runtimeStatus || (await getTaskSession(taskSessionId));
+
     response.json({
-      session: await getTaskSession(taskSessionId),
+      session: finalSession,
+      messages,
+      patch: runtimePatch,
       runtime: {
         status: runtimeResult.status,
         content: runtimeResult.content,
@@ -680,7 +744,8 @@ app.post(
       throw new HttpError(400, "userRequest is required");
     }
 
-    const taskSession = await createTaskSession(userRequest.trim(), { chatId: chatKey });
+    const requestedAgentMode = normalizeAgentMode((request.body as Partial<FileChatRequest>).agentMode);
+    const taskSession = await createTaskSession(userRequest.trim(), { chatId: chatKey, agentMode: requestedAgentMode });
 
     try {
       const contextPaths = getRequestedContextPaths(request.body as Partial<FileChatRequest>);
@@ -734,6 +799,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
 
   try {
     const { path: selectedPath, userRequest, replayFromMessageId, approvedTaskSessionId } = request.body as Partial<FileChatRequest>;
+    const requestedAgentMode = normalizeAgentMode((request.body as Partial<FileChatRequest>).agentMode);
     const chatKey = requireChatKey(request.body as Partial<FileChatRequest>);
     streamChatKey = chatKey;
 
@@ -746,7 +812,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         ? await approveTaskSessionPlan(approvedTaskSessionId)
             .then((session) => session || getTaskSession(approvedTaskSessionId))
             .then((session) => updateTaskSessionChatId(session.id, chatKey).then((updated) => updated || session))
-        : await createTaskSession(userRequest.trim(), { chatId: chatKey });
+        : await createTaskSession(userRequest.trim(), { chatId: chatKey, agentMode: requestedAgentMode });
     taskSessionId = taskSession.id;
     const contextPaths = getRequestedContextPaths(request.body as Partial<FileChatRequest>);
     const contextFiles = await readChatContextFiles(contextPaths);
@@ -773,7 +839,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     };
 
     const classification = await classifyAgentRequest(turn.history, userRequest.trim());
-    const plannedTaskSession = approvedTaskSessionId ? taskSession : await initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length, selectedPath });
+    const plannedTaskSession = approvedTaskSessionId || requestedAgentMode === "plan" ? taskSession : await initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length, selectedPath });
     sendEvent("task_session", { session: plannedTaskSession || taskSession });
     pushAgentStep(
       createAgentStep({
@@ -794,6 +860,37 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       return;
     }
 
+    const activeAgentMode = plannedTaskSession?.agentMode || taskSession.agentMode || requestedAgentMode;
+
+    if (activeAgentMode === "plan") {
+      pushAgentStep(
+        createAgentStep({
+          type: "message",
+          content: "Plan Mode: using read-only tools to inspect context and produce an execution plan."
+        })
+      );
+
+      const runtimeResult = await runAgentRuntime({
+        taskSessionId: taskSession.id,
+        userRequest: userRequest.trim(),
+        mode: "plan",
+        onAgentStep: pushAgentStep
+      });
+      const answer = runtimeResult.content || "Plan Mode completed without text output.";
+      sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
+      const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
+      const completedTaskSession = await updateTaskSessionStatus(taskSession.id, runtimeResult.status === "completed" ? "success" : runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : "failed");
+
+      completed = true;
+      await Promise.all(taskStepWrites);
+      if (completedTaskSession) {
+        sendEvent("task_session", { session: completedTaskSession });
+      }
+      sendEvent("done", { messages });
+      response.end();
+      return;
+    }
+
     if (shouldGeneratePatchForIntent(classification.intent)) {
       const editRequest = buildContextualEditRequest(turn.history, userRequest.trim(), classification.normalizedGoal);
 
@@ -806,6 +903,35 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
           })
         );
       }
+
+      const runtimeResult = await runAgentRuntime({
+        taskSessionId: taskSession.id,
+        userRequest: editRequest,
+        mode: "act",
+        onAgentStep: pushAgentStep
+      });
+      const runtimePatch = createPatchStreamResponse(runtimeResult.generatedPatchIds.at(-1), taskSession.id, runtimeResult.content || "已生成待审核补丁。", agentSteps);
+      const runtimeProgressedTaskSession = runtimePatch
+        ? await advanceTaskPlanProgress(taskSession.id, "patch_generated")
+        : await updateTaskSessionStatus(taskSession.id, runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : runtimeResult.status === "completed" ? "success" : "failed");
+      const runtimeChangedFiles = runtimePatch?.files.map((file) => `- ${file.path}`).join("\n") || "";
+      const runtimeAnswer = runtimePatch
+        ? [runtimeResult.content || runtimePatch.summary, "", `已生成 ${runtimePatch.files.length} 个文件的修改，请在下方审核后应用：`, runtimeChangedFiles].join("\n")
+        : runtimeResult.content || "Agent runtime completed without generating a patch.";
+      sendEvent("delta", { id: turn.assistantMessage.id, delta: runtimeAnswer });
+      const runtimeMessages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, runtimeAnswer);
+
+      completed = true;
+      await Promise.all(taskStepWrites);
+      if (runtimeProgressedTaskSession) {
+        sendEvent("task_session", { session: runtimeProgressedTaskSession });
+      }
+      if (runtimePatch) {
+        sendEvent("patch", { patch: runtimePatch });
+      }
+      sendEvent("done", { messages: runtimeMessages });
+      response.end();
+      return;
 
       const patch = await createEditPatchResponse(selectedPath, editRequest, pushAgentStep, taskSession.id);
       const progressedTaskSession = await advanceTaskPlanProgress(taskSession.id, "patch_generated");
@@ -910,72 +1036,8 @@ app.post(
       throw new HttpError(400, "patchId is required");
     }
 
-    const patch = getPendingPatch(patchId);
-
-    if (!patch) {
-      throw new HttpError(404, "Patch not found");
-    }
-
-    const normalizedFilePath = filePath ? normalizePatchPath(filePath) : null;
-    const targetFiles = normalizedFilePath
-      ? patch.files.filter((file) => normalizePatchPath(file.path) === normalizedFilePath)
-      : patch.files;
-
-    if (!targetFiles.length) {
-      throw new HttpError(404, "Patch file not found");
-    }
-
-    for (const file of targetFiles) {
-      if (file.status === "create") {
-        if (await workspacePathExists(file.path)) {
-          throw new HttpError(409, `${file.path} already exists`);
-        }
-        continue;
-      }
-
-      const currentContent = await readWorkspaceFile(file.path);
-
-      if (currentContent !== file.oldContent) {
-        throw new HttpError(409, `${file.path} has changed since patch was generated. Regenerate the patch before applying.`);
-      }
-    }
-
-    const checkpoint = await createCheckpoint(patch.patchId, targetFiles);
-
-    await Promise.all([
-      ...targetFiles.filter((file) => file.status === "modify").map((file) => writeWorkspaceFile(file.path, file.newContent)),
-      ...targetFiles.filter((file) => file.status === "create").map((file) => createWorkspaceFile(file.path, file.newContent))
-    ]);
-
-    for (const file of targetFiles) {
-      const writtenContent = await readWorkspaceFile(file.path);
-
-      if (writtenContent !== file.newContent) {
-        throw new HttpError(500, `${file.path} was not written correctly. Apply the patch again after refreshing the workspace.`);
-      }
-    }
-
-    await addTaskSessionFilesChanged(patch.taskSessionId, targetFiles.map((file) => file.path));
-    await addTaskSessionCheckpoint(patch.taskSessionId, checkpoint.id);
-    await advanceTaskPlanProgress(patch.taskSessionId, "patch_applied");
-
-    if (filePath) {
-      const remainingPatch = removePendingPatchFile(patch.patchId, filePath);
-
-      if (!remainingPatch && !patch.commandsToRun?.length) {
-        await advanceTaskPlanProgress(patch.taskSessionId, "validation_success");
-        await updateTaskSessionStatus(patch.taskSessionId, "success");
-      }
-    } else {
-      deletePendingPatch(patch.patchId);
-
-      if (!patch.commandsToRun?.length) {
-        await advanceTaskPlanProgress(patch.taskSessionId, "validation_success");
-        await updateTaskSessionStatus(patch.taskSessionId, "success");
-      }
-    }
-
-    response.json({ success: true, checkpoint });
+    const result = await applyPendingPatch({ patchId, filePath });
+    response.json({ success: true, checkpoint: result.checkpoint });
   })
 );
 
