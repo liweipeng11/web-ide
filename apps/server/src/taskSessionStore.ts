@@ -4,7 +4,7 @@ import path from "node:path";
 import { getCheckpoint } from "./checkpointStore.js";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
-import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
+import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 
 function taskSessionDirectory() {
@@ -165,6 +165,37 @@ function isPatchFilterStage(value: unknown): value is PatchFilterStage {
   return value === "path_validation" || value === "scope_validation" || value === "dedupe" || value === "content_diff" || value === "retry";
 }
 
+function isPatchLifecycleEventType(value: unknown): value is PatchLifecycleEventType {
+  return value === "patch_created" || value === "patch_filtered" || value === "patch_file_applied" || value === "patch_file_rejected" || value === "patch_completed" || value === "patch_superseded" || value === "auto_fix_patch_created";
+}
+
+function normalizePatchLifecycleEvents(value: unknown): PatchLifecycleEvent[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is Partial<PatchLifecycleEvent> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => {
+      const detail = item.detail && typeof item.detail === "object" && !Array.isArray(item.detail) ? (item.detail as Record<string, unknown>) : undefined;
+
+      return {
+        id: typeof item.id === "string" && item.id.trim() ? item.id : `patch-event-${crypto.randomUUID()}`,
+        type: isPatchLifecycleEventType(item.type) ? item.type : "patch_created",
+        patchId: typeof item.patchId === "string" && item.patchId.trim() ? item.patchId : "",
+        taskSessionId: typeof item.taskSessionId === "string" && item.taskSessionId.trim() ? item.taskSessionId : item.taskSessionId === null ? null : undefined,
+        filePath: typeof item.filePath === "string" && item.filePath.trim() ? item.filePath : item.filePath === null ? null : undefined,
+        filePaths: Array.isArray(item.filePaths) ? item.filePaths.filter((filePath): filePath is string => typeof filePath === "string" && Boolean(filePath.trim())) : undefined,
+        sourcePatchId: typeof item.sourcePatchId === "string" && item.sourcePatchId.trim() ? item.sourcePatchId : item.sourcePatchId === null ? null : undefined,
+        command: typeof item.command === "string" && item.command.trim() ? item.command : item.command === null ? null : undefined,
+        attempt: typeof item.attempt === "number" ? item.attempt : item.attempt === null ? null : undefined,
+        message: typeof item.message === "string" && item.message.trim() ? item.message : item.message === null ? null : undefined,
+        detail,
+        createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now()
+      };
+    })
+    .filter((event) => event.patchId.trim())
+    .sort((left, right) => left.createdAt - right.createdAt);
+}
+
 function normalizePatchDiagnostics(value: unknown): PatchGenerationDiagnostics[] {
   if (!Array.isArray(value)) return [];
 
@@ -260,7 +291,8 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     pendingToolCall: normalizePendingToolCall(session.pendingToolCall),
     planItems: normalizeTaskPlanItems(session.planItems),
     planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
-    patchDiagnostics: normalizePatchDiagnostics(session.patchDiagnostics)
+    patchDiagnostics: normalizePatchDiagnostics(session.patchDiagnostics),
+    patchEvents: normalizePatchLifecycleEvents(session.patchEvents)
   };
 }
 
@@ -357,6 +389,7 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     planApproval: { required: false, status: "not_required" },
     checkpointIds: [],
     patchDiagnostics: [],
+    patchEvents: [],
     gitCommits: [],
     createdAt: now,
     updatedAt: now
@@ -967,6 +1000,28 @@ export async function recordTaskSessionPatchDiagnostics(taskSessionId: string | 
       // 同一个 patch 重新记录时按 patchId 覆盖，避免历史详情里出现重复生成过程。
       patchDiagnostics: [diagnostics, ...nextDiagnostics].slice(0, 50),
       updatedAt: Date.now()
+    };
+  });
+}
+
+export async function appendTaskSessionPatchEvent(taskSessionId: string | null | undefined, event: Omit<PatchLifecycleEvent, "id" | "createdAt" | "taskSessionId"> & Partial<Pick<PatchLifecycleEvent, "id" | "createdAt" | "taskSessionId">>) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const now = Date.now();
+    const nextEvent: PatchLifecycleEvent = {
+      ...event,
+      // 事件 ID 保持稳定可覆盖，未提供时由存储层生成，避免调用方重复实现。
+      id: event.id?.trim() || `patch-event-${now.toString(36)}-${crypto.randomUUID()}`,
+      taskSessionId: event.taskSessionId ?? taskSessionId,
+      createdAt: event.createdAt || now
+    };
+
+    return {
+      ...session,
+      // 同一事件重复写入时按 id 覆盖，防止重试或并发刷新造成历史噪声。
+      patchEvents: [...normalizePatchLifecycleEvents(session.patchEvents).filter((item) => item.id !== nextEvent.id), nextEvent].sort((left, right) => left.createdAt - right.createdAt).slice(-200),
+      updatedAt: now
     };
   });
 }

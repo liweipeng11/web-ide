@@ -3,7 +3,7 @@ import { HttpError } from "./errors.js";
 import { createWorkspaceFile, deleteWorkspaceFile, readWorkspaceFile, readWorkspaceFileBuffer, workspacePathExists, writeWorkspaceFile } from "./fileTools.js";
 import { deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import { addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionPatchEvent, updateTaskSessionStatus } from "./taskSessionStore.js";
 import type { AgentStep, CheckpointSource } from "./types.js";
 
 export type ApplyPendingPatchOptions = {
@@ -93,6 +93,22 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
 
   await addTaskSessionFilesChanged(patch.taskSessionId, targetFiles.map((file) => file.path));
   await addTaskSessionCheckpoint(patch.taskSessionId, checkpoint.id);
+  await Promise.all(
+    targetFiles.map((file) =>
+      appendTaskSessionPatchEvent(patch.taskSessionId, {
+        type: "patch_file_applied",
+        patchId: patch.patchId,
+        filePath: file.path,
+        filePaths: [file.path],
+        message: `已应用 ${file.path}`,
+        detail: {
+          status: file.status,
+          checkpointId: checkpoint.id,
+          summary: file.summary
+        }
+      })
+    )
+  );
   options.onAgentStep?.(
     createAgentStep({
       type: "checkpoint",
@@ -110,8 +126,31 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
       await advanceTaskPlanProgress(patch.taskSessionId, "validation_success");
       await updateTaskSessionStatus(patch.taskSessionId, "success");
     }
+
+    if (!remainingPatch) {
+      await appendTaskSessionPatchEvent(patch.taskSessionId, {
+        type: "patch_completed",
+        patchId: patch.patchId,
+        filePaths: targetFiles.map((file) => file.path),
+        message: "patch 已处理完成。",
+        detail: {
+          completedBy: "apply",
+          checkpointId: checkpoint.id
+        }
+      });
+    }
   } else {
     deletePendingPatch(patch.patchId);
+    await appendTaskSessionPatchEvent(patch.taskSessionId, {
+      type: "patch_completed",
+      patchId: patch.patchId,
+      filePaths: targetFiles.map((file) => file.path),
+      message: "patch 已处理完成。",
+      detail: {
+        completedBy: "apply",
+        checkpointId: checkpoint.id
+      }
+    });
 
     if (!patch.commandsToRun?.length) {
       await advanceTaskPlanProgress(patch.taskSessionId, "validation_success");

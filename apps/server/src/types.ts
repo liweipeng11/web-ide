@@ -318,6 +318,8 @@ export type TaskSession = {
   diffView?: TaskSessionDiffView;
   // 按 patch 维度沉淀生成诊断，旧任务读取时会自动补成空数组。
   patchDiagnostics?: PatchGenerationDiagnostics[];
+  // 按时间顺序沉淀 patch 生命周期事件，用于历史回放和审计。
+  patchEvents?: PatchLifecycleEvent[];
   gitCommits?: {
     hash: string;
     message: string;
@@ -433,6 +435,30 @@ export type PatchGenerationDiagnostics = {
   noEffectCount: number;
   records: PatchFilterRecord[];
   generatedAt: number;
+};
+
+export type PatchLifecycleEventType =
+  | "patch_created"
+  | "patch_filtered"
+  | "patch_file_applied"
+  | "patch_file_rejected"
+  | "patch_completed"
+  | "patch_superseded"
+  | "auto_fix_patch_created";
+
+export type PatchLifecycleEvent = {
+  id: string;
+  type: PatchLifecycleEventType;
+  patchId: string;
+  taskSessionId?: string | null;
+  filePath?: string | null;
+  filePaths?: string[];
+  sourcePatchId?: string | null;
+  command?: string | null;
+  attempt?: number | null;
+  message?: string | null;
+  detail?: Record<string, unknown>;
+  createdAt: number;
 };
 
 export type CheckpointSource = {

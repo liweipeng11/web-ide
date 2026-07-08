@@ -56,6 +56,30 @@ export type PatchGenerationDiagnostics = {
   generatedAt: number;
 };
 
+export type PatchLifecycleEventType =
+  | "patch_created"
+  | "patch_filtered"
+  | "patch_file_applied"
+  | "patch_file_rejected"
+  | "patch_completed"
+  | "patch_superseded"
+  | "auto_fix_patch_created";
+
+export type PatchLifecycleEvent = {
+  id: string;
+  type: PatchLifecycleEventType;
+  patchId: string;
+  taskSessionId?: string | null;
+  filePath?: string | null;
+  filePaths?: string[];
+  sourcePatchId?: string | null;
+  command?: string | null;
+  attempt?: number | null;
+  message?: string | null;
+  detail?: Record<string, unknown>;
+  createdAt: number;
+};
+
 export type AutoValidationResponse = {
   status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached";
   command: string;
@@ -238,6 +262,7 @@ export type TaskSession = {
   commandsRun: string[];
   steps: AgentStep[];
   patchDiagnostics?: PatchGenerationDiagnostics[];
+  patchEvents?: PatchLifecycleEvent[];
   planItems?: TaskPlanItem[];
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;

@@ -2,7 +2,7 @@ import { createEditPatchResponse } from "./editPatchService.js";
 import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { runProjectCommand } from "./commandRunner.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import { advanceTaskPlanProgress, appendTaskSessionStep, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, updateTaskSessionStatus } from "./taskSessionStore.js";
 import type { AgentStep, AutoValidationResponse, CommandResult } from "./types.js";
 
 const defaultMaxAttempts = 3;
@@ -78,6 +78,7 @@ export type AutoValidationDependencies = {
   runProjectCommand: typeof runProjectCommand;
   createEditPatchResponse: typeof createEditPatchResponse;
   appendTaskSessionStep: typeof appendTaskSessionStep;
+  appendTaskSessionPatchEvent?: typeof appendTaskSessionPatchEvent;
   advanceTaskPlanProgress: typeof advanceTaskPlanProgress;
   updateTaskSessionStatus: typeof updateTaskSessionStatus;
 };
@@ -87,6 +88,7 @@ const defaultDependencies: AutoValidationDependencies = {
   runProjectCommand,
   createEditPatchResponse,
   appendTaskSessionStep,
+  appendTaskSessionPatchEvent,
   advanceTaskPlanProgress,
   updateTaskSessionStatus
 };
@@ -144,6 +146,18 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
     pushAgentStep(createAgentStep({ type: "message", content: `Validation failed. Generating repair patch ${nextAttempt}/${maxAttempts} for: ${command}` }));
     await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
     const patch = await dependencies.createEditPatchResponse(options.selectedPath, buildFixPrompt(result, nextAttempt, maxAttempts), pushAgentStep, taskSessionId);
+    await dependencies.appendTaskSessionPatchEvent?.(taskSessionId, {
+      type: "auto_fix_patch_created",
+      patchId: patch.patchId,
+      filePaths: patch.files.map((file) => file.path),
+      command,
+      attempt: nextAttempt,
+      message: `验证失败后生成第 ${nextAttempt} 轮自动修复 patch。`,
+      detail: {
+        maxAttempts,
+        failureSummary
+      }
+    });
 
     return finish({
       status: "fix_generated",

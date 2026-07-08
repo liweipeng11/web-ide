@@ -22,7 +22,7 @@ import { applyPendingPatch } from "./patchApplyService.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
-import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
@@ -1102,15 +1102,62 @@ app.post(
         throw new HttpError(404, "Patch file not found");
       }
 
+      const rejectedFile = patch.files.find((file) => normalizePatchPath(file.path) === normalizedFilePath);
       const remainingPatch = removePendingPatchFile(patchId, filePath);
+      await appendTaskSessionPatchEvent(patch.taskSessionId, {
+        type: "patch_file_rejected",
+        patchId,
+        filePath: rejectedFile?.path || filePath,
+        filePaths: [rejectedFile?.path || filePath],
+        message: `已拒绝 ${rejectedFile?.path || filePath}`,
+        detail: {
+          status: rejectedFile?.status,
+          summary: rejectedFile?.summary
+        }
+      });
 
       if (!remainingPatch) {
+        await appendTaskSessionPatchEvent(patch.taskSessionId, {
+          type: "patch_completed",
+          patchId,
+          filePaths: [rejectedFile?.path || filePath],
+          message: "patch 已处理完成。",
+          detail: {
+            completedBy: "reject"
+          }
+        });
         await advanceTaskPlanProgress(patch.taskSessionId, "task_cancelled");
         await updateTaskSessionStatus(patch.taskSessionId, "cancelled");
       }
     } else {
       const patch = getPendingPatch(patchId);
       deletePendingPatch(patchId);
+      if (patch) {
+        await Promise.all(
+          patch.files.map((file) =>
+            appendTaskSessionPatchEvent(patch.taskSessionId, {
+              type: "patch_file_rejected",
+              patchId,
+              filePath: file.path,
+              filePaths: [file.path],
+              message: `已拒绝 ${file.path}`,
+              detail: {
+                status: file.status,
+                summary: file.summary
+              }
+            })
+          )
+        );
+        await appendTaskSessionPatchEvent(patch.taskSessionId, {
+          type: "patch_completed",
+          patchId,
+          filePaths: patch.files.map((file) => file.path),
+          message: "patch 已处理完成。",
+          detail: {
+            completedBy: "reject"
+          }
+        });
+      }
       await advanceTaskPlanProgress(patch?.taskSessionId, "task_cancelled");
       await updateTaskSessionStatus(patch?.taskSessionId, "cancelled");
     }

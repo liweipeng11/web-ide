@@ -136,6 +136,7 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
 
     try {
       await rejectPatch(patchToReject.patchId, filePath);
+      void refreshTaskSessions(patchToReject.taskSessionId || state.currentTaskSessionId);
       const remainingFiles = filePath ? patchToReject.files.filter((file) => file.path !== filePath) : [];
       setState((current) => ({
         ...current,

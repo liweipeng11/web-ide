@@ -7,7 +7,7 @@ import { listFiles, readWorkspaceFile, readWorkspaceFileForDiff, safeResolve } f
 import { createPendingPatch } from "./patchStore.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import { resolvePatchNewContent, StaleFullFileRewriteError } from "./searchReplacePatch.js";
-import { recordTaskSessionPatchDiagnostics } from "./taskSessionStore.js";
+import { appendTaskSessionPatchEvent, recordTaskSessionPatchDiagnostics } from "./taskSessionStore.js";
 import type { AiEditResult, FileTreeNode, PatchFileChange, PatchFilterRecord, PatchGenerationDiagnostics } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { isValidationCommand, selectDefaultValidationCommand } from "./validationCommand.js";
@@ -524,6 +524,36 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   };
   patch.diagnostics = diagnostics;
   await recordTaskSessionPatchDiagnostics(taskSessionId, diagnostics);
+  await appendTaskSessionPatchEvent(taskSessionId, {
+    type: "patch_created",
+    patchId: patch.patchId,
+    filePaths: files.map((file) => file.path),
+    message: finalSummary,
+    detail: {
+      rawPatchCount,
+      finalPatchCount: files.length,
+      commandsToRun: commandsToRun || []
+    }
+  });
+
+  if (diagnostics.records.length) {
+    await appendTaskSessionPatchEvent(taskSessionId, {
+      type: "patch_filtered",
+      patchId: patch.patchId,
+      filePaths: diagnostics.records.map((record) => record.normalizedPath || record.filePath),
+      message: `已过滤 ${diagnostics.filteredCount} 个候选变更。`,
+      detail: {
+        filteredCount: diagnostics.filteredCount,
+        reasons: diagnostics.records.map((record) => ({
+          reason: record.reason,
+          stage: record.stage,
+          filePath: record.filePath,
+          normalizedPath: record.normalizedPath,
+          detail: record.detail
+        }))
+      }
+    });
+  }
   logRoute(runId, "done", { elapsedMs: Date.now() - startedAt, patchId: patch.patchId, files: files.map((file) => file.path) });
 
   return {

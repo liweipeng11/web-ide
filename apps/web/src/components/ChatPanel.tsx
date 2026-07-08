@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { AgentMode, AgentStep, CommandResult, FileChatHistoryItem, FileChatMessage, PatchFilterReason, PatchGenerationDiagnostics, TaskPlanItemStatus, TaskSession } from "../api";
+import type { AgentMode, AgentStep, CommandResult, FileChatHistoryItem, FileChatMessage, PatchFilterReason, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, TaskPlanItemStatus, TaskSession } from "../api";
 import AgentStepsPanel from "./chat/AgentStepsPanel";
 import { formatMessageForDisplay, parseCommandSuggestion, type CommandRunState, type CommandSuggestion } from "./chat/chatUtils";
 import Icon from "./Icon";
@@ -91,6 +91,59 @@ function renderPatchDiagnostics(diagnostics: PatchGenerationDiagnostics[]) {
       </div>
     </section>
   );
+}
+
+function getPatchEventLabel(type: PatchLifecycleEventType) {
+  const labels: Record<PatchLifecycleEventType, string> = {
+    patch_created: "生成 patch",
+    patch_filtered: "过滤候选",
+    patch_file_applied: "应用文件",
+    patch_file_rejected: "拒绝文件",
+    patch_completed: "处理完成",
+    patch_superseded: "被新 patch 替代",
+    auto_fix_patch_created: "自动修复 patch"
+  };
+
+  return labels[type];
+}
+
+function renderPatchLifecycleEvents(events: PatchLifecycleEvent[]) {
+  if (!events.length) return null;
+
+  return (
+    <section>
+      <h3>patch 生命周期</h3>
+      <ol className="task-patch-events">
+        {events.map((event) => {
+          const filePaths = event.filePaths?.length ? event.filePaths : event.filePath ? [event.filePath] : [];
+
+          return (
+            <li key={event.id}>
+              <div className="task-patch-event-main">
+                <strong>{getPatchEventLabel(event.type)}</strong>
+                <span>{formatTaskEventTime(event.createdAt)}</span>
+              </div>
+              <code>{event.patchId}</code>
+              {event.message ? <p>{event.message}</p> : null}
+              {event.command ? <small>验证命令：{event.command}</small> : null}
+              {typeof event.attempt === "number" ? <small>尝试轮次：{event.attempt}</small> : null}
+              {filePaths.length ? (
+                <ul>
+                  {filePaths.map((filePath) => (
+                    <li key={filePath}>{filePath}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+function formatTaskEventTime(value: number) {
+  return new Date(value).toLocaleString();
 }
 
 export default function ChatPanel({
@@ -615,6 +668,7 @@ export default function ChatPanel({
                 {renderTaskPathList(selectedTaskSession.commandsRun, "没有记录命令。")}
               </section>
               {renderPatchDiagnostics(selectedTaskSession.patchDiagnostics || [])}
+              {renderPatchLifecycleEvents(selectedTaskSession.patchEvents || [])}
               <section>
                 <h3>Checkpoints</h3>
                 {selectedTaskSession.checkpointIds.length ? (

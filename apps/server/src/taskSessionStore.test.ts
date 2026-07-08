@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 
@@ -67,6 +67,7 @@ test("normalizes legacy task sessions without plan items", async () => {
   delete persisted.agentMessages;
   delete persisted.pendingToolCall;
   delete persisted.patchDiagnostics;
+  delete persisted.patchEvents;
   await fs.writeFile(sessionPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 
   const loaded = await getTaskSession(session.id);
@@ -74,6 +75,7 @@ test("normalizes legacy task sessions without plan items", async () => {
   assert.deepEqual(loaded.agentMessages, []);
   assert.equal(loaded.pendingToolCall, null);
   assert.deepEqual(loaded.patchDiagnostics, []);
+  assert.deepEqual(loaded.patchEvents, []);
 });
 
 test("persists patch generation diagnostics in task sessions", async () => {
@@ -106,6 +108,42 @@ test("persists patch generation diagnostics in task sessions", async () => {
   assert.equal(loaded.patchDiagnostics?.length, 1);
   assert.equal(loaded.patchDiagnostics?.[0]?.patchId, "patch-diagnostics-1");
   assert.equal(loaded.patchDiagnostics?.[0]?.records[0]?.reason, "invalid_path");
+});
+
+test("persists patch lifecycle events in task sessions", async () => {
+  const { session } = await createIsolatedTaskSession("记录 patch 生命周期");
+
+  await appendTaskSessionPatchEvent(session.id, {
+    id: "event-applied",
+    type: "patch_file_applied",
+    patchId: "patch-life-1",
+    filePath: "src/app.ts",
+    filePaths: ["src/app.ts"],
+    message: "已应用 src/app.ts",
+    detail: {
+      checkpointId: "checkpoint-1"
+    },
+    createdAt: 20
+  });
+  await appendTaskSessionPatchEvent(session.id, {
+    id: "event-created",
+    type: "patch_created",
+    patchId: "patch-life-1",
+    filePaths: ["src/app.ts"],
+    message: "已生成 1 个文件的修改。",
+    createdAt: 10
+  });
+
+  const loaded = await getTaskSession(session.id);
+
+  assert.deepEqual(
+    loaded.patchEvents?.map((event) => [event.id, event.type, event.patchId, event.filePath || null]),
+    [
+      ["event-created", "patch_created", "patch-life-1", null],
+      ["event-applied", "patch_file_applied", "patch-life-1", "src/app.ts"]
+    ]
+  );
+  assert.equal(loaded.patchEvents?.[1]?.detail?.checkpointId, "checkpoint-1");
 });
 
 test("builds task history diff view from checkpoint files", async () => {
