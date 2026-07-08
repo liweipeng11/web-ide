@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { AgentMode, AgentStep, CommandResult, FileChatHistoryItem, FileChatMessage, TaskPlanItemStatus, TaskSession } from "../api";
+import type { AgentMode, AgentStep, CommandResult, FileChatHistoryItem, FileChatMessage, PatchFilterReason, PatchGenerationDiagnostics, TaskPlanItemStatus, TaskSession } from "../api";
 import AgentStepsPanel from "./chat/AgentStepsPanel";
 import { formatMessageForDisplay, parseCommandSuggestion, type CommandRunState, type CommandSuggestion } from "./chat/chatUtils";
 import Icon from "./Icon";
@@ -48,6 +48,50 @@ type Props = {
   onGenerate: () => void;
   onDecideApproval: (step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") => Promise<void>;
 };
+
+function getPatchFilterReasonLabel(reason: PatchFilterReason) {
+  const labels: Record<PatchFilterReason, string> = {
+    invalid_path: "路径无效",
+    duplicate_path: "重复路径",
+    no_effect_change: "无实际改动",
+    scope_violation: "超出编辑范围",
+    stale_full_rewrite_retry: "旧内容重写重试"
+  };
+
+  return labels[reason];
+}
+
+function renderPatchDiagnostics(diagnostics: PatchGenerationDiagnostics[]) {
+  if (!diagnostics.length) return null;
+
+  return (
+    <section>
+      <h3>变更生成过程</h3>
+      <div className="task-patch-diagnostics">
+        {diagnostics.map((item) => (
+          <article key={item.patchId || item.generatedAt}>
+            <strong>
+              模型候选 {item.rawPatchCount} 项 · 最终有效 {item.finalPatchCount} 项 · 已过滤 {item.filteredCount} 项
+            </strong>
+            {item.records.length ? (
+              <ul>
+                {item.records.map((record, index) => (
+                  <li key={`${record.filePath}:${record.reason}:${record.attempt}:${index}`}>
+                    <code>{record.normalizedPath || record.filePath}</code>
+                    <span>{getPatchFilterReasonLabel(record.reason)}</span>
+                    {record.detail ? <small>{record.detail}</small> : null}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>没有候选变更被过滤。</p>
+            )}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 export default function ChatPanel({
   chatId,
@@ -519,6 +563,7 @@ export default function ChatPanel({
                 <h3>执行过的命令</h3>
                 {renderTaskPathList(selectedTaskSession.commandsRun, "没有记录命令。")}
               </section>
+              {renderPatchDiagnostics(selectedTaskSession.patchDiagnostics || [])}
               <section>
                 <h3>Checkpoints</h3>
                 {selectedTaskSession.checkpointIds.length ? (

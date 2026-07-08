@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
-import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
+import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 
 function taskSessionDirectory() {
@@ -151,6 +151,51 @@ function isAgentMode(value: unknown): value is AgentMode {
   return value === "plan" || value === "act";
 }
 
+function isPatchFilterReason(value: unknown): value is PatchFilterReason {
+  return value === "invalid_path" || value === "duplicate_path" || value === "no_effect_change" || value === "scope_violation" || value === "stale_full_rewrite_retry";
+}
+
+function isPatchFilterStage(value: unknown): value is PatchFilterStage {
+  return value === "path_validation" || value === "scope_validation" || value === "dedupe" || value === "content_diff" || value === "retry";
+}
+
+function normalizePatchDiagnostics(value: unknown): PatchGenerationDiagnostics[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is Partial<PatchGenerationDiagnostics> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      patchId: typeof item.patchId === "string" && item.patchId.trim() ? item.patchId : undefined,
+      modelSummary: typeof item.modelSummary === "string" && item.modelSummary.trim() ? item.modelSummary : undefined,
+      rawPatchCount: typeof item.rawPatchCount === "number" ? item.rawPatchCount : 0,
+      normalizedFilePaths: Array.isArray(item.normalizedFilePaths) ? item.normalizedFilePaths.filter((filePath): filePath is string => typeof filePath === "string") : [],
+      preDedupeCount: typeof item.preDedupeCount === "number" ? item.preDedupeCount : 0,
+      postDedupeCount: typeof item.postDedupeCount === "number" ? item.postDedupeCount : 0,
+      finalPatchCount: typeof item.finalPatchCount === "number" ? item.finalPatchCount : 0,
+      filteredCount: typeof item.filteredCount === "number" ? item.filteredCount : 0,
+      noEffectCount: typeof item.noEffectCount === "number" ? item.noEffectCount : 0,
+      records: Array.isArray(item.records)
+        ? item.records
+            .filter((record) => Boolean(record && typeof record === "object" && !Array.isArray(record)))
+            .map((record) => {
+              const data = record as Record<string, unknown>;
+
+              return {
+                reason: isPatchFilterReason(data.reason) ? data.reason : "invalid_path",
+                stage: isPatchFilterStage(data.stage) ? data.stage : "path_validation",
+                attempt: typeof data.attempt === "number" ? data.attempt : 0,
+                filePath: typeof data.filePath === "string" ? data.filePath : "",
+                normalizedPath: typeof data.normalizedPath === "string" && data.normalizedPath.trim() ? data.normalizedPath : undefined,
+                detail: typeof data.detail === "string" && data.detail.trim() ? data.detail : undefined
+              };
+            })
+            .filter((record) => record.filePath.trim())
+        : [],
+      generatedAt: typeof item.generatedAt === "number" ? item.generatedAt : Date.now()
+    }))
+    .sort((left, right) => right.generatedAt - left.generatedAt);
+}
+
 function normalizeAgentMessages(messages: unknown): AgentMessage[] {
   if (!Array.isArray(messages)) return [];
 
@@ -208,7 +253,8 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     agentMessages: normalizeAgentMessages(session.agentMessages),
     pendingToolCall: normalizePendingToolCall(session.pendingToolCall),
     planItems: normalizeTaskPlanItems(session.planItems),
-    planRevisions: normalizeTaskPlanRevisions(session.planRevisions)
+    planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
+    patchDiagnostics: normalizePatchDiagnostics(session.patchDiagnostics)
   };
 }
 
@@ -264,6 +310,7 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     planRevisions: [],
     planApproval: { required: false, status: "not_required" },
     checkpointIds: [],
+    patchDiagnostics: [],
     gitCommits: [],
     createdAt: now,
     updatedAt: now
@@ -860,6 +907,22 @@ export async function addTaskSessionCheckpoint(taskSessionId: string | null | un
     checkpointIds: unique([...session.checkpointIds, checkpointId]),
     updatedAt: Date.now()
   }));
+}
+
+export async function recordTaskSessionPatchDiagnostics(taskSessionId: string | null | undefined, diagnostics: PatchGenerationDiagnostics) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const existing = normalizePatchDiagnostics(session.patchDiagnostics);
+    const nextDiagnostics = diagnostics.patchId ? existing.filter((item) => item.patchId !== diagnostics.patchId) : existing;
+
+    return {
+      ...session,
+      // 同一个 patch 重新记录时按 patchId 覆盖，避免历史详情里出现重复生成过程。
+      patchDiagnostics: [diagnostics, ...nextDiagnostics].slice(0, 50),
+      updatedAt: Date.now()
+    };
+  });
 }
 
 export async function addTaskSessionGitCommit(taskSessionId: string | null | undefined, commit: GitCommitRecord) {

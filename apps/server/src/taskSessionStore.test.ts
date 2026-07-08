@@ -6,7 +6,7 @@ import path from "node:path";
 import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
+import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 
@@ -65,12 +65,46 @@ test("normalizes legacy task sessions without plan items", async () => {
   delete persisted.planItems;
   delete persisted.agentMessages;
   delete persisted.pendingToolCall;
+  delete persisted.patchDiagnostics;
   await fs.writeFile(sessionPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 
   const loaded = await getTaskSession(session.id);
   assert.deepEqual(loaded.planItems, []);
   assert.deepEqual(loaded.agentMessages, []);
   assert.equal(loaded.pendingToolCall, null);
+  assert.deepEqual(loaded.patchDiagnostics, []);
+});
+
+test("persists patch generation diagnostics in task sessions", async () => {
+  const { session } = await createIsolatedTaskSession("记录 patch 过滤原因");
+
+  await recordTaskSessionPatchDiagnostics(session.id, {
+    patchId: "patch-diagnostics-1",
+    modelSummary: "模型候选包含无效路径",
+    rawPatchCount: 2,
+    normalizedFilePaths: ["src/app.ts"],
+    preDedupeCount: 1,
+    postDedupeCount: 1,
+    finalPatchCount: 1,
+    filteredCount: 1,
+    noEffectCount: 0,
+    generatedAt: 10,
+    records: [
+      {
+        reason: "invalid_path",
+        stage: "path_validation",
+        attempt: 0,
+        filePath: "../outside.ts",
+        detail: "路径不在工作区内"
+      }
+    ]
+  });
+
+  const loaded = await getTaskSession(session.id);
+
+  assert.equal(loaded.patchDiagnostics?.length, 1);
+  assert.equal(loaded.patchDiagnostics?.[0]?.patchId, "patch-diagnostics-1");
+  assert.equal(loaded.patchDiagnostics?.[0]?.records[0]?.reason, "invalid_path");
 });
 
 test("persists agent messages in task sessions", async () => {

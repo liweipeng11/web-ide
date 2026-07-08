@@ -13,6 +13,13 @@ export type ReadFileResponse = {
 export type GenerateEditResponse = {
   taskSessionId?: string;
   patchId: string;
+  // 模型原始摘要仅用于参考展示，不能作为变更数量事实源。
+  modelSummary?: string;
+  // 服务端基于最终 diff 文件生成的摘要，前端主展示统一使用它。
+  finalSummary: string;
+  rawPatchCount?: number;
+  finalPatchCount: number;
+  diagnostics?: PatchGenerationDiagnostics;
   summary: string;
   files: PatchFileChange[];
   commandsToRun?: string[];
@@ -20,6 +27,33 @@ export type GenerateEditResponse = {
   newContent: string;
   diffHtml: string;
   agentSteps?: AgentStep[];
+};
+
+export type PatchFilterReason = "invalid_path" | "duplicate_path" | "no_effect_change" | "scope_violation" | "stale_full_rewrite_retry";
+
+export type PatchFilterStage = "path_validation" | "scope_validation" | "dedupe" | "content_diff" | "retry";
+
+export type PatchFilterRecord = {
+  reason: PatchFilterReason;
+  stage: PatchFilterStage;
+  attempt: number;
+  filePath: string;
+  normalizedPath?: string;
+  detail?: string;
+};
+
+export type PatchGenerationDiagnostics = {
+  patchId?: string;
+  modelSummary?: string;
+  rawPatchCount: number;
+  normalizedFilePaths: string[];
+  preDedupeCount: number;
+  postDedupeCount: number;
+  finalPatchCount: number;
+  filteredCount: number;
+  noEffectCount: number;
+  records: PatchFilterRecord[];
+  generatedAt: number;
 };
 
 export type AutoValidationResponse = {
@@ -203,6 +237,7 @@ export type TaskSession = {
   filesChanged: string[];
   commandsRun: string[];
   steps: AgentStep[];
+  patchDiagnostics?: PatchGenerationDiagnostics[];
   planItems?: TaskPlanItem[];
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;

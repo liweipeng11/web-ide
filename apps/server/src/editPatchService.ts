@@ -7,7 +7,8 @@ import { listFiles, readWorkspaceFile, readWorkspaceFileForDiff, safeResolve } f
 import { createPendingPatch } from "./patchStore.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import { resolvePatchNewContent, StaleFullFileRewriteError } from "./searchReplacePatch.js";
-import type { AiEditResult, FileTreeNode, PatchFileChange } from "./types.js";
+import { recordTaskSessionPatchDiagnostics } from "./taskSessionStore.js";
+import type { AiEditResult, FileTreeNode, PatchFileChange, PatchFilterRecord, PatchGenerationDiagnostics } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { isValidationCommand, selectDefaultValidationCommand } from "./validationCommand.js";
 
@@ -193,6 +194,81 @@ function validateEditScope(aiResult: AiEditResult, selectedFilePath: string | nu
 
 type ValidatedFileChange = NonNullable<Awaited<ReturnType<typeof validateEditResultPaths>>["files"]>[number];
 
+export function buildFinalPatchSummary(options: { files: Pick<PatchFileChange, "path">[]; rawPatchCount?: number; commandsToRun?: string[] }) {
+  const finalPatchCount = options.files.length;
+  const rawPatchCount = options.rawPatchCount ?? finalPatchCount;
+  const ignoredCount = Math.max(0, rawPatchCount - finalPatchCount);
+  const validationText = options.commandsToRun?.length ? "，并已附带建议验证命令" : "";
+
+  // 主摘要只描述最终可审核 diff，避免模型原始说明和真实文件数量不一致。
+  if (ignoredCount > 0) {
+    return `已生成 ${finalPatchCount} 个文件的修改${validationText}，其中 ${ignoredCount} 个模型候选变更未进入最终 diff。`;
+  }
+
+  return `已生成 ${finalPatchCount} 个文件的修改${validationText}。`;
+}
+
+function createPatchFilterRecord(input: PatchFilterRecord): PatchFilterRecord {
+  return input;
+}
+
+function dedupeValidatedChanges(changes: ValidatedFileChange[], attempt: number) {
+  const latestByPath = new Map<string, ValidatedFileChange>();
+  const duplicateRecords: PatchFilterRecord[] = [];
+
+  for (const change of changes) {
+    const previous = latestByPath.get(change.path);
+
+    if (previous) {
+      duplicateRecords.push(
+        createPatchFilterRecord({
+          reason: "duplicate_path",
+          stage: "dedupe",
+          attempt,
+          filePath: previous.filePath,
+          normalizedPath: previous.path,
+          detail: "同一路径出现多条候选修改，已保留最后一条候选。"
+        })
+      );
+    }
+
+    latestByPath.set(change.path, change);
+  }
+
+  return {
+    uniqueChanges: [...latestByPath.values()],
+    duplicateRecords
+  };
+}
+
+export function buildPatchGenerationDiagnostics(input: {
+  patchId?: string;
+  modelSummary?: string;
+  rawPatchCount: number;
+  normalizedFilePaths: string[];
+  preDedupeCount: number;
+  postDedupeCount: number;
+  finalPatchCount: number;
+  records: PatchFilterRecord[];
+}): PatchGenerationDiagnostics {
+  const noEffectCount = input.records.filter((record) => record.reason === "no_effect_change").length;
+
+  // diagnostics 是历史解释的事实源，统计值都从最终清洗过程和结构化记录推导。
+  return {
+    patchId: input.patchId,
+    modelSummary: input.modelSummary,
+    rawPatchCount: input.rawPatchCount,
+    normalizedFilePaths: input.normalizedFilePaths,
+    preDedupeCount: input.preDedupeCount,
+    postDedupeCount: input.postDedupeCount,
+    finalPatchCount: input.finalPatchCount,
+    filteredCount: input.records.length,
+    noEffectCount,
+    records: input.records,
+    generatedAt: Date.now()
+  };
+}
+
 function assertNoDeletePatches(aiResult: AiEditResult) {
   const deletePaths = aiResult.patches?.filter((patch) => patch.status === "delete").map((patch) => patch.filePath) || [];
 
@@ -201,7 +277,8 @@ function assertNoDeletePatches(aiResult: AiEditResult) {
   }
 }
 
-async function buildPatchFileChanges(changes: ValidatedFileChange[], userRequest: string): Promise<PatchFileChange[]> {
+async function buildPatchFileChanges(changes: ValidatedFileChange[], userRequest: string, attempt: number): Promise<{ files: PatchFileChange[]; noEffectRecords: PatchFilterRecord[] }> {
+  const noEffectRecords: PatchFilterRecord[] = [];
   const files = (
     await Promise.all(
       changes.map(async (change) => {
@@ -215,6 +292,16 @@ async function buildPatchFileChanges(changes: ValidatedFileChange[], userRequest
         const newContent = change.status === "delete" ? "" : change.status === "create" ? change.newContent : resolvePatchNewContent(change.path, change, previousContent, userRequest);
 
         if (change.status !== "delete" && previousContent === newContent) {
+          noEffectRecords.push(
+            createPatchFilterRecord({
+              reason: "no_effect_change",
+              stage: "content_diff",
+              attempt,
+              filePath: change.filePath,
+              normalizedPath: change.path,
+              detail: "候选修改计算后的内容与当前文件一致，未进入最终 diff。"
+            })
+          );
           return null;
         }
 
@@ -241,7 +328,7 @@ async function buildPatchFileChanges(changes: ValidatedFileChange[], userRequest
     throw new HttpError(422, "AI did not return any file changes");
   }
 
-  return files;
+  return { files, noEffectRecords };
 }
 
 export async function createEditPatchResponse(filePath: string | null | undefined, userRequest: string, onAgentStep?: (step: AgentStep) => void, taskSessionId?: string) {
@@ -262,6 +349,10 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   let aiResult: AiEditResult | null = null;
   let validatedPaths: Awaited<ReturnType<typeof validateEditResultPaths>> | null = null;
   let files: PatchFileChange[] | null = null;
+  let finalPreDedupeCount = 0;
+  let finalPostDedupeCount = 0;
+  let finalNormalizedFilePaths: string[] = [];
+  const diagnosticsRecords: PatchFilterRecord[] = [];
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     logRoute(runId, "ai.generate.start", { attempt, retryContext });
@@ -270,6 +361,17 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     assertNoDeletePatches(aiResult);
     validatedPaths = await validateEditResultPaths(aiResult, selectedFilePath);
     logRoute(runId, "paths.validated", { attempt, validFiles: validatedPaths.files?.map((file) => file.path) || null, invalidFilePaths: validatedPaths.invalidFilePaths });
+    diagnosticsRecords.push(
+      ...validatedPaths.invalidFilePaths.map((filePath) =>
+        createPatchFilterRecord({
+          reason: "invalid_path",
+          stage: "path_validation",
+          attempt,
+          filePath,
+          detail: "模型返回的路径无法解析为当前工作区内可编辑文件。"
+        })
+      )
+    );
 
     if (aiResult.patches === null) {
       if (attempt >= 1) {
@@ -304,6 +406,18 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     const scopeValidation = validateEditScope(aiResult, selectedFilePath, validatedPaths);
 
     if (!scopeValidation.ok) {
+      diagnosticsRecords.push(
+        ...scopeValidation.blockedFiles.map((filePath) =>
+          createPatchFilterRecord({
+            reason: "scope_violation",
+            stage: "scope_validation",
+            attempt,
+            filePath,
+            normalizedPath: filePath,
+            detail: "候选修改超出本轮允许编辑范围，已触发重试。"
+          })
+        )
+      );
       retryContext = {
         invalidFilePaths: scopeValidation.blockedFiles,
         validFilePaths: scopeValidation.allowedExistingFiles,
@@ -317,9 +431,26 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     }
 
     try {
-      files = await buildPatchFileChanges([...new Map((validatedPaths.files || []).map((change) => [change.path, change])).values()], userRequest);
+      const deduped = dedupeValidatedChanges(validatedPaths.files || [], attempt);
+      diagnosticsRecords.push(...deduped.duplicateRecords);
+      finalPreDedupeCount = validatedPaths.files?.length || 0;
+      finalPostDedupeCount = deduped.uniqueChanges.length;
+      finalNormalizedFilePaths = deduped.uniqueChanges.map((change) => change.path);
+      const patchFileResult = await buildPatchFileChanges(deduped.uniqueChanges, userRequest, attempt);
+      diagnosticsRecords.push(...patchFileResult.noEffectRecords);
+      files = patchFileResult.files;
     } catch (error) {
       if (error instanceof StaleFullFileRewriteError && attempt < 2) {
+        diagnosticsRecords.push(
+          createPatchFilterRecord({
+            reason: "stale_full_rewrite_retry",
+            stage: "retry",
+            attempt,
+            filePath: error.filePath,
+            normalizedPath: error.filePath,
+            detail: "模型基于旧内容生成整文件重写，已改用 search/replace 指令重试。"
+          })
+        );
         retryContext = {
           invalidFilePaths: [],
           validFilePaths: (validatedPaths.files || []).map((file) => file.path),
@@ -360,7 +491,7 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     throw new HttpError(422, `AI tried to modify files outside the approved edit scope: ${finalScopeValidation.blockedFiles.join(", ")}`);
   }
 
-  const uniqueChanges = [...new Map((validatedPaths.files || []).map((change) => [change.path, change])).values()];
+  const { uniqueChanges } = dedupeValidatedChanges(validatedPaths.files || [], 0);
   logRoute(runId, "patch.prepare", { files: uniqueChanges.map((change) => change.path) });
   // proposePatch 只创建待审查 diff，不写入工作区；真正写入由 applyPatch 审批后执行。
   onAgentStep?.(createAgentStep({ type: "edit", files: uniqueChanges.map((change) => change.path) }));
@@ -374,14 +505,36 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   const suggestedValidationCommands = aiResult.commandsToRun?.filter(isValidationCommand) || [];
   const commandsToRun = suggestedValidationCommands.length ? suggestedValidationCommands : defaultValidationCommand ? [defaultValidationCommand] : undefined;
   // 验证命令只随 pending patch 返回；当 runCommand 被真正调用时再进入唯一审批流程。
-  const patch = createPendingPatch(files, taskSessionId, commandsToRun);
   const selectedFileChange = (selectedFilePath ? files.find((change) => change.path === selectedFilePath) : null) || files[0];
+  const rawPatchCount = aiResult.patches.length;
+  const finalSummary = buildFinalPatchSummary({ files, rawPatchCount, commandsToRun });
+  const diagnosticsWithoutPatchId = buildPatchGenerationDiagnostics({
+    modelSummary: aiResult.summary,
+    rawPatchCount,
+    normalizedFilePaths: finalNormalizedFilePaths.length ? finalNormalizedFilePaths : files.map((file) => file.path),
+    preDedupeCount: finalPreDedupeCount || validatedPaths.files?.length || 0,
+    postDedupeCount: finalPostDedupeCount || uniqueChanges.length,
+    finalPatchCount: files.length,
+    records: diagnosticsRecords
+  });
+  const patch = createPendingPatch(files, taskSessionId, commandsToRun, diagnosticsWithoutPatchId);
+  const diagnostics = {
+    ...diagnosticsWithoutPatchId,
+    patchId: patch.patchId
+  };
+  patch.diagnostics = diagnostics;
+  await recordTaskSessionPatchDiagnostics(taskSessionId, diagnostics);
   logRoute(runId, "done", { elapsedMs: Date.now() - startedAt, patchId: patch.patchId, files: files.map((file) => file.path) });
 
   return {
     taskSessionId,
     patchId: patch.patchId,
-    summary: aiResult.summary,
+    modelSummary: aiResult.summary,
+    finalSummary,
+    rawPatchCount,
+    finalPatchCount: files.length,
+    diagnostics,
+    summary: finalSummary,
     files,
     commandsToRun,
     oldContent: selectedFileChange.oldContent,

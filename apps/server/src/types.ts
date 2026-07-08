@@ -141,6 +141,16 @@ export type FileChatResponse = {
 export type GenerateEditResponse = {
   taskSessionId?: string;
   patchId: string;
+  // 模型原始摘要仅作为参考，主展示必须使用 finalSummary。
+  modelSummary?: string;
+  // 服务端基于最终 files 生成的摘要，是前端展示变更数量的唯一事实源。
+  finalSummary: string;
+  // 模型本轮返回的候选 patch 数量，用于提示候选变更被清洗的情况。
+  rawPatchCount?: number;
+  // 最终进入 diff 面板的文件数量，始终与 files.length 保持一致。
+  finalPatchCount: number;
+  // 记录模型候选变更被清洗、去重和过滤的过程，用于历史中解释“候选为何变少”。
+  diagnostics?: PatchGenerationDiagnostics;
   summary: string;
   files: PatchFileChange[];
   commandsToRun?: string[];
@@ -304,6 +314,8 @@ export type TaskSession = {
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
   checkpointIds: string[];
+  // 按 patch 维度沉淀生成诊断，旧任务读取时会自动补成空数组。
+  patchDiagnostics?: PatchGenerationDiagnostics[];
   gitCommits?: {
     hash: string;
     message: string;
@@ -374,6 +386,33 @@ export type FilePatch = {
   isBinary?: boolean;
   summary: string;
   edits?: SearchReplaceEdit[];
+};
+
+export type PatchFilterReason = "invalid_path" | "duplicate_path" | "no_effect_change" | "scope_violation" | "stale_full_rewrite_retry";
+
+export type PatchFilterStage = "path_validation" | "scope_validation" | "dedupe" | "content_diff" | "retry";
+
+export type PatchFilterRecord = {
+  reason: PatchFilterReason;
+  stage: PatchFilterStage;
+  attempt: number;
+  filePath: string;
+  normalizedPath?: string;
+  detail?: string;
+};
+
+export type PatchGenerationDiagnostics = {
+  patchId?: string;
+  modelSummary?: string;
+  rawPatchCount: number;
+  normalizedFilePaths: string[];
+  preDedupeCount: number;
+  postDedupeCount: number;
+  finalPatchCount: number;
+  filteredCount: number;
+  noEffectCount: number;
+  records: PatchFilterRecord[];
+  generatedAt: number;
 };
 
 export type CheckpointSource = {
@@ -455,5 +494,6 @@ export type PendingPatch = {
   taskSessionId?: string;
   files: PatchFileChange[];
   commandsToRun?: string[];
+  diagnostics?: PatchGenerationDiagnostics;
   createdAt: number;
 };

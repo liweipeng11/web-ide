@@ -41,6 +41,14 @@ function getPatchFileBadge(file: PatchFileChange) {
   return extension ? extension.slice(0, 3).toUpperCase() : "MOD";
 }
 
+function getFilteredSummary(patch: GenerateEditResponse) {
+  const diagnostics = patch.diagnostics;
+  if (!diagnostics || diagnostics.filteredCount <= 0) return null;
+
+  // 审核区只展示过滤概览，详细原因留在任务历史里展开查看。
+  return `模型候选 ${diagnostics.rawPatchCount} 项，最终有效 ${diagnostics.finalPatchCount} 项，已过滤 ${diagnostics.filteredCount} 项。`;
+}
+
 export default function PatchReviewPane({ patch, loading, autoFix, onApply, onReject, onRunCommand }: Props) {
   const [selectedPath, setSelectedPath] = useState(() => patch.files[0]?.path || "");
 
@@ -50,6 +58,9 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
   }, [patch.patchId, patch.files]);
 
   const selectedFile = useMemo(() => patch.files.find((file) => file.path === selectedPath) || patch.files[0], [patch.files, selectedPath]);
+  // 兼容旧响应：新接口统一返回 finalSummary，旧数据回退到 summary。
+  const displaySummary = patch.finalSummary || patch.summary;
+  const filteredSummary = getFilteredSummary(patch);
 
   return (
     <section className="diff-review-pane" aria-label="Diff review in editor">
@@ -69,9 +80,7 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
       <div className="diff-header diff-review-header">
         <div>
           <h2>Diff Preview</h2>
-          <small>
-            {patch.files.length} file{patch.files.length === 1 ? "" : "s"} changed
-          </small>
+          <small>{displaySummary}</small>
         </div>
         <div className="diff-actions">
           <button type="button" className="icon-button" disabled={loading} title="Apply all" aria-label="Apply all" onClick={() => onApply()}>
@@ -92,6 +101,8 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
           <pre>{autoFix.lastFailureSummary}</pre>
         </section>
       ) : null}
+
+      {filteredSummary ? <div className="diff-diagnostics">{filteredSummary}</div> : null}
 
       {selectedFile ? (
         <>

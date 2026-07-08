@@ -20,7 +20,11 @@ function patchResponse(taskSessionId = "task-1"): GenerateEditResponse {
   return {
     taskSessionId,
     patchId: "patch-1",
-    summary: "Repair failing test",
+    modelSummary: "Repair failing test",
+    finalSummary: "已生成 0 个文件的修改，并已附带建议验证命令。",
+    rawPatchCount: 0,
+    finalPatchCount: 0,
+    summary: "已生成 0 个文件的修改，并已附带建议验证命令。",
     files: [],
     commandsToRun: ["pnpm test"],
     diffHtml: "",

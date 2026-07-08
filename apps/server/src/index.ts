@@ -13,7 +13,7 @@ import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { getRecentCommandResults } from "./commandResults.js";
 import { runProjectCommand } from "./commandRunner.js";
 import { createMultiFileDiffHtml } from "./diffTools.js";
-import { createEditPatchResponse } from "./editPatchService.js";
+import { buildFinalPatchSummary, createEditPatchResponse } from "./editPatchService.js";
 import { runAutoValidation } from "./autoValidationService.js";
 import { listFiles, readWorkspaceFile, writeWorkspaceFile } from "./fileTools.js";
 import { createGitWorkflowRouter } from "./gitWorkflow/routes.js";
@@ -121,12 +121,18 @@ function createPatchStreamResponse(patchId: string | undefined, taskSessionId: s
   const selectedFileChange = patch?.files[0];
 
   if (!patch || !selectedFileChange) return null;
+  const finalSummary = buildFinalPatchSummary({ files: patch.files, commandsToRun: patch.commandsToRun });
 
   // Runtime 中的 proposePatch 仍生成 pending patch，这里把它还原成前端现有 diff 面板能消费的响应结构。
   return {
     taskSessionId,
     patchId: patch.patchId,
-    summary,
+    modelSummary: summary,
+    finalSummary,
+    rawPatchCount: patch.files.length,
+    finalPatchCount: patch.files.length,
+    diagnostics: patch.diagnostics,
+    summary: finalSummary,
     files: patch.files,
     commandsToRun: patch.commandsToRun,
     oldContent: selectedFileChange.oldContent,
@@ -168,7 +174,8 @@ function buildRuntimeFollowupAnswer(runtimeResult: Awaited<ReturnType<typeof run
   if (runtimePatch) {
     const changedFiles = runtimePatch.files.map((file) => `- ${file.path}`).join("\n");
 
-    return [runtimeResult.content || runtimePatch.summary, "", `已生成 ${runtimePatch.files.length} 个文件的修改，请在下方审核后应用：`, changedFiles].join("\n");
+    // 聊天主回复优先使用最终 patch 摘要，避免 runtime 文本里的数量与实际 diff 不一致。
+    return [runtimePatch.finalSummary, "", "请在下方审核后应用：", changedFiles].join("\n");
   }
 
   return runtimeResult.content || "审批已处理，任务继续执行完成。";
@@ -468,7 +475,7 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
       id: `${streamRunId}:done`,
       createdAt: Date.now(),
       type: "message",
-      content: `已生成 ${patchResponse.files.length} 个文件的修改`
+      content: patchResponse.finalSummary
     });
 
     completed = true;
@@ -947,7 +954,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       const patch = await createEditPatchResponse(selectedPath, editRequest, pushAgentStep, taskSession.id);
       const progressedTaskSession = await advanceTaskPlanProgress(taskSession.id, "patch_generated");
       const changedFiles = patch.files.map((file) => `- ${file.path}`).join("\n");
-      const answer = [patch.summary, "", `已生成 ${patch.files.length} 个文件的修改，请在下方审核后应用：`, changedFiles].join("\n");
+      const answer = [patch.finalSummary, "", "请在下方审核后应用：", changedFiles].join("\n");
       sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
       const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
 

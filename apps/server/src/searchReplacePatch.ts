@@ -5,8 +5,12 @@ const riskyRemovalLineCount = 25;
 const riskyRemovalRatio = 0.3;
 
 export class StaleFullFileRewriteError extends HttpError {
+  readonly filePath: string;
+
   constructor(filePath: string) {
     super(422, `AI edit for ${filePath} was based on stale or incomplete file content`);
+    // 诊断链路需要结构化文件路径，避免只能从错误文案里反解析。
+    this.filePath = filePath;
   }
 }
 

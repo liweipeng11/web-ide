@@ -31,6 +31,9 @@ export default function DiffViewer({ patch, loading, onApply, onReject, onRunCom
     return null;
   }
 
+  // 弹窗摘要同样使用服务端最终摘要，避免与 diff 文件数量出现双口径。
+  const displaySummary = patch.finalSummary || patch.summary;
+
   return (
     <>
       <button className="diff-fab icon-button" type="button" title="View Diff" aria-label="View Diff" onClick={() => setOpen(true)}>
@@ -42,8 +45,7 @@ export default function DiffViewer({ patch, loading, onApply, onReject, onRunCom
             <div className="diff-header">
               <div>
                 <h2 id="diff-modal-title">Diff Preview</h2>
-                <span>{patch.summary}</span>
-                <small>{patch.files.length} file{patch.files.length === 1 ? "" : "s"} changed</small>
+                <span>{displaySummary}</span>
               </div>
               <div className="diff-actions">
                 <button type="button" className="icon-button" title="Close" aria-label="Close" onClick={() => setOpen(false)}>

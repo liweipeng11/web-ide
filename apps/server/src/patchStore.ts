@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { PatchFileChange, PendingPatch } from "./types.js";
+import type { PatchFileChange, PatchGenerationDiagnostics, PendingPatch } from "./types.js";
 
 const patches = new Map<string, PendingPatch>();
 
@@ -7,12 +7,13 @@ export function normalizePatchPath(filePath: string) {
   return filePath.replace(/\\/g, "/").toLowerCase();
 }
 
-export function createPendingPatch(files: PatchFileChange[], taskSessionId?: string, commandsToRun?: string[]) {
+export function createPendingPatch(files: PatchFileChange[], taskSessionId?: string, commandsToRun?: string[], diagnostics?: PatchGenerationDiagnostics) {
   const patch: PendingPatch = {
     patchId: crypto.randomUUID(),
     taskSessionId,
     files,
     commandsToRun,
+    diagnostics,
     createdAt: Date.now()
   };
 
