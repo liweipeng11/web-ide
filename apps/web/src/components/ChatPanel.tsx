@@ -371,6 +371,56 @@ export default function ChatPanel({
     );
   }
 
+  function renderTaskDiffView(session: TaskSession) {
+    const diffView = session.diffView;
+
+    if (!diffView) return null;
+
+    const sourceText = diffView.source === "checkpoint" ? "checkpoint 真实落盘记录" : "旧任务 filesChanged 兼容记录";
+
+    return (
+      <section>
+        <h3>真实应用结果</h3>
+        <div className="task-diff-view">
+          <div className="task-diff-view-summary">
+            <strong>{sourceText}</strong>
+            <span>
+              建议 {diffView.generatedFiles.length} 个 / 已落盘 {diffView.appliedFiles.length} 个 / 未落盘 {diffView.rejectedFiles.length} 个
+            </span>
+          </div>
+          <div className="task-diff-view-columns">
+            <article>
+              <strong>建议修改</strong>
+              {renderTaskPathList(diffView.generatedFiles, "没有记录候选修改。")}
+            </article>
+            <article>
+              <strong>真实落盘</strong>
+              {renderTaskPathList(diffView.appliedFiles, "没有记录真实落盘文件。")}
+            </article>
+            <article>
+              <strong>未落盘候选</strong>
+              {renderTaskPathList(diffView.rejectedFiles, "没有未落盘候选。")}
+            </article>
+          </div>
+          {diffView.checkpointDiffFiles.length ? (
+            <div className="task-diff-checkpoints">
+              <strong>checkpoint diff 文件</strong>
+              {diffView.checkpointDiffFiles.map((item) => (
+                <details key={item.checkpointId}>
+                  <summary>
+                    {item.checkpointId}
+                    {item.patchId ? <span>patch: {item.patchId}</span> : null}
+                  </summary>
+                  {renderTaskPathList(item.files, "该 checkpoint 没有文件记录。")}
+                </details>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </section>
+    );
+  }
+
   function renderTaskPlanPanel(session: TaskSession | null, compact = false) {
     return (
       <TaskPlanPanel
@@ -555,6 +605,7 @@ export default function ChatPanel({
                 <h3>读取过的文件</h3>
                 {renderTaskPathList(selectedTaskSession.filesRead, "没有记录读取文件。")}
               </section>
+              {renderTaskDiffView(selectedTaskSession)}
               <section>
                 <h3>改动过的文件</h3>
                 {renderTaskPathList(selectedTaskSession.filesChanged, "没有记录改动文件。")}

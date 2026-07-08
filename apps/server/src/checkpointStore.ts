@@ -27,6 +27,11 @@ function sanitizeCheckpointFileName(value: string) {
   return value.replace(/[^a-zA-Z0-9._-]/g, "_") || crypto.randomUUID();
 }
 
+function createCheckpointId(taskId: string) {
+  // checkpoint 是真实落盘快照，同一个 patch 分批应用时也要产生独立记录。
+  return `${sanitizeCheckpointFileName(taskId)}-${Date.now().toString(36)}-${crypto.randomUUID()}`;
+}
+
 function checkpointPath(checkpointId: string) {
   return path.join(checkpointDirectory(), `${sanitizeCheckpointFileName(checkpointId)}.json`);
 }
@@ -77,7 +82,7 @@ export async function createCheckpoint(taskId: string, patches: FilePatch[], opt
   }
 
   const checkpoint: Checkpoint = {
-    id: taskId,
+    id: createCheckpointId(taskId),
     taskId,
     createdAt: Date.now(),
     // 记录 checkpoint 的触发来源，便于任务历史中定位是哪次工具调用产生了可恢复点。

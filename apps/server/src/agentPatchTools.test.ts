@@ -70,10 +70,16 @@ test("applyPatch tool applies a pending patch and removes it from the store", as
 
     assert.equal(await fs.readFile(path.join(workspaceRoot, "target.ts"), "utf8"), "export const value = 2;\n");
     assert.equal(getPendingPatch(patch.patchId), null);
-    assert.equal(result.checkpoint?.id, patch.patchId);
+    const checkpointId = result.checkpoint?.id || "";
+
+    assert.ok(checkpointId);
+    assert.notEqual(checkpointId, patch.patchId);
     assert.deepEqual(result.files?.map((file) => file.path), ["target.ts"]);
-    assert.equal((await getCheckpoint(patch.patchId)).source?.toolCallId, "tool-apply-1");
-    assert.equal(steps.some((step) => step.type === "checkpoint" && step.checkpointId === patch.patchId), true);
+    const checkpoint = await getCheckpoint(checkpointId);
+
+    assert.equal(checkpoint.source?.patchId, patch.patchId);
+    assert.equal(checkpoint.source?.toolCallId, "tool-apply-1");
+    assert.equal(steps.some((step) => step.type === "checkpoint" && step.checkpointId === checkpointId), true);
   } finally {
     clearPendingPatches();
     await fs.rm(workspaceRoot, { recursive: true, force: true });

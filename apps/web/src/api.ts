@@ -242,6 +242,8 @@ export type TaskSession = {
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
   checkpointIds: string[];
+  // 任务历史真实变更视图，历史 diff 展示优先以 checkpoint 为准。
+  diffView?: TaskSessionDiffView;
   gitCommits?: {
     hash: string;
     message: string;
@@ -250,6 +252,20 @@ export type TaskSession = {
   }[];
   createdAt: number;
   updatedAt: number;
+};
+
+export type TaskSessionCheckpointDiffFiles = {
+  checkpointId: string;
+  patchId?: string | null;
+  files: string[];
+};
+
+export type TaskSessionDiffView = {
+  generatedFiles: string[];
+  appliedFiles: string[];
+  rejectedFiles: string[];
+  checkpointDiffFiles: TaskSessionCheckpointDiffFiles[];
+  source: "checkpoint" | "legacy";
 };
 
 export type FileChatHistoryItem = {

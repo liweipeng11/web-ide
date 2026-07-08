@@ -314,6 +314,8 @@ export type TaskSession = {
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
   checkpointIds: string[];
+  // 任务历史里的真实变更视图：预览仍看 pending patch，历史回放优先看 checkpoint。
+  diffView?: TaskSessionDiffView;
   // 按 patch 维度沉淀生成诊断，旧任务读取时会自动补成空数组。
   patchDiagnostics?: PatchGenerationDiagnostics[];
   gitCommits?: {
@@ -324,6 +326,24 @@ export type TaskSession = {
   }[];
   createdAt: number;
   updatedAt: number;
+};
+
+export type TaskSessionCheckpointDiffFiles = {
+  checkpointId: string;
+  patchId?: string | null;
+  files: string[];
+};
+
+export type TaskSessionDiffView = {
+  // 模型曾提出或服务端生成过的文件，用于解释“建议修改过什么”。
+  generatedFiles: string[];
+  // 已经真实写入工作区的文件，优先来自 checkpoint，旧任务回退到 filesChanged。
+  appliedFiles: string[];
+  // 生成过但没有落盘的文件，用于区分被拒绝或未应用的候选修改。
+  rejectedFiles: string[];
+  // checkpoint 中保存的真实 before/after 文件，是历史 diff 的事实来源。
+  checkpointDiffFiles: TaskSessionCheckpointDiffFiles[];
+  source: "checkpoint" | "legacy";
 };
 
 export type UpsertTaskPlanItemRequest = {

@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
+import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 
@@ -105,6 +106,59 @@ test("persists patch generation diagnostics in task sessions", async () => {
   assert.equal(loaded.patchDiagnostics?.length, 1);
   assert.equal(loaded.patchDiagnostics?.[0]?.patchId, "patch-diagnostics-1");
   assert.equal(loaded.patchDiagnostics?.[0]?.records[0]?.reason, "invalid_path");
+});
+
+test("builds task history diff view from checkpoint files", async () => {
+  const { session, workspaceRoot } = await createIsolatedTaskSession("使用 checkpoint 还原历史 diff");
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "applied.ts"), "before\n", "utf8");
+
+  await recordTaskSessionPatchDiagnostics(session.id, {
+    patchId: "patch-history-1",
+    modelSummary: "生成两个候选文件",
+    rawPatchCount: 2,
+    normalizedFilePaths: ["src/applied.ts", "src/rejected.ts"],
+    preDedupeCount: 2,
+    postDedupeCount: 2,
+    finalPatchCount: 2,
+    filteredCount: 0,
+    noEffectCount: 0,
+    generatedAt: 20,
+    records: []
+  });
+
+  const checkpoint = await createCheckpoint(
+    "patch-history-1",
+    [
+      {
+        filePath: "src/applied.ts",
+        oldContent: "before\n",
+        newContent: "after\n",
+        summary: "更新已应用文件"
+      }
+    ],
+    {
+      source: {
+        taskSessionId: session.id,
+        patchId: "patch-history-1",
+        reason: "apply_patch"
+      }
+    }
+  );
+  await addTaskSessionCheckpoint(session.id, checkpoint.id);
+  await addTaskSessionFilesChanged(session.id, ["src/applied.ts"]);
+
+  const loaded = await getTaskSession(session.id);
+
+  assert.equal(loaded.diffView?.source, "checkpoint");
+  assert.deepEqual(loaded.diffView?.generatedFiles, ["src/applied.ts", "src/rejected.ts"]);
+  assert.deepEqual(loaded.diffView?.appliedFiles, ["src/applied.ts"]);
+  assert.deepEqual(loaded.diffView?.rejectedFiles, ["src/rejected.ts"]);
+  assert.deepEqual(loaded.diffView?.checkpointDiffFiles[0], {
+    checkpointId: checkpoint.id,
+    patchId: "patch-history-1",
+    files: ["src/applied.ts"]
+  });
 });
 
 test("persists agent messages in task sessions", async () => {

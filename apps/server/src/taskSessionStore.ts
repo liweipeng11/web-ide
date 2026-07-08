@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { getCheckpoint } from "./checkpointStore.js";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
 import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
@@ -28,6 +29,11 @@ function legacyTaskSessionPath(taskSessionId: string) {
 
 function unique(values: string[]) {
   return [...new Set(values.filter((value) => value.trim()))];
+}
+
+function withoutValues(values: string[], excluded: string[]) {
+  const excludedSet = new Set(excluded);
+  return values.filter((value) => !excludedSet.has(value));
 }
 
 const taskSessionWriteQueues = new Map<string, Promise<unknown>>();
@@ -269,6 +275,46 @@ function createTaskPlanRevision(input: { trigger: TaskPlanRevisionTrigger; reaso
   };
 }
 
+async function attachTaskSessionDiffView(session: TaskSession): Promise<TaskSession> {
+  const checkpointDiffFiles = [];
+
+  for (const checkpointId of session.checkpointIds || []) {
+    try {
+      const checkpoint = await getCheckpoint(checkpointId);
+      const files = unique(checkpoint.files.map((file) => file.filePath));
+
+      checkpointDiffFiles.push({
+        checkpointId,
+        patchId: checkpoint.source?.patchId ?? checkpoint.taskId ?? null,
+        files
+      });
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 404) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  const checkpointAppliedFiles = unique(checkpointDiffFiles.flatMap((item) => item.files));
+  const generatedFiles = unique((session.patchDiagnostics || []).flatMap((item) => item.normalizedFilePaths));
+  const appliedFiles = checkpointAppliedFiles.length ? checkpointAppliedFiles : unique(session.filesChanged || []);
+  const effectiveGeneratedFiles = generatedFiles.length ? generatedFiles : unique([...appliedFiles, ...(session.filesChanged || [])]);
+
+  return {
+    ...session,
+    // 历史 diff 的事实来源优先使用 checkpoint；旧数据没有 checkpoint 时保持原有 filesChanged 兼容。
+    diffView: {
+      generatedFiles: effectiveGeneratedFiles,
+      appliedFiles,
+      rejectedFiles: withoutValues(effectiveGeneratedFiles, appliedFiles),
+      checkpointDiffFiles,
+      source: checkpointDiffFiles.length ? "checkpoint" : "legacy"
+    }
+  };
+}
+
 async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
   const content = await fs.readFile(taskSessionPath(taskSessionId), "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {
@@ -283,7 +329,7 @@ async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
     throw error;
   });
 
-  return normalizeTaskSession(JSON.parse(content) as TaskSession);
+  return attachTaskSessionDiffView(normalizeTaskSession(JSON.parse(content) as TaskSession));
 }
 
 async function writeTaskSession(session: TaskSession) {
@@ -675,7 +721,7 @@ export async function listTaskSessions() {
   const sessions = await Promise.all(
     files.map(async (filePath) => {
       const content = await fs.readFile(filePath, "utf8");
-      return normalizeTaskSession(JSON.parse(content) as TaskSession);
+      return attachTaskSessionDiffView(normalizeTaskSession(JSON.parse(content) as TaskSession));
     })
   );
 
