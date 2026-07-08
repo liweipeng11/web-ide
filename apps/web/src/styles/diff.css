@@ -14,6 +14,65 @@
   padding: 10px 18px;
 }
 
+.diff-review-pane {
+  background: #ffffff;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.diff-review-tabbar {
+  flex: 0 0 auto;
+}
+
+.diff-review-header {
+  flex: 0 0 auto;
+}
+
+.diff-review-header > div:first-child {
+  min-width: 0;
+}
+
+.diff-review-toolbar {
+  flex: 0 0 auto;
+}
+
+.diff-editor-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.diff-empty {
+  align-items: center;
+  color: #647181;
+  display: flex;
+  flex: 1;
+  font-size: 12px;
+  justify-content: center;
+}
+
+.diff-binary-preview {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  height: 100%;
+  line-height: 1.45;
+  margin: 0;
+  overflow: auto;
+  padding: 12px 0;
+}
+
+.diff-review-commands {
+  border-top: 1px solid #d8dee5;
+  flex: 0 0 auto;
+  max-height: 150px;
+  overflow: auto;
+}
+
 .diff-fab {
   bottom: 18px;
   box-shadow: 0 8px 24px rgba(23, 32, 42, 0.18);
@@ -298,5 +357,20 @@
   .diff-modal {
     max-height: calc(100vh - 24px);
     max-width: calc(100vw - 24px);
+  }
+
+  .diff-review-header,
+  .diff-review-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .diff-actions,
+  .diff-file-actions {
+    justify-content: flex-end;
+  }
+
+  .diff-review-commands {
+    max-height: 120px;
   }
 }

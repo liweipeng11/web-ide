@@ -174,6 +174,13 @@ function buildRuntimeFollowupAnswer(runtimeResult: Awaited<ReturnType<typeof run
   return runtimeResult.content || "审批已处理，任务继续执行完成。";
 }
 
+function buildDeferredRuntimeAnswer(runtimeResult: Awaited<ReturnType<typeof runAgentRuntime>>, runtimePatch: GenerateEditResponse | null) {
+  // 工具审批还没全部结束时，只展示步骤和审批卡片，最终说明留到 runtime 真正完成后再出现。
+  if (runtimeResult.status === "awaiting_approval") return null;
+
+  return buildRuntimeFollowupAnswer(runtimeResult, runtimePatch);
+}
+
 app.get(
   "/api/workspace",
   asyncRoute(async (_request, response) => {
@@ -668,11 +675,14 @@ app.post(
           runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : runtimeResult.status === "completed" ? "success" : "failed"
         );
     const chatId = sessionBeforeDecision.chatId?.trim() || `chat:${taskSessionId}`;
-    const messages = await appendFileChatMessage(chatId, {
-      role: "assistant",
-      // 审批恢复后补一条新的 assistant 消息，避免前端看起来“审批结束但没有继续”。
-      content: buildRuntimeFollowupAnswer(runtimeResult, runtimePatch)
-    });
+    const runtimeAnswer = buildDeferredRuntimeAnswer(runtimeResult, runtimePatch);
+    const messages = runtimeAnswer
+      ? await appendFileChatMessage(chatId, {
+          role: "assistant",
+          // 审批恢复后只有在工具链真正完成时，才补充最终说明。
+          content: runtimeAnswer
+        })
+      : undefined;
     const finalSession = runtimeStatus || (await getTaskSession(taskSessionId));
 
     response.json({
@@ -876,8 +886,10 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         mode: "plan",
         onAgentStep: pushAgentStep
       });
-      const answer = runtimeResult.content || "Plan Mode completed without text output.";
-      sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
+      const answer = buildDeferredRuntimeAnswer(runtimeResult, null) || "";
+      if (answer) {
+        sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
+      }
       const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
       const completedTaskSession = await updateTaskSessionStatus(taskSession.id, runtimeResult.status === "completed" ? "success" : runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : "failed");
 
@@ -914,11 +926,10 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       const runtimeProgressedTaskSession = runtimePatch
         ? await advanceTaskPlanProgress(taskSession.id, "patch_generated")
         : await updateTaskSessionStatus(taskSession.id, runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : runtimeResult.status === "completed" ? "success" : "failed");
-      const runtimeChangedFiles = runtimePatch?.files.map((file) => `- ${file.path}`).join("\n") || "";
-      const runtimeAnswer = runtimePatch
-        ? [runtimeResult.content || runtimePatch.summary, "", `已生成 ${runtimePatch.files.length} 个文件的修改，请在下方审核后应用：`, runtimeChangedFiles].join("\n")
-        : runtimeResult.content || "Agent runtime completed without generating a patch.";
-      sendEvent("delta", { id: turn.assistantMessage.id, delta: runtimeAnswer });
+      const runtimeAnswer = buildDeferredRuntimeAnswer(runtimeResult, runtimePatch) || "";
+      if (runtimeAnswer) {
+        sendEvent("delta", { id: turn.assistantMessage.id, delta: runtimeAnswer });
+      }
       const runtimeMessages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, runtimeAnswer);
 
       completed = true;

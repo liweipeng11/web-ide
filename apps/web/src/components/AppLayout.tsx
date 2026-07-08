@@ -5,10 +5,10 @@ import { collectFilePaths } from "../appState";
 import GitWorkflowPanel from "../gitWorkflow/GitWorkflowPanel";
 import ChatPanel from "./ChatPanel";
 import CodeSearchPanel from "./CodeSearchPanel";
-import DiffViewer from "./DiffViewer";
 import EditorPane from "./EditorPane";
 import FileTree from "./FileTree";
 import Icon from "./Icon";
+import PatchReviewPane from "./PatchReviewPane";
 import ProjectRulesPanel from "./ProjectRulesPanel";
 import TerminalPanel, { type TerminalCommandCompletion, type TerminalCommandRequest } from "./TerminalPanel";
 
@@ -223,23 +223,27 @@ export default function AppLayout({
           </aside>
 
           <div className="editor-column">
-            <EditorPane
-              path={state.selectedPath}
-              tabs={state.openFiles}
-              value={state.fileContent}
-              dirty={state.fileContent !== state.savedFileContent}
-              saving={savingFile}
-              onSave={() => void onSaveFile()}
-              onSelectTab={onSelectOpenFile}
-              onCloseTab={onCloseOpenFile}
-              onChange={(fileContent) =>
-                setState((current) => ({
-                  ...current,
-                  fileContent,
-                  openFiles: current.openFiles.map((file) => (file.path === current.selectedPath ? { ...file, content: fileContent } : file))
-                }))
-              }
-            />
+            {state.patch ? (
+              <PatchReviewPane patch={state.patch} loading={state.loading} autoFix={state.autoFix} onApply={onApplyPatch} onReject={onRejectPatch} onRunCommand={(command) => void onValidateAndFix(command)} />
+            ) : (
+              <EditorPane
+                path={state.selectedPath}
+                tabs={state.openFiles}
+                value={state.fileContent}
+                dirty={state.fileContent !== state.savedFileContent}
+                saving={savingFile}
+                onSave={() => void onSaveFile()}
+                onSelectTab={onSelectOpenFile}
+                onCloseTab={onCloseOpenFile}
+                onChange={(fileContent) =>
+                  setState((current) => ({
+                    ...current,
+                    fileContent,
+                    openFiles: current.openFiles.map((file) => (file.path === current.selectedPath ? { ...file, content: fileContent } : file))
+                  }))
+                }
+              />
+            )}
             {terminalOpen && (
               <TerminalPanel
                 workspaceRoot={state.workspaceRoot}
@@ -312,8 +316,6 @@ export default function AppLayout({
           </div>
         </section>
       </section>
-
-      <DiffViewer patch={state.patch} loading={state.loading} autoFix={state.autoFix} onApply={onApplyPatch} onReject={onRejectPatch} onRunCommand={(command) => void onValidateAndFix(command)} />
     </main>
   );
 }

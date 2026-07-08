@@ -100,6 +100,7 @@ export default function ChatPanel({
   const [commandRuns, setCommandRuns] = useState<Record<string, CommandRunState>>({});
   const [dismissedCommandSuggestions, setDismissedCommandSuggestions] = useState<Record<string, boolean>>({});
   const autoRunCommandIds = useRef<Set<string>>(new Set());
+  const autoOpenedPlanApprovalKeyRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
   const historyRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -127,6 +128,21 @@ export default function ChatPanel({
   const activePlanBlockedCount = activePlanItems.filter((item) => item.status === "blocked").length;
   const activePlanPendingApproval = activeTaskSession?.planApproval?.status === "pending";
   const effectiveAgentMode = activeTaskSession?.agentMode || agentMode;
+
+  useEffect(() => {
+    const approvalKey = activePlanPendingApproval && activeTaskSession ? `${activeTaskSession.id}:${activeTaskSession.planApproval?.requestedAt || "pending"}` : null;
+
+    if (!approvalKey) {
+      autoOpenedPlanApprovalKeyRef.current = null;
+      return;
+    }
+
+    if (autoOpenedPlanApprovalKeyRef.current === approvalKey) return;
+
+    // 任务进入计划审批时主动展开弹窗，减少用户错过审批入口的概率。
+    autoOpenedPlanApprovalKeyRef.current = approvalKey;
+    setShowTaskPlan(true);
+  }, [activePlanPendingApproval, activeTaskSession]);
 
   useEffect(() => {
     if (!historyRef.current) return;
@@ -534,6 +550,7 @@ export default function ChatPanel({
             const isLatestAssistantMessage = message.role === "assistant" && message.id === latestAssistantMessageId;
             const messageAgentSteps = isLatestAssistantMessage ? visibleAgentSteps.filter((step) => step.type !== "command") : [];
             const showAssistantThinking = isLatestAssistantMessage && loading && !parsedSuggestion.visibleContent.trim();
+            const showOnlyAgentSteps = message.role === "assistant" && isLatestAssistantMessage && messageAgentSteps.length > 0 && !parsedSuggestion.visibleContent.trim();
 
             return (
               <article key={message.id} className={"chat-message " + message.role}>
@@ -555,7 +572,7 @@ export default function ChatPanel({
                   <>
                     {showAssistantThinking ? (
                       <p>{messageAgentSteps.length ? "正在处理..." : "正在分析你的请求..."}</p>
-                    ) : message.role === "assistant" && !streaming ? (
+                    ) : showOnlyAgentSteps ? null : message.role === "assistant" && !streaming ? (
                       <MarkdownPreview content={parsedSuggestion.visibleContent} />
                     ) : (
                       <p>{formatMessageForDisplay(parsedSuggestion.visibleContent)}</p>
