@@ -313,9 +313,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         continue;
       }
 
-      options.onAgentStep?.(approval.step);
-
       if (approval.status === "requires_approval") {
+        options.onAgentStep?.(approval.step);
         const pendingToolCall: PendingAgentToolCall = {
           actionId: approval.step.type === "approval_request" ? approval.step.actionId : `tool_call:${toolCall.id}`,
           toolCallId: toolCall.id,

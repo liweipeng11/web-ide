@@ -4,6 +4,14 @@ import { getNumberField, getStringField, summarizeUnknown } from "./chatUtils";
 
 type ApprovalStep = Extract<AgentStep, { type: "approval_request" }>;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isRuntimeApprovalStep(step: ApprovalStep) {
+  return isRecord(step.details) && step.details.approvalSource === "agent_runtime";
+}
+
 function sanitizedResult(result: Extract<AgentStep, { type: "command" }>["result"]) {
   if (!result) return null;
 
@@ -192,7 +200,8 @@ function ApprovalRequestCard({
   onDecideApproval?: (step: ApprovalStep, decision: "approved" | "rejected") => Promise<void>;
 }) {
   const targets = step.command ? [step.command] : step.targets || [];
-  const canDecide = step.status === "pending" && Boolean(onDecideApproval);
+  // 只有 runtime 绑定了 pendingToolCall 的审批才能批准/拒绝，避免普通 diff 预览误显示为工具审批。
+  const canDecide = step.status === "pending" && isRuntimeApprovalStep(step) && Boolean(onDecideApproval);
   const processing = pending && canDecide;
 
   return (
@@ -224,6 +233,22 @@ function ApprovalRequestCard({
         </div>
       )}
     </article>
+  );
+}
+
+function AgentStepDetailBlock({ step }: { step: AgentStep }) {
+  const detail = <pre>{formatAgentStepDetail(step)}</pre>;
+
+  if (step.type !== "approval_request" || step.status !== "pending") {
+    return detail;
+  }
+
+  return (
+    <details className="agent-step-raw-details">
+      <summary>查看工具调用详细信息</summary>
+      {/* 人工审批时默认隐藏原始调用参数，避免审批卡片一展开就暴露过多底层细节。 */}
+      {detail}
+    </details>
   );
 }
 
@@ -259,6 +284,7 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
       <ol>
         {steps.map((step) => {
           const view = getAgentStepView(step);
+          const showApprovalCard = step.type === "approval_request" && (step.status !== "pending" || isRuntimeApprovalStep(step));
 
           return (
             <li key={step.id} className={`agent-step-${step.type}`}>
@@ -268,9 +294,9 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
                   <b>{view.title}</b>
                   {view.detail && <small>{view.detail}</small>}
                 </summary>
-                {step.type === "approval_request" && <ApprovalRequestCard disabled={disabled} pending={pendingActionId === step.actionId} step={step} onDecideApproval={decideApproval} />}
+                {step.type === "approval_request" && showApprovalCard && <ApprovalRequestCard disabled={disabled} pending={pendingActionId === step.actionId} step={step} onDecideApproval={decideApproval} />}
                 {step.type === "checkpoint" && <CheckpointCard disabled={disabled} step={step} onRollbackCheckpoint={onRollbackCheckpoint} />}
-                <pre>{formatAgentStepDetail(step)}</pre>
+                <AgentStepDetailBlock step={step} />
               </details>
             </li>
           );

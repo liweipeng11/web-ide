@@ -655,6 +655,17 @@
   word-break: break-word;
 }
 
+.agent-step-raw-details {
+  margin-top: 6px;
+}
+
+/* 人工审批场景下，原始工具调用详情默认折叠，只在用户主动查看时展开。 */
+.agent-step-raw-details summary {
+  color: #475569;
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .agent-step-approval_request > span {
   background: #fff7ed;
   color: #9a3412;

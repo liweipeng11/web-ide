@@ -299,12 +299,105 @@ test("agent runtime pauses before approval-required tools", async () => {
       ]
     })
   });
-
+  // Stop at the first approval-required tool; later tools are neither shown nor executed early.
   assert.equal(result.status, "awaiting_approval");
   assert.equal(result.pendingToolCall?.toolName, "runCommand");
   assert.equal(result.pendingToolCall?.riskLevel, "medium");
   assert.equal(executed, false);
   assert.deepEqual(steps, [{ type: "approval_request", status: "pending", actionType: "run_command" }]);
+});
+
+test("agent runtime emits no approval cards for auto-approved tools", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("readFile", { filePath: "src/a.ts", content: "hello" })]);
+  const steps: Array<{ type: string; status?: string }> = [];
+  const responses: AgentCompletionResponse[] = [
+    {
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "tool-read-auto",
+                type: "function",
+                function: { name: "readFile", arguments: JSON.stringify({ filePath: "src/a.ts" }) }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      choices: [{ message: { role: "assistant", content: "Read completed." } }]
+    }
+  ];
+
+  const result = await runAgentRuntime({
+    userRequest: "Read a file",
+    registry,
+    runId: "test-runtime-auto-tool-no-approval-card",
+    onAgentStep(step) {
+      steps.push({ type: step.type, status: step.type === "approval_request" ? step.status : undefined });
+    },
+    requestCompletion: async () => {
+      const response = responses.shift();
+      assert.ok(response);
+      return response;
+    }
+  });
+
+  // Auto-approved context tools should not occupy the manual approval UI.
+  assert.equal(result.status, "completed");
+  assert.equal(steps.some((step) => step.type === "approval_request"), false);
+});
+
+test("agent runtime exposes only the first pending approval from a tool batch", async () => {
+  let runCommandExecuted = false;
+  let applyPatchExecuted = false;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("runCommand", { exitCode: 0 }, () => (runCommandExecuted = true)),
+    createRuntimeTestTool("applyPatch", { files: [] }, () => (applyPatchExecuted = true))
+  ]);
+  const steps: Array<{ type: string; actionType?: string; status?: string }> = [];
+
+  const result = await runAgentRuntime({
+    userRequest: "Run two risky tools",
+    registry,
+    runId: "test-runtime-one-pending-approval",
+    onAgentStep(step) {
+      steps.push({ type: step.type, actionType: step.type === "approval_request" ? step.actionType : undefined, status: step.type === "approval_request" ? step.status : undefined });
+    },
+    requestCompletion: async () => ({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "tool-command-first",
+                type: "function",
+                function: { name: "runCommand", arguments: JSON.stringify({ command: "pnpm test" }) }
+              },
+              {
+                id: "tool-patch-second",
+                type: "function",
+                function: { name: "applyPatch", arguments: JSON.stringify({ patchId: "patch-1" }) }
+              }
+            ]
+          }
+        }
+      ]
+    })
+  });
+
+  // Cline 濡炲瀛╅悧鎼佸及椤栫偘娴烽柛鎺撳椤戝洦绋夐埀顒佺▔椤忓嫮绐￠悗鍏夊墲婢规帒顔忛妷銉ュ緮閻忓繗椴稿▓蹇涘磻濠婃劗绀夐柛姘捣閻㈣顔忛妷銉ュ緮濞戞挸绉崇槐浼村箵閹邦剙顤呴悘鐐存礈閵囨岸骞嬮弽銊モ挃閻炴稑琚埀?
+  assert.equal(result.status, "awaiting_approval");
+  assert.equal(result.pendingToolCall?.toolName, "runCommand");
+  assert.equal(runCommandExecuted, false);
+  assert.equal(applyPatchExecuted, false);
+  assert.deepEqual(steps, [{ type: "approval_request", actionType: "run_command", status: "pending" }]);
 });
 
 test("agent runtime feeds blocked unknown tools back to the model", async () => {
@@ -520,7 +613,7 @@ test("plan mode exposes only readonly tools to the model", async () => {
     requestCompletion: async (body) => {
       requests.push(body);
       return {
-        choices: [{ message: { role: "assistant", content: "计划完成。" } }]
+        choices: [{ message: { role: "assistant", content: "Plan completed." } }]
       };
     }
   });
@@ -540,7 +633,7 @@ test("act mode exposes patch and command tools to the model", async () => {
     requestCompletion: async (body) => {
       requests.push(body);
       return {
-        choices: [{ message: { role: "assistant", content: "执行完成。" } }]
+        choices: [{ message: { role: "assistant", content: "Act completed." } }]
       };
     }
   });

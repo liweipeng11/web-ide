@@ -5,7 +5,7 @@ import { buildEditScope, validatePatchesAgainstEditScope } from "./editScope.js"
 import { HttpError } from "./errors.js";
 import { listFiles, readWorkspaceFile, readWorkspaceFileForDiff, safeResolve } from "./fileTools.js";
 import { createPendingPatch } from "./patchStore.js";
-import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
+import { createAgentStep } from "./routeAgentSteps.js";
 import { resolvePatchNewContent, StaleFullFileRewriteError } from "./searchReplacePatch.js";
 import type { AiEditResult, FileTreeNode, PatchFileChange } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
@@ -252,16 +252,7 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   let oldContent = "";
 
   if (selectedFilePath) {
-    onAgentStep?.(
-      createApprovalRequestStep({
-        actionType: "read_file",
-        title: "读取当前文件",
-        summary: `准备用作编辑上下文读取 ${selectedFilePath}。`,
-        status: "auto_approved",
-        targets: [selectedFilePath],
-        details: { selected: true }
-      })
-    );
+    // 读取选中文件只用于构造补丁上下文，不生成审批卡。
     onAgentStep?.(createAgentStep({ type: "tool_call", toolName: "readFile", input: { filePath: selectedFilePath, selected: true } }));
     oldContent = await readWorkspaceFile(selectedFilePath);
     onAgentStep?.(createAgentStep({ type: "tool_result", toolName: "readFile", output: { filePath: selectedFilePath, chars: oldContent.length, selected: true } }));
@@ -370,22 +361,8 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   }
 
   const uniqueChanges = [...new Map((validatedPaths.files || []).map((change) => [change.path, change])).values()];
-  const hasDeleteChange = uniqueChanges.some((change) => change.status === "delete");
   logRoute(runId, "patch.prepare", { files: uniqueChanges.map((change) => change.path) });
-  onAgentStep?.(
-    createApprovalRequestStep({
-      actionType: hasDeleteChange ? "delete_file" : "edit_files",
-      title: "生成文件修改",
-      summary: `准备生成 ${uniqueChanges.length} 个文件的补丁，用户审核后才会写入工作区。`,
-      riskLevel: hasDeleteChange ? "high" : "medium",
-      status: "pending",
-      targets: uniqueChanges.map((change) => change.path),
-      details: {
-        files: uniqueChanges.map((change) => ({ path: change.path, status: change.status, summary: change.summary })),
-        editScope: aiResult.editScope || null
-      }
-    })
-  );
+  // proposePatch 只创建待审查 diff，不写入工作区；真正写入由 applyPatch 审批后执行。
   onAgentStep?.(createAgentStep({ type: "edit", files: uniqueChanges.map((change) => change.path) }));
 
   if (!files.length) {
@@ -396,19 +373,7 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   const defaultValidationCommand = await selectDefaultValidationCommand();
   const suggestedValidationCommands = aiResult.commandsToRun?.filter(isValidationCommand) || [];
   const commandsToRun = suggestedValidationCommands.length ? suggestedValidationCommands : defaultValidationCommand ? [defaultValidationCommand] : undefined;
-  for (const command of commandsToRun || []) {
-    onAgentStep?.(
-      createApprovalRequestStep({
-        actionType: "run_command",
-        title: "建议运行验证命令",
-        summary: "补丁生成后建议运行验证命令，执行前仍由用户确认。",
-        riskLevel: "medium",
-        status: "pending",
-        command,
-        details: { source: suggestedValidationCommands.includes(command) ? "ai" : "default" }
-      })
-    );
-  }
+  // 验证命令只随 pending patch 返回；当 runCommand 被真正调用时再进入唯一审批流程。
   const patch = createPendingPatch(files, taskSessionId, commandsToRun);
   const selectedFileChange = (selectedFilePath ? files.find((change) => change.path === selectedFilePath) : null) || files[0];
   logRoute(runId, "done", { elapsedMs: Date.now() - startedAt, patchId: patch.patchId, files: files.map((file) => file.path) });

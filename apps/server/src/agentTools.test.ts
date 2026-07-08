@@ -71,7 +71,7 @@ test("readFileRange caps very large line ranges", async () => {
   assert.equal(data.truncated, true);
 });
 
-test("emits an approval request before running a read tool", async () => {
+test("read tools emit activity steps without an approval card", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "hello\n", "utf8");
   await setWorkspaceRoot(workspaceRoot, { persist: false });
@@ -88,10 +88,8 @@ test("emits an approval request before running a read tool", async () => {
     })
   );
 
-  // 工具真正执行前先生成动作预告，让前端能展示类似 Cline 的审批卡片。
-  assert.equal(steps[0].type, "approval_request");
-  assert.equal(steps[0].actionType, "read_file");
-  assert.equal(steps[0].status, "auto_approved");
-  assert.equal(steps[1].type, "tool_call");
-  assert.equal(steps[1].toolName, "readFile");
+  // 只读工具是低风险上下文活动，不再渲染成审批卡，避免和人工审批混淆。
+  assert.equal(steps.some((step) => step.type === "approval_request"), false);
+  assert.equal(steps[0].type, "tool_call");
+  assert.equal(steps[0].toolName, "readFile");
 });

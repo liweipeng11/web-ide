@@ -342,7 +342,7 @@ export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: Age
   const registry = (runtime as AgentToolRuntime & { registry?: AgentToolRegistry }).registry || readonlyAgentToolRegistry;
   const definition = registry.get(toolName);
   logAi(runtime.runId, "tool.call", { name: toolName, arguments: args });
-  if (runtime.emitToolApprovalSteps !== false) {
+  if (runtime.emitToolApprovalSteps === true) {
     runtime.onAgentStep?.(createToolApprovalStep(toolName, args));
   }
   runtime.onAgentStep?.(
