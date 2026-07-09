@@ -84,7 +84,7 @@ function getToolCallSignature(toolCall: AgentToolCall) {
 function createToolBudgetWarningMessage(remainingSteps: number, hasGeneratedPatch: boolean): AgentMessage {
   const instruction = hasGeneratedPatch
     ? "A pending patch already exists. Stop calling tools unless approval is required, and provide the final concise Chinese summary now."
-    : "If you have enough context, call proposePatch now. Avoid repeating search/read calls unless they are strictly necessary for the patch.";
+    : "If you have enough context, use replaceInFile for focused existing-file edits, writeFile for new files or true full-file rewrites, or proposePatch only when a reviewable pending patch is explicitly needed. Avoid repeating search/read calls unless they are strictly necessary.";
 
   return {
     role: "user",
@@ -95,7 +95,7 @@ function createToolBudgetWarningMessage(remainingSteps: number, hasGeneratedPatc
 function createRepeatedToolWarningMessage(toolNames: string[]): AgentMessage {
   return {
     role: "user",
-    content: `You repeated these tool calls: ${toolNames.join(", ")}. Reuse the existing tool results instead of calling the same tool with the same arguments again. If enough context is available, move to proposePatch or final answer.`
+    content: `You repeated these tool calls: ${toolNames.join(", ")}. Reuse the existing tool results instead of calling the same tool with the same arguments again. If enough context is available, move to replaceInFile/writeFile, proposePatch only when a reviewable pending patch is explicitly needed, or final answer.`
   };
 }
 

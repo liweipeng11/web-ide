@@ -18,7 +18,7 @@ export type AgentModeConfig = {
 
 const actToolDefinitions: AgentToolDefinition[] = [
   ...readonlyAgentToolDefinitions,
-  // Act 模式需要同时暴露直接编辑工具和旧 patch 工具，第二阶段只新增能力，不替换旧链路。
+  // Act 模式优先暴露直接编辑工具，同时保留旧 patch 工具作为明确待审补丁或兜底链路。
   ...fileEditToolDefinitions,
   ...patchAgentToolDefinitions,
   ...commandAgentToolDefinitions

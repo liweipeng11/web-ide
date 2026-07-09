@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime.js";
 import { createAgentToolRegistry } from "./agentToolRegistry.js";
+import { AI_AGENT_ACT_SYSTEM_PROMPT } from "./prompts.js";
 import type { AgentCompletionResponse, AgentToolDefinition } from "./agentToolTypes.js";
 
 function createRuntimeTestTool(name: string, result: unknown, onExecute?: () => void): AgentToolDefinition {
@@ -645,4 +646,106 @@ test("act mode exposes edit, patch, and command tools to the model", async () =>
   assert.equal(toolNames.includes("proposePatch"), true);
   assert.equal(toolNames.includes("applyPatch"), true);
   assert.equal(toolNames.includes("runCommand"), true);
+  // 直接编辑工具排在旧 patch 工具前面，引导模型优先走工具式编辑链路。
+  assert.ok(toolNames.indexOf("replaceInFile") < toolNames.indexOf("proposePatch"));
+  assert.ok(toolNames.indexOf("writeFile") < toolNames.indexOf("proposePatch"));
+});
+
+test("act prompt 优先引导工具式文件编辑", () => {
+  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /use replaceInFile as the default editing path/i);
+  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /Use writeFile only when creating a new file/i);
+  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /treat finalContent from the tool result as the latest source of truth/i);
+  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /Use proposePatch only when the user explicitly asks/i);
+});
+
+test("agent runtime budget warning keeps direct edit tools as the preferred path", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
+  const requests: Record<string, unknown>[] = [];
+  let callCount = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "Modify code",
+    registry,
+    runId: "test-runtime-budget-warning-direct-edit",
+    maxSteps: 3,
+    requestCompletion: async (body) => {
+      requests.push(body);
+      callCount += 1;
+
+      if (callCount <= 2) {
+        return {
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `tool-direct-edit-budget-${callCount}`,
+                    type: "function",
+                    function: { name: "searchCode", arguments: JSON.stringify({ query: `edit-${callCount}` }) }
+                  }
+                ]
+              }
+            }
+          ]
+        };
+      }
+
+      return {
+        choices: [{ message: { role: "assistant", content: "Stopped after direct edit warning." } }]
+      };
+    }
+  });
+
+  const warningMessages = requests.flatMap((request) => (request.messages as Array<{ content?: string }> | undefined) || []).filter((message) => message.content?.includes("near the tool-call limit"));
+  assert.equal(result.status, "completed");
+  assert.equal(warningMessages.some((message) => message.content?.includes("replaceInFile")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("writeFile")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("proposePatch only when")), true);
+});
+
+test("agent runtime repeated-tool warning asks the model to move to direct edit tools", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
+  const requests: Record<string, unknown>[] = [];
+  let callCount = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "Repeat then edit",
+    registry,
+    runId: "test-runtime-repeated-warning-direct-edit",
+    requestCompletion: async (body) => {
+      requests.push(body);
+      callCount += 1;
+
+      if (callCount <= 2) {
+        return {
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `tool-direct-edit-repeat-${callCount}`,
+                    type: "function",
+                    function: { name: "searchCode", arguments: JSON.stringify({ query: "same-edit-keyword" }) }
+                  }
+                ]
+              }
+            }
+          ]
+        };
+      }
+
+      return {
+        choices: [{ message: { role: "assistant", content: "Used direct edit warning." } }]
+      };
+    }
+  });
+
+  const warningMessages = requests.flatMap((request) => (request.messages as Array<{ content?: string }> | undefined) || []).filter((message) => message.content?.includes("repeated these tool calls"));
+  assert.equal(result.status, "completed");
+  assert.equal(warningMessages.some((message) => message.content?.includes("replaceInFile/writeFile")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("proposePatch only when")), true);
 });
