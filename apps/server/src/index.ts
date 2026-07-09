@@ -17,6 +17,7 @@ import { buildFinalPatchSummary, createEditPatchResponse } from "./editPatchServ
 import { runAutoValidation } from "./autoValidationService.js";
 import { listFiles, readWorkspaceFile, writeWorkspaceFile } from "./fileTools.js";
 import { createGitWorkflowRouter } from "./gitWorkflow/routes.js";
+import { createVue2TemplateRouter } from "./vue2Template/routes.js";
 import { clearPendingPatches, deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
 import { applyPendingPatch } from "./patchApplyService.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
@@ -36,6 +37,7 @@ const maxChatContextCharsPerFile = 20_000;
 
 app.use(express.json({ limit: "5mb" }));
 app.use("/api/git-workflow", createGitWorkflowRouter());
+app.use("/api/vue2-template", createVue2TemplateRouter());
 
 function createStreamRunId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
