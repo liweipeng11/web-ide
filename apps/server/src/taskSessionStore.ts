@@ -4,7 +4,7 @@ import path from "node:path";
 import { getCheckpoint } from "./checkpointStore.js";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
-import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
+import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 
 function taskSessionDirectory() {
@@ -169,6 +169,14 @@ function isPatchLifecycleEventType(value: unknown): value is PatchLifecycleEvent
   return value === "patch_created" || value === "patch_filtered" || value === "patch_file_applied" || value === "patch_file_rejected" || value === "patch_completed" || value === "patch_superseded" || value === "auto_fix_patch_created";
 }
 
+function isFileEditLifecycleEventType(value: unknown): value is FileEditLifecycleEventType {
+  return value === "file_edit_started" || value === "file_edit_applied" || value === "file_edit_failed";
+}
+
+function isFileEditToolName(value: unknown): value is FileEditLifecycleEvent["toolName"] {
+  return value === "replaceInFile" || value === "writeFile";
+}
+
 function normalizePatchLifecycleEvents(value: unknown): PatchLifecycleEvent[] {
   if (!Array.isArray(value)) return [];
 
@@ -193,6 +201,29 @@ function normalizePatchLifecycleEvents(value: unknown): PatchLifecycleEvent[] {
       };
     })
     .filter((event) => event.patchId.trim())
+    .sort((left, right) => left.createdAt - right.createdAt);
+}
+
+function normalizeFileEditLifecycleEvents(value: unknown): FileEditLifecycleEvent[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is Partial<FileEditLifecycleEvent> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => {
+      const detail = item.detail && typeof item.detail === "object" && !Array.isArray(item.detail) ? (item.detail as Record<string, unknown>) : undefined;
+
+      return {
+        id: typeof item.id === "string" && item.id.trim() ? item.id : `file-edit-event-${crypto.randomUUID()}`,
+        taskSessionId: typeof item.taskSessionId === "string" && item.taskSessionId.trim() ? item.taskSessionId : item.taskSessionId === null ? null : undefined,
+        createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now(),
+        type: isFileEditLifecycleEventType(item.type) ? item.type : "file_edit_started",
+        toolName: isFileEditToolName(item.toolName) ? item.toolName : "replaceInFile",
+        filePath: typeof item.filePath === "string" ? item.filePath : "",
+        checkpointId: typeof item.checkpointId === "string" && item.checkpointId.trim() ? item.checkpointId : undefined,
+        detail
+      };
+    })
+    .filter((event) => event.filePath.trim())
     .sort((left, right) => left.createdAt - right.createdAt);
 }
 
@@ -292,7 +323,8 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     planItems: normalizeTaskPlanItems(session.planItems),
     planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
     patchDiagnostics: normalizePatchDiagnostics(session.patchDiagnostics),
-    patchEvents: normalizePatchLifecycleEvents(session.patchEvents)
+    patchEvents: normalizePatchLifecycleEvents(session.patchEvents),
+    fileEditEvents: normalizeFileEditLifecycleEvents(session.fileEditEvents)
   };
 }
 
@@ -390,6 +422,7 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     checkpointIds: [],
     patchDiagnostics: [],
     patchEvents: [],
+    fileEditEvents: [],
     gitCommits: [],
     createdAt: now,
     updatedAt: now
@@ -1021,6 +1054,27 @@ export async function appendTaskSessionPatchEvent(taskSessionId: string | null |
       ...session,
       // 同一事件重复写入时按 id 覆盖，防止重试或并发刷新造成历史噪声。
       patchEvents: [...normalizePatchLifecycleEvents(session.patchEvents).filter((item) => item.id !== nextEvent.id), nextEvent].sort((left, right) => left.createdAt - right.createdAt).slice(-200),
+      updatedAt: now
+    };
+  });
+}
+
+export async function appendTaskSessionFileEditEvent(taskSessionId: string | null | undefined, event: Omit<FileEditLifecycleEvent, "id" | "createdAt" | "taskSessionId"> & Partial<Pick<FileEditLifecycleEvent, "id" | "createdAt" | "taskSessionId">>) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const now = Date.now();
+    const nextEvent: FileEditLifecycleEvent = {
+      ...event,
+      // 工具重试或恢复时可传入固定 id 覆盖旧事件，默认由存储层生成稳定审计记录。
+      id: event.id?.trim() || `file-edit-event-${now.toString(36)}-${crypto.randomUUID()}`,
+      taskSessionId: event.taskSessionId ?? taskSessionId,
+      createdAt: event.createdAt || now
+    };
+
+    return {
+      ...session,
+      fileEditEvents: [...normalizeFileEditLifecycleEvents(session.fileEditEvents).filter((item) => item.id !== nextEvent.id), nextEvent].sort((left, right) => left.createdAt - right.createdAt).slice(-200),
       updatedAt: now
     };
   });

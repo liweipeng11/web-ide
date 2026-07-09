@@ -4,7 +4,7 @@ import path from "node:path";
 import { HttpError } from "./errors.js";
 import { safeResolve } from "./fileTools.js";
 import { legacyProjectRuntimeDirectory, projectRuntimeDirectory } from "./statePaths.js";
-import type { Checkpoint, CheckpointSource, FilePatch } from "./types.js";
+import type { Checkpoint, CheckpointSource, FileEditResult, FilePatch } from "./types.js";
 
 type CheckpointPatch = FilePatch & {
   status?: "create" | "modify" | "delete";
@@ -105,6 +105,34 @@ export async function createCheckpoint(taskId: string, patches: FilePatch[], opt
         };
       })
     )
+  };
+
+  await fs.mkdir(checkpointDirectory(), { recursive: true });
+  await fs.writeFile(checkpointPath(checkpoint.id), `${JSON.stringify(checkpoint, null, 2)}\n`, "utf8");
+
+  return checkpoint;
+}
+
+export async function createFileEditCheckpoint(taskId: string, result: FileEditResult, options: CreateCheckpointOptions = {}): Promise<Checkpoint> {
+  if (!taskId.trim()) {
+    throw new HttpError(400, "taskId is required");
+  }
+
+  const checkpoint: Checkpoint = {
+    id: createCheckpointId(taskId),
+    taskId,
+    createdAt: Date.now(),
+    // 文件编辑工具已经拿到了真实 before/after，不能再从磁盘读取 before，避免快照被写后状态污染。
+    source: options.source,
+    files: [
+      {
+        filePath: result.filePath,
+        beforeContent: result.oldContent,
+        afterContent: result.finalContent,
+        beforeExists: result.beforeExists ?? true,
+        afterExists: result.afterExists ?? true
+      }
+    ]
   };
 
   await fs.mkdir(checkpointDirectory(), { recursive: true });

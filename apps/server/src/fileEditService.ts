@@ -46,7 +46,9 @@ export async function replaceInFile(input: ReplaceInFileInput): Promise<FileEdit
     oldContent,
     finalContent,
     changed: oldContent !== finalContent,
-    replacements: input.replaceAll ? replacements : 1
+    replacements: input.replaceAll ? replacements : 1,
+    beforeExists: true,
+    afterExists: true
   };
 }
 
@@ -55,6 +57,7 @@ export async function replaceInFile(input: ReplaceInFileInput): Promise<FileEdit
  */
 export async function writeFile(input: WriteFileInput): Promise<FileEditResult> {
   let oldContent = "";
+  let beforeExists = true;
 
   try {
     oldContent = await readWorkspaceFile(input.filePath);
@@ -64,6 +67,7 @@ export async function writeFile(input: WriteFileInput): Promise<FileEditResult> 
       throw error;
     }
 
+    beforeExists = false;
     await createWorkspaceFile(input.filePath, input.content);
   }
 
@@ -73,6 +77,8 @@ export async function writeFile(input: WriteFileInput): Promise<FileEditResult> 
     filePath: input.filePath,
     oldContent,
     finalContent,
-    changed: oldContent !== finalContent
+    changed: oldContent !== finalContent,
+    beforeExists,
+    afterExists: true
   };
 }

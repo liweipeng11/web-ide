@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 
@@ -68,6 +68,7 @@ test("normalizes legacy task sessions without plan items", async () => {
   delete persisted.pendingToolCall;
   delete persisted.patchDiagnostics;
   delete persisted.patchEvents;
+  delete persisted.fileEditEvents;
   await fs.writeFile(sessionPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 
   const loaded = await getTaskSession(session.id);
@@ -76,6 +77,7 @@ test("normalizes legacy task sessions without plan items", async () => {
   assert.equal(loaded.pendingToolCall, null);
   assert.deepEqual(loaded.patchDiagnostics, []);
   assert.deepEqual(loaded.patchEvents, []);
+  assert.deepEqual(loaded.fileEditEvents, []);
 });
 
 test("persists patch generation diagnostics in task sessions", async () => {
@@ -144,6 +146,65 @@ test("persists patch lifecycle events in task sessions", async () => {
     ]
   );
   assert.equal(loaded.patchEvents?.[1]?.detail?.checkpointId, "checkpoint-1");
+});
+
+test("persists file edit lifecycle events in task sessions", async () => {
+  const { session } = await createIsolatedTaskSession("记录工具式文件编辑生命周期");
+
+  await appendTaskSessionFileEditEvent(session.id, {
+    id: "file-edit-applied",
+    type: "file_edit_applied",
+    toolName: "replaceInFile",
+    filePath: "src/app.ts",
+    checkpointId: "checkpoint-file-edit-1",
+    detail: {
+      changed: true,
+      replacements: 1,
+      oldContentPreview: "before",
+      finalContentPreview: "after"
+    },
+    createdAt: 20
+  });
+  await appendTaskSessionFileEditEvent(session.id, {
+    id: "file-edit-started",
+    type: "file_edit_started",
+    toolName: "replaceInFile",
+    filePath: "src/app.ts",
+    createdAt: 10
+  });
+
+  const loaded = await getTaskSession(session.id);
+
+  assert.deepEqual(
+    loaded.fileEditEvents?.map((event) => [event.id, event.type, event.toolName, event.filePath]),
+    [
+      ["file-edit-started", "file_edit_started", "replaceInFile", "src/app.ts"],
+      ["file-edit-applied", "file_edit_applied", "replaceInFile", "src/app.ts"]
+    ]
+  );
+  assert.equal(loaded.fileEditEvents?.[1]?.checkpointId, "checkpoint-file-edit-1");
+  assert.equal(loaded.fileEditEvents?.[1]?.detail?.replacements, 1);
+  assert.equal(loaded.fileEditEvents?.[1]?.detail?.oldContentPreview, "before");
+  assert.equal(loaded.fileEditEvents?.[1]?.detail?.finalContentPreview, "after");
+});
+
+test("persists failed file edit lifecycle events in task sessions", async () => {
+  const { session } = await createIsolatedTaskSession("记录工具式文件编辑失败");
+
+  await appendTaskSessionFileEditEvent(session.id, {
+    type: "file_edit_failed",
+    toolName: "writeFile",
+    filePath: "src/missing.ts",
+    detail: {
+      message: "write failed"
+    }
+  });
+
+  const loaded = await getTaskSession(session.id);
+
+  assert.equal(loaded.fileEditEvents?.length, 1);
+  assert.equal(loaded.fileEditEvents?.[0]?.type, "file_edit_failed");
+  assert.equal(loaded.fileEditEvents?.[0]?.detail?.message, "write failed");
 });
 
 test("builds task history diff view from checkpoint files", async () => {

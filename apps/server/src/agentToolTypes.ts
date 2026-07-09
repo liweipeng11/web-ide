@@ -59,6 +59,8 @@ export type AgentToolRuntime = {
 export type AgentFileEditToolResult = FileEditResult & {
   // 给步骤日志展示用的编辑前摘要，完整最终内容仍通过 finalContent 返回给模型继续判断。
   oldContentPreview: string;
+  // 工具式编辑成功后生成的回滚点，用于任务历史审计和后续恢复。
+  checkpointId?: string;
 };
 
 export type AgentToolDefinition = {

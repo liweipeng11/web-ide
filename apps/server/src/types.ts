@@ -42,6 +42,9 @@ export type FileEditResult = {
   finalContent: string;
   changed: boolean;
   replacements?: number;
+  // 记录编辑前后的文件存在状态，checkpoint 回滚新建文件时需要据此删除文件。
+  beforeExists?: boolean;
+  afterExists?: boolean;
 };
 
 export type CodeSearchResult = {
@@ -344,6 +347,8 @@ export type TaskSession = {
   patchDiagnostics?: PatchGenerationDiagnostics[];
   // 按时间顺序沉淀 patch 生命周期事件，用于历史回放和审计。
   patchEvents?: PatchLifecycleEvent[];
+  // 按时间顺序沉淀工具式文件编辑事件，用于追踪 replaceInFile/writeFile 的真实落盘历史。
+  fileEditEvents?: FileEditLifecycleEvent[];
   gitCommits?: {
     hash: string;
     message: string;
@@ -483,6 +488,19 @@ export type PatchLifecycleEvent = {
   message?: string | null;
   detail?: Record<string, unknown>;
   createdAt: number;
+};
+
+export type FileEditLifecycleEventType = "file_edit_started" | "file_edit_applied" | "file_edit_failed";
+
+export type FileEditLifecycleEvent = {
+  id: string;
+  taskSessionId?: string | null;
+  createdAt: number;
+  type: FileEditLifecycleEventType;
+  toolName: "replaceInFile" | "writeFile";
+  filePath: string;
+  checkpointId?: string;
+  detail?: Record<string, unknown>;
 };
 
 export type CheckpointSource = {
