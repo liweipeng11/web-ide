@@ -951,22 +951,6 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       response.end();
       return;
 
-      const patch = await createEditPatchResponse(selectedPath, editRequest, pushAgentStep, taskSession.id);
-      const progressedTaskSession = await advanceTaskPlanProgress(taskSession.id, "patch_generated");
-      const changedFiles = patch.files.map((file) => `- ${file.path}`).join("\n");
-      const answer = [patch.finalSummary, "", "请在下方审核后应用：", changedFiles].join("\n");
-      sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
-      const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
-
-      completed = true;
-      await Promise.all(taskStepWrites);
-      if (progressedTaskSession) {
-        sendEvent("task_session", { session: progressedTaskSession });
-      }
-      sendEvent("patch", { patch: { ...patch, taskSessionId: taskSession.id, agentSteps } });
-      sendEvent("done", { messages });
-      response.end();
-      return;
     }
 
     const answer = await streamFileChatReply(

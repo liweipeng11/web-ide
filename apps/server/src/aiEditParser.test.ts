@@ -23,6 +23,31 @@ test("parseAiEditResult parses local search/replace edit patches", () => {
   assert.equal(result.patches?.[0]?.edits?.[0]?.search, "<nav>Home</nav>");
 });
 
+test("parseAiEditResult keeps legacy patch JSON available for explicit fallback workflows", () => {
+  const result = parseAiEditResult(
+    JSON.stringify({
+      status: "patch",
+      summary: "fallback pending patch",
+      patches: [
+        {
+          filePath: "src/App.tsx",
+          status: "modify",
+          oldContent: "",
+          newContent: "",
+          edits: [{ search: "const title = 'old';", replace: "const title = 'new';" }],
+          summary: "update title"
+        }
+      ],
+      commandsToRun: ["pnpm --filter @mini-ai-web-editor/server test"]
+    })
+  );
+
+  // 旧 parser 只服务 /api/generate-edit 与显式 proposePatch，不参与直写工具结果解析。
+  assert.equal(result.status, "patch");
+  assert.equal(result.patches?.[0]?.filePath, "src/App.tsx");
+  assert.deepEqual(result.commandsToRun, ["pnpm --filter @mini-ai-web-editor/server test"]);
+});
+
 test("parseAiEditResult rejects full-file patches without explicit newContent", () => {
   assert.throws(
     () =>
