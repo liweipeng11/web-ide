@@ -1,4 +1,5 @@
 import type { AgentStep } from "./types.js";
+import type { FileEditResult } from "./types.js";
 
 export type AgentRole = "system" | "user" | "assistant" | "tool";
 
@@ -54,6 +55,12 @@ export type AgentToolRuntime = {
   emitToolApprovalSteps?: boolean;
   onAgentStep?: (step: AgentStep) => void;
 };
+
+export type AgentFileEditToolResult = FileEditResult & {
+  // 给步骤日志展示用的编辑前摘要，完整最终内容仍通过 finalContent 返回给模型继续判断。
+  oldContentPreview: string;
+};
+
 export type AgentToolDefinition = {
   name: string;
   description: string;

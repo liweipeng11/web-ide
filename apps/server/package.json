@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "test": "tsx --test src/agentRuntime.test.ts src/agentCommandTools.test.ts src/agentPatchTools.test.ts src/checkpointStore.test.ts src/agentTools.test.ts src/validationCommand.test.ts src/autoValidationService.test.ts src/editPatchService.test.ts src/fileEditService.test.ts src/gitWorkflow/gitService.test.ts src/agentIntent.test.ts src/aiClient.test.ts src/aiEditParser.test.ts src/aiHttp.test.ts src/diffTools.test.ts src/editScope.test.ts src/fileTools.test.ts src/patchStore.test.ts src/projectInspector.test.ts src/projectRules.test.ts src/searchReplacePatch.test.ts src/taskSessionStore.test.ts src/workspaceStore.test.ts",
+    "test": "tsx --test src/agentRuntime.test.ts src/agentCommandTools.test.ts src/agentFileEditTools.test.ts src/agentPatchTools.test.ts src/checkpointStore.test.ts src/agentTools.test.ts src/validationCommand.test.ts src/autoValidationService.test.ts src/editPatchService.test.ts src/fileEditService.test.ts src/gitWorkflow/gitService.test.ts src/agentIntent.test.ts src/aiClient.test.ts src/aiEditParser.test.ts src/aiHttp.test.ts src/diffTools.test.ts src/editScope.test.ts src/fileTools.test.ts src/patchStore.test.ts src/projectInspector.test.ts src/projectRules.test.ts src/searchReplacePatch.test.ts src/taskSessionStore.test.ts src/workspaceStore.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

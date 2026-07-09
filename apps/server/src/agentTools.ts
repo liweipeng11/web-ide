@@ -267,6 +267,14 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
     return `Use readFileRange to load lines ${String(args.startLine || "?")} through ${String(args.endLine || "?")} from workspace file "${String(args.filePath || "").trim()}".`;
   }
 
+  if (toolName === "replaceInFile") {
+    return `Use replaceInFile to edit workspace file "${String(args.filePath || "").trim()}" with an exact search/replace block.`;
+  }
+
+  if (toolName === "writeFile") {
+    return `Use writeFile to write the full latest content of workspace file "${String(args.filePath || "").trim()}".`;
+  }
+
   return `Use ${toolName}.`;
 }
 
@@ -319,6 +327,38 @@ function createToolApprovalStep(toolName: string, args: Record<string, unknown>)
         filePath,
         startLine: args.startLine,
         endLine: args.endLine
+      }
+    });
+  }
+
+  if (toolName === "replaceInFile") {
+    const filePath = String(args.filePath || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "edit_files",
+      title: "替换文件内容",
+      summary: `准备用精确匹配方式修改 ${filePath || "目标文件"}。`,
+      status: "auto_approved",
+      targets: filePath ? [filePath] : undefined,
+      details: {
+        filePath,
+        replaceAll: args.replaceAll === true
+      }
+    });
+  }
+
+  if (toolName === "writeFile") {
+    const filePath = String(args.filePath || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "write_file",
+      title: "写入文件",
+      summary: `准备用完整内容写入 ${filePath || "目标文件"}。`,
+      status: "auto_approved",
+      targets: filePath ? [filePath] : undefined,
+      details: {
+        filePath,
+        createIfMissing: args.createIfMissing === true
       }
     });
   }

@@ -623,7 +623,7 @@ test("plan mode exposes only readonly tools to the model", async () => {
   assert.deepEqual(toolNames.sort(), ["inspectProject", "readFile", "readFileRange", "searchCode"].sort());
 });
 
-test("act mode exposes patch and command tools to the model", async () => {
+test("act mode exposes edit, patch, and command tools to the model", async () => {
   const requests: Record<string, unknown>[] = [];
 
   const result = await runAgentRuntime({
@@ -640,6 +640,8 @@ test("act mode exposes patch and command tools to the model", async () => {
 
   const toolNames = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   assert.equal(result.status, "completed");
+  assert.equal(toolNames.includes("replaceInFile"), true);
+  assert.equal(toolNames.includes("writeFile"), true);
   assert.equal(toolNames.includes("proposePatch"), true);
   assert.equal(toolNames.includes("applyPatch"), true);
   assert.equal(toolNames.includes("runCommand"), true);
