@@ -20,6 +20,30 @@ export type SaveFileRequest = {
   content: string;
 };
 
+// 文件内精确替换参数，供底层编辑服务和后续 Agent 工具复用。
+export type ReplaceInFileInput = {
+  filePath: string;
+  search: string;
+  replace: string;
+  replaceAll?: boolean;
+};
+
+// 整文件写入参数；默认只允许覆盖已存在文件，避免意外创建路径。
+export type WriteFileInput = {
+  filePath: string;
+  content: string;
+  createIfMissing?: boolean;
+};
+
+// 文件编辑执行结果，finalContent 是后续链路继续编辑时的最新事实来源。
+export type FileEditResult = {
+  filePath: string;
+  oldContent: string;
+  finalContent: string;
+  changed: boolean;
+  replacements?: number;
+};
+
 export type CodeSearchResult = {
   filePath: string;
   path: string;
