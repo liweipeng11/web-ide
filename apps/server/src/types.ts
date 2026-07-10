@@ -55,6 +55,8 @@ export type CodeSearchResult = {
   content: string;
   text: string;
   match: string;
+  contextBefore?: Array<{ line: number; content: string }>;
+  contextAfter?: Array<{ line: number; content: string }>;
 };
 
 export type SearchResult = {

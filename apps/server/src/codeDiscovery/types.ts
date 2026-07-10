@@ -52,4 +52,13 @@ export type CodeDefinitionFileSummary = {
   error?: string;
 };
 
+// 文本搜索选项集中在 discovery 层，确保 Agent 工具和旧 API 使用同一套范围控制语义。
+export type TextSearchOptions = {
+  path?: string;
+  filePattern?: string;
+  limit?: number;
+  caseSensitive?: boolean;
+  contextLines?: number;
+};
+
 export type { CodeSearchResult, FileTreeNode };

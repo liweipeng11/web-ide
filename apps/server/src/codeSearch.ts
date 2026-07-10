@@ -1,3 +1,3 @@
-// 兼容旧搜索入口，实际实现已迁移到 codeDiscovery/textSearch。
-export { searchWorkspaceCode } from "./codeDiscovery/textSearch.js";
-export type { CodeSearchResult } from "./codeDiscovery/types.js";
+// 兼容旧搜索入口，实际实现已经迁移到 codeDiscovery/textSearch。
+export { searchTextLiteral, searchTextRegex, searchWorkspaceCode } from "./codeDiscovery/textSearch.js";
+export type { CodeSearchResult, TextSearchOptions } from "./codeDiscovery/types.js";

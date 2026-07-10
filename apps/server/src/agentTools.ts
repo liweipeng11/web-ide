@@ -1,5 +1,5 @@
 import { logAi } from "./aiHttp.js";
-import { listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
+import { listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, searchTextRegex, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
@@ -64,6 +64,32 @@ function optionalPositiveInteger(args: Record<string, unknown>, name: string, fa
   }
 
   return value;
+}
+
+function optionalNonNegativeInteger(args: Record<string, unknown>, name: string, fallback: number) {
+  const rawValue = args[name];
+
+  if (rawValue === undefined || rawValue === null || rawValue === "") {
+    return fallback;
+  }
+
+  const value = typeof rawValue === "number" ? rawValue : typeof rawValue === "string" && rawValue.trim() ? Number(rawValue) : NaN;
+
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
+  }
+
+  return value;
+}
+
+function getSearchOptions(args: Record<string, unknown>) {
+  return {
+    path: optionalString(args, "path"),
+    filePattern: optionalString(args, "filePattern"),
+    limit: optionalPositiveInteger(args, "limit", 50),
+    caseSensitive: optionalBoolean(args, "caseSensitive"),
+    contextLines: optionalNonNegativeInteger(args, "contextLines", 0)
+  };
 }
 
 export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
@@ -266,13 +292,35 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
   },
   {
     name: "searchCode",
-    description: "Search the current workspace code with ripgrep and return up to 50 matching lines.",
+    description: "Search the current workspace code by literal text and return matching lines. Supports optional path, filePattern, limit, caseSensitive, and contextLines filters.",
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
           description: "The literal text to search for in the workspace."
+        },
+        path: {
+          type: "string",
+          description: "Optional workspace-relative file or directory path to search within."
+        },
+        filePattern: {
+          type: "string",
+          description: "Optional ripgrep glob such as *.ts or src/**/*.tsx."
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Maximum number of matching lines to return."
+        },
+        caseSensitive: {
+          type: "boolean",
+          description: "Whether literal matching should be case-sensitive. Defaults to false."
+        },
+        contextLines: {
+          type: "integer",
+          minimum: 0,
+          description: "Optional context lines requested from ripgrep. Matching lines remain the primary returned records."
         }
       },
       required: ["query"],
@@ -280,11 +328,16 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
     },
     async execute(args, runtime) {
       const query = requiredString(args, "query");
+      const options = getSearchOptions(args);
       uniquePush(runtime.agentContext.searchQueries, query);
-      const results = (await searchWorkspaceCode(query)).map((result) => ({
+      const results = (await searchWorkspaceCode(query, options)).map((result) => ({
         filePath: result.filePath,
         line: result.line,
-        content: result.content
+        column: result.column,
+        content: result.content,
+        match: result.match,
+        contextBefore: result.contextBefore,
+        contextAfter: result.contextAfter
       }));
 
       for (const result of results) {
@@ -298,6 +351,80 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown }>) : [];
       return {
         query: args.query,
+        path: args.path || "",
+        filePattern: args.filePattern || "",
+        caseSensitive: args.caseSensitive === true,
+        cached,
+        resultCount: results.length,
+        files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10)
+      };
+    }
+  },
+  {
+    name: "searchCodeRegex",
+    description: "Search the current workspace code with a regular expression. Use this for structural or multi-form code patterns, with optional path, filePattern, limit, caseSensitive, and contextLines filters.",
+    parameters: {
+      type: "object",
+      properties: {
+        regex: {
+          type: "string",
+          description: "Regular expression pattern to search for."
+        },
+        path: {
+          type: "string",
+          description: "Optional workspace-relative file or directory path to search within."
+        },
+        filePattern: {
+          type: "string",
+          description: "Optional ripgrep glob such as *.ts or src/**/*.tsx."
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Maximum number of matching lines to return."
+        },
+        caseSensitive: {
+          type: "boolean",
+          description: "Whether regex matching should be case-sensitive. Defaults to false."
+        },
+        contextLines: {
+          type: "integer",
+          minimum: 0,
+          description: "Optional context lines requested from ripgrep. Matching lines remain the primary returned records."
+        }
+      },
+      required: ["regex"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const regex = requiredString(args, "regex");
+      const options = getSearchOptions(args);
+      uniquePush(runtime.agentContext.searchQueries, `regex:${regex}`);
+
+      const results = (await searchTextRegex(regex, options)).map((result) => ({
+        filePath: result.filePath,
+        line: result.line,
+        column: result.column,
+        content: result.content,
+        match: result.match,
+        contextBefore: result.contextBefore,
+        contextAfter: result.contextAfter
+      }));
+
+      for (const result of results) {
+        uniquePush(runtime.agentContext.searchResultFiles, result.filePath);
+        uniquePush(runtime.agentContext.relevantFiles, result.filePath);
+      }
+
+      return results;
+    },
+    summarize(result, cached, args) {
+      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown }>) : [];
+      return {
+        regex: args.regex,
+        path: args.path || "",
+        filePattern: args.filePattern || "",
+        caseSensitive: args.caseSensitive === true,
         cached,
         resultCount: results.length,
         files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10)
@@ -513,7 +640,12 @@ function getCacheKey(toolName: string, args: Record<string, unknown>) {
   if (toolName === "listCodeDefinitionNames") {
     return `${toolName}:${String(args.path || "").trim().toLowerCase()}:${args.includeIgnored === true}:${String(args.limit || "")}`;
   }
-  if (toolName === "searchCode") return `${toolName}:${String(args.query || "").trim().toLowerCase()}`;
+  if (toolName === "searchCode") {
+    return `${toolName}:${String(args.query || "").trim().toLowerCase()}:${String(args.path || "").trim().toLowerCase()}:${String(args.filePattern || "").trim().toLowerCase()}:${args.caseSensitive === true}:${String(args.contextLines || "")}:${String(args.limit || "")}`;
+  }
+  if (toolName === "searchCodeRegex") {
+    return `${toolName}:${String(args.regex || "").trim()}:${String(args.path || "").trim().toLowerCase()}:${String(args.filePattern || "").trim().toLowerCase()}:${args.caseSensitive === true}:${String(args.contextLines || "")}:${String(args.limit || "")}`;
+  }
   if (toolName === "readFile") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}`;
   if (toolName === "readFileChunk") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
   if (toolName === "readFileRange") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
@@ -527,6 +659,10 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
 
   if (toolName === "searchCode") {
     return `Use searchCode to search workspace code with keyword "${String(args.query || "").trim()}".`;
+  }
+
+  if (toolName === "searchCodeRegex") {
+    return `Use searchCodeRegex to search workspace code with regex "${String(args.regex || "").trim()}".`;
   }
 
   if (toolName === "listFiles") {
@@ -584,6 +720,19 @@ function createToolApprovalStep(toolName: string, args: Record<string, unknown>)
       status: "auto_approved",
       targets: query ? [query] : undefined,
       details: { query }
+    });
+  }
+
+  if (toolName === "searchCodeRegex") {
+    const regex = String(args.regex || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "search_code",
+      title: "正则搜索代码库",
+      summary: `准备使用正则模式“${regex || "未提供"}”搜索当前工作区。`,
+      status: "auto_approved",
+      targets: regex ? [regex] : undefined,
+      details: { regex, path: args.path, filePattern: args.filePattern }
     });
   }
 

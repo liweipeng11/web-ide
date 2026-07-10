@@ -33,8 +33,8 @@ function getStringArg(args: Record<string, unknown>, name: string) {
 
 function getActionType(toolName: string): ApprovalActionType {
   if (toolName === "inspectProject") return "inspect_project";
-  if (toolName === "searchCode" || toolName === "listFiles" || toolName === "searchFilesByName" || toolName === "listCodeDefinitionNames") return "search_code";
-  if (toolName === "readFile" || toolName === "readFileRange") return "read_file";
+  if (toolName === "searchCode" || toolName === "searchCodeRegex" || toolName === "listFiles" || toolName === "searchFilesByName" || toolName === "listCodeDefinitionNames") return "search_code";
+  if (toolName === "readFile" || toolName === "readFileChunk" || toolName === "readFileRange") return "read_file";
   if (toolName === "runCommand") return "run_command";
   if (toolName === "proposePatch") return "edit_files";
   if (toolName === "applyPatch") return "apply_patch";
@@ -46,6 +46,7 @@ function getActionType(toolName: string): ApprovalActionType {
 
 function getTargets(toolName: string, args: Record<string, unknown>) {
   if (toolName === "searchCode" || toolName === "searchFilesByName") return getStringArg(args, "query") ? [getStringArg(args, "query")] : undefined;
+  if (toolName === "searchCodeRegex") return getStringArg(args, "regex") ? [getStringArg(args, "regex")] : undefined;
   if (toolName === "listFiles" || toolName === "listCodeDefinitionNames") return getStringArg(args, "path") ? [getStringArg(args, "path")] : undefined;
   if (toolName === "runCommand") return getStringArg(args, "command") ? [getStringArg(args, "command")] : undefined;
   if (toolName === "applyPatch") return getStringArg(args, "filePath") ? [getStringArg(args, "filePath")] : getStringArg(args, "patchId") ? [getStringArg(args, "patchId")] : undefined;
@@ -61,7 +62,9 @@ function isReadonlyTool(toolName: string) {
     toolName === "searchFilesByName" ||
     toolName === "listCodeDefinitionNames" ||
     toolName === "searchCode" ||
+    toolName === "searchCodeRegex" ||
     toolName === "readFile" ||
+    toolName === "readFileChunk" ||
     toolName === "readFileRange"
   );
 }
@@ -94,6 +97,7 @@ function getRiskLevel(toolName: string, args: Record<string, unknown>): Approval
 function getApprovalTitle(toolName: string) {
   if (toolName === "inspectProject") return "检查项目结构";
   if (toolName === "searchCode") return "搜索代码库";
+  if (toolName === "searchCodeRegex") return "正则搜索代码库";
   if (toolName === "listCodeDefinitionNames") return "提取代码定义";
   if (toolName === "readFile") return "读取文件";
   if (toolName === "readFileRange") return "读取文件片段";
@@ -108,6 +112,7 @@ function getApprovalTitle(toolName: string) {
 function getApprovalSummary(toolName: string, args: Record<string, unknown>) {
   if (toolName === "inspectProject") return "读取 package 信息、依赖和框架线索，用于选择合适的实现方式。";
   if (toolName === "searchCode") return `准备使用关键词“${getStringArg(args, "query") || "未提供"}”搜索当前工作区。`;
+  if (toolName === "searchCodeRegex") return `准备使用正则模式“${getStringArg(args, "regex") || "未提供"}”搜索当前工作区。`;
   if (toolName === "listCodeDefinitionNames") return `准备提取“${getStringArg(args, "path") || "工作区"}”中的顶级代码定义摘要。`;
   if (toolName === "readFile") return `准备读取文件“${getStringArg(args, "filePath") || "未提供"}”作为上下文。`;
   if (toolName === "readFileRange") return `准备读取文件“${getStringArg(args, "filePath") || "未提供"}”的指定行范围。`;

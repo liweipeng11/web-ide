@@ -130,6 +130,48 @@ test("searchFilesByName finds workspace paths without reading files", async () =
   assert.deepEqual(agentContext.searchResultFiles, ["src/views/SettingsPage.tsx"]);
 });
 
+test("searchCodeRegex searches code patterns and records relevant files", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "api.ts"), ["export function getUserList() {}", "export function updateUser() {}"].join("\n"), "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "src", "notes.md"), "getUserList\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const agentContext = createAgentContext();
+  const response = await executeAgentToolCall(
+    createToolCall("searchCodeRegex", { regex: "get(User|Order)List", path: "src", filePattern: "*.ts" }),
+    createAgentToolRuntime({ agentContext, runId: "test-search-code-regex" })
+  );
+  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+
+  assert.equal(data.length, 1);
+  assert.equal(data[0].filePath, "src/api.ts");
+  assert.equal(data[0].line, 1);
+  assert.equal(data[0].match, "getUserList");
+  assert.deepEqual(agentContext.searchQueries, ["regex:get(User|Order)List"]);
+  assert.deepEqual(agentContext.searchResultFiles, ["src/api.ts"]);
+  assert.deepEqual(agentContext.relevantFiles, ["src/api.ts"]);
+});
+
+test("searchCode accepts filePattern filters while preserving literal search behavior", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "api.ts"), "literalMarker\n", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "src", "api.md"), "literalMarker\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const response = await executeAgentToolCall(
+    createToolCall("searchCode", { query: "literalMarker", path: "src", filePattern: "*.ts" }),
+    createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-search-code-options" })
+  );
+  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+
+  assert.deepEqual(
+    data.map((entry) => entry.filePath),
+    ["src/api.ts"]
+  );
+});
+
 test("listFiles lists only the requested directory level by default", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.mkdir(path.join(workspaceRoot, "src", "nested"), { recursive: true });

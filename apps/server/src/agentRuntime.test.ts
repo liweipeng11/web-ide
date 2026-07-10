@@ -687,7 +687,7 @@ test("plan mode exposes only readonly tools to the model", async () => {
 
   const toolNames = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   assert.equal(result.status, "completed");
-  assert.deepEqual(toolNames.sort(), ["inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "searchCode", "searchFilesByName"].sort());
+  assert.deepEqual(toolNames.sort(), ["inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "searchCode", "searchCodeRegex", "searchFilesByName"].sort());
 });
 
 test("act mode exposes edit, patch, and command tools to the model", async () => {

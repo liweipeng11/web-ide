@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { HttpError } from "../errors.js";
 import { setWorkspaceRoot } from "../workspaceStore.js";
-import { listCodeDefinitionNames, listFiles, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, safeResolve, searchWorkspaceCode, searchWorkspaceFilesByName } from "./index.js";
+import { listCodeDefinitionNames, listFiles, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, safeResolve, searchTextRegex, searchWorkspaceCode, searchWorkspaceFilesByName } from "./index.js";
 
 function flattenTreePaths(nodes: Awaited<ReturnType<typeof listFiles>>) {
   const paths: string[] = [];
@@ -133,6 +133,59 @@ test("searchWorkspaceCode keeps literal search result shape", async () => {
     assert.equal(results[0].line, 1);
     assert.equal(results[0].match, "phaseOneMarker");
     assert.match(results[0].content, /phaseOneMarker/);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("searchWorkspaceCode supports path, filePattern, limit, and case sensitivity options", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-code-discovery-"));
+
+  try {
+    await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+    await fs.mkdir(path.join(workspaceRoot, "docs"), { recursive: true });
+    await fs.writeFile(path.join(workspaceRoot, "src", "feature.ts"), ["before", "SearchMarker", "after", "searchmarker"].join("\n"), "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "src", "feature.md"), "SearchMarker\n", "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "docs", "feature.ts"), "SearchMarker\n", "utf8");
+    await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+    const results = await searchWorkspaceCode("SearchMarker", {
+      path: "src",
+      filePattern: "*.ts",
+      limit: 1,
+      caseSensitive: true,
+      contextLines: 1
+    });
+
+    assert.equal(results.length, 1);
+    assert.equal(results[0].filePath, "src/feature.ts");
+    assert.equal(results[0].line, 2);
+    assert.equal(results[0].match, "SearchMarker");
+    assert.deepEqual(results[0].contextBefore, [{ line: 1, content: "before" }]);
+    assert.deepEqual(results[0].contextAfter, [{ line: 3, content: "after" }]);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("searchTextRegex finds regex matches and reports invalid patterns clearly", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-code-discovery-"));
+
+  try {
+    await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+    await fs.writeFile(path.join(workspaceRoot, "src", "service.ts"), ["export function loadUsers() {}", "export const loadOrders = () => {};"].join("\n"), "utf8");
+    await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+    const results = await searchTextRegex("load(Users|Orders)", { path: "src", filePattern: "*.ts", limit: 10 });
+
+    assert.deepEqual(
+      results.map((result) => [result.filePath, result.line, result.match]),
+      [
+        ["src/service.ts", 1, "loadUsers"],
+        ["src/service.ts", 2, "loadOrders"]
+      ]
+    );
+    assert.throws(() => searchTextRegex("("), HttpError);
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }
