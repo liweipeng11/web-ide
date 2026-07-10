@@ -33,7 +33,7 @@ function getStringArg(args: Record<string, unknown>, name: string) {
 
 function getActionType(toolName: string): ApprovalActionType {
   if (toolName === "inspectProject") return "inspect_project";
-  if (toolName === "searchCode") return "search_code";
+  if (toolName === "searchCode" || toolName === "listFiles" || toolName === "searchFilesByName") return "search_code";
   if (toolName === "readFile" || toolName === "readFileRange") return "read_file";
   if (toolName === "runCommand") return "run_command";
   if (toolName === "proposePatch") return "edit_files";
@@ -45,7 +45,8 @@ function getActionType(toolName: string): ApprovalActionType {
 }
 
 function getTargets(toolName: string, args: Record<string, unknown>) {
-  if (toolName === "searchCode") return getStringArg(args, "query") ? [getStringArg(args, "query")] : undefined;
+  if (toolName === "searchCode" || toolName === "searchFilesByName") return getStringArg(args, "query") ? [getStringArg(args, "query")] : undefined;
+  if (toolName === "listFiles") return getStringArg(args, "path") ? [getStringArg(args, "path")] : undefined;
   if (toolName === "runCommand") return getStringArg(args, "command") ? [getStringArg(args, "command")] : undefined;
   if (toolName === "applyPatch") return getStringArg(args, "filePath") ? [getStringArg(args, "filePath")] : getStringArg(args, "patchId") ? [getStringArg(args, "patchId")] : undefined;
 
@@ -54,7 +55,7 @@ function getTargets(toolName: string, args: Record<string, unknown>) {
 }
 
 function isReadonlyTool(toolName: string) {
-  return toolName === "inspectProject" || toolName === "searchCode" || toolName === "readFile" || toolName === "readFileRange";
+  return toolName === "inspectProject" || toolName === "listFiles" || toolName === "searchFilesByName" || toolName === "searchCode" || toolName === "readFile" || toolName === "readFileRange";
 }
 
 function isAutoApprovedTool(toolName: string) {

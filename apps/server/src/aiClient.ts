@@ -1316,7 +1316,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
   }
 
   for (let step = 0; step < MAX_FILE_CHAT_TOOL_STEPS; step += 1) {
-    const forceInitialSearch = step === 0 && !agentContext.searchResultFiles.length;
+    const forceInitialSearch = false;
     logAi(runId, "completion.request", { step, messageCount: toolMessages.length, tools: true, forceInitialSearch });
     const completionBody = {
       model: config.aiModel,
@@ -1428,7 +1428,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
           fallbackSearch,
           automaticContextFiles,
           instruction:
-            "The required first searchCode call did not find matching files. If automaticContextFiles is non-empty, use those files as editable context and return a non-empty patches array. Prefer edits search/replace blocks for existing-file changes; use full oldContent/newContent only for true full-file rewrites. If it is empty, use fallbackSearch results and call readFile for relevant files before returning the final edit."
+            "The initial discovery step did not find matching files. If automaticContextFiles is non-empty, use those files as context and return a non-empty patches array. Prefer edits search/replace blocks for existing-file changes; use full oldContent/newContent only for true full-file rewrites. If it is empty, use fallbackSearch results and call readFile for relevant files before returning the final edit."
         })
       });
     }

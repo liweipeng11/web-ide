@@ -71,6 +71,44 @@ test("readFileRange caps very large line ranges", async () => {
   assert.equal(data.truncated, true);
 });
 
+test("searchFilesByName finds workspace paths without reading files", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src", "views"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "views", "SettingsPage.tsx"), "settings\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const agentContext = createAgentContext();
+  const response = await executeAgentToolCall(
+    createToolCall("searchFilesByName", { query: "SettingsPage" }),
+    createAgentToolRuntime({ agentContext, runId: "test-search-files-by-name" })
+  );
+  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+
+  assert.equal(data[0].path, "src/views/SettingsPage.tsx");
+  assert.equal(data[0].matchedBy, "name");
+  assert.deepEqual(agentContext.filesRead, []);
+  assert.deepEqual(agentContext.searchResultFiles, ["src/views/SettingsPage.tsx"]);
+});
+
+test("listFiles lists only the requested directory level by default", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src", "nested"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "entry.ts"), "entry\n", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "src", "nested", "child.ts"), "child\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const response = await executeAgentToolCall(
+    createToolCall("listFiles", { path: "src" }),
+    createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-list-files" })
+  );
+  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+
+  assert.deepEqual(
+    data.map((entry) => entry.path),
+    ["src/nested", "src/entry.ts"]
+  );
+});
+
 test("read tools emit activity steps without an approval card", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "hello\n", "utf8");

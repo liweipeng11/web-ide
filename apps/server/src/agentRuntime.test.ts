@@ -687,7 +687,7 @@ test("plan mode exposes only readonly tools to the model", async () => {
 
   const toolNames = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   assert.equal(result.status, "completed");
-  assert.deepEqual(toolNames.sort(), ["inspectProject", "readFile", "readFileRange", "searchCode"].sort());
+  assert.deepEqual(toolNames.sort(), ["inspectProject", "listFiles", "readFile", "readFileRange", "searchCode", "searchFilesByName"].sort());
 });
 
 test("act mode exposes edit, patch, and command tools to the model", async () => {
@@ -712,19 +712,20 @@ test("act mode exposes edit, patch, and command tools to the model", async () =>
   assert.equal(toolNames.includes("proposePatch"), true);
   assert.equal(toolNames.includes("applyPatch"), true);
   assert.equal(toolNames.includes("runCommand"), true);
-  // 直接编辑工具排在旧 patch 工具前面，引导模型优先走工具式编辑链路。
-  assert.ok(toolNames.indexOf("replaceInFile") < toolNames.indexOf("proposePatch"));
-  assert.ok(toolNames.indexOf("writeFile") < toolNames.indexOf("proposePatch"));
+  // patch 工具排在直接编辑工具前面，引导常规修改先进入 diff 审核。
+  assert.ok(toolNames.indexOf("proposePatch") < toolNames.indexOf("replaceInFile"));
+  assert.ok(toolNames.indexOf("applyPatch") < toolNames.indexOf("writeFile"));
 });
 
-test("act prompt 优先引导工具式文件编辑", () => {
-  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /use replaceInFile as the default editing path/i);
-  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /Use writeFile only when creating a new file/i);
+test("act prompt 优先引导生成可审查 patch", () => {
+  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /use proposePatch as the default path/i);
+  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /inspect the diff before applying changes/i);
+  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /Use replaceInFile only when the user explicitly asks for direct edits/i);
   assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /treat finalContent from the tool result as the latest source of truth/i);
-  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /Use proposePatch only when the user explicitly asks/i);
+  assert.match(AI_AGENT_ACT_SYSTEM_PROMPT, /Use proposePatch for reviewable code changes before files are written/i);
 });
 
-test("agent runtime budget warning keeps direct edit tools as the preferred path", async () => {
+test("agent runtime budget warning keeps patch review as the preferred path", async () => {
   const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
   const requests: Record<string, unknown>[] = [];
   let callCount = 0;
@@ -766,12 +767,12 @@ test("agent runtime budget warning keeps direct edit tools as the preferred path
 
   const warningMessages = requests.flatMap((request) => (request.messages as Array<{ content?: string }> | undefined) || []).filter((message) => message.content?.includes("near the tool-call limit"));
   assert.equal(result.status, "completed");
-  assert.equal(warningMessages.some((message) => message.content?.includes("replaceInFile")), true);
-  assert.equal(warningMessages.some((message) => message.content?.includes("writeFile")), true);
-  assert.equal(warningMessages.some((message) => message.content?.includes("proposePatch only when")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("use proposePatch")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("reviewable pending patch")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("replaceInFile/writeFile only")), true);
 });
 
-test("agent runtime repeated-tool warning asks the model to move to direct edit tools", async () => {
+test("agent runtime repeated-tool warning asks the model to move to patch review", async () => {
   const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
   const requests: Record<string, unknown>[] = [];
   let callCount = 0;
@@ -812,6 +813,6 @@ test("agent runtime repeated-tool warning asks the model to move to direct edit 
 
   const warningMessages = requests.flatMap((request) => (request.messages as Array<{ content?: string }> | undefined) || []).filter((message) => message.content?.includes("repeated these tool calls"));
   assert.equal(result.status, "completed");
-  assert.equal(warningMessages.some((message) => message.content?.includes("replaceInFile/writeFile")), true);
-  assert.equal(warningMessages.some((message) => message.content?.includes("proposePatch only when")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("move to proposePatch")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("direct-edit fallback")), true);
 });

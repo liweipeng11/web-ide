@@ -1,5 +1,5 @@
 import { logAi } from "./aiHttp.js";
-import { readWorkspaceFile, readWorkspaceFileRange, searchWorkspaceCode } from "./codeDiscovery/index.js";
+import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceFileRange, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
@@ -31,6 +31,32 @@ function requiredString(args: Record<string, unknown>, name: string) {
 
 function requiredPositiveInteger(args: Record<string, unknown>, name: string) {
   const rawValue = args[name];
+  const value = typeof rawValue === "number" ? rawValue : typeof rawValue === "string" && rawValue.trim() ? Number(rawValue) : NaN;
+
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+
+  return value;
+}
+
+function optionalString(args: Record<string, unknown>, name: string, fallback = "") {
+  const value = typeof args[name] === "string" ? args[name].trim() : "";
+  return value || fallback;
+}
+
+function optionalBoolean(args: Record<string, unknown>, name: string, fallback = false) {
+  const value = args[name];
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function optionalPositiveInteger(args: Record<string, unknown>, name: string, fallback: number) {
+  const rawValue = args[name];
+
+  if (rawValue === undefined || rawValue === null || rawValue === "") {
+    return fallback;
+  }
+
   const value = typeof rawValue === "number" ? rawValue : typeof rawValue === "string" && rawValue.trim() ? Number(rawValue) : NaN;
 
   if (!Number.isInteger(value) || value < 1) {
@@ -77,6 +103,113 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         frameworkHints: value.frameworkHints,
         dependencies: dependencies.slice(0, 20),
         devDependencies: devDependencies.slice(0, 20)
+      };
+    }
+  },
+  {
+    name: "listFiles",
+    description: "List files and directories under a workspace-relative path without reading file contents. Use this for low-cost directory discovery.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Workspace-relative directory path to list. Defaults to the workspace root."
+        },
+        recursive: {
+          type: "boolean",
+          description: "Whether to include descendants. Defaults to false."
+        },
+        includeIgnored: {
+          type: "boolean",
+          description: "Whether to include ignored generated/runtime directories. Defaults to false."
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Maximum number of entries to return. The server caps very large values."
+        }
+      },
+      additionalProperties: false
+    },
+    async execute(args) {
+      const dir = optionalString(args, "path");
+      const recursive = optionalBoolean(args, "recursive");
+      const includeIgnored = optionalBoolean(args, "includeIgnored");
+      const limit = optionalPositiveInteger(args, "limit", 200);
+
+      return listWorkspaceFiles(dir, { recursive, allowIgnored: includeIgnored, limit });
+    },
+    summarize(result, cached, args) {
+      const results = Array.isArray(result) ? (result as Array<{ path?: unknown; type?: unknown }>) : [];
+      return {
+        path: args.path || "",
+        recursive: args.recursive === true,
+        cached,
+        resultCount: results.length,
+        directories: results.filter((item) => item.type === "directory").length,
+        files: results.filter((item) => item.type === "file").length,
+        samplePaths: results.map((item) => (typeof item.path === "string" ? item.path : "")).filter(Boolean).slice(0, 10)
+      };
+    }
+  },
+  {
+    name: "searchFilesByName",
+    description: "Search workspace paths by file name, extension, or directory fragment without reading file contents.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "File name, extension, or path fragment to search for."
+        },
+        path: {
+          type: "string",
+          description: "Optional workspace-relative directory to search within."
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Maximum number of matching paths to return."
+        },
+        includeIgnored: {
+          type: "boolean",
+          description: "Whether to include ignored generated/runtime directories. Defaults to false."
+        }
+      },
+      required: ["query"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const query = requiredString(args, "query");
+      const dir = optionalString(args, "path");
+      const limit = optionalPositiveInteger(args, "limit", 50);
+      const includeIgnored = optionalBoolean(args, "includeIgnored");
+      uniquePush(runtime.agentContext.searchQueries, `file:${query}`);
+
+      const results = await searchWorkspaceFilesByName(query, dir, limit, { allowIgnored: includeIgnored });
+
+      for (const result of results) {
+        uniquePush(runtime.agentContext.searchResultFiles, result.path);
+        uniquePush(runtime.agentContext.relevantFiles, result.path);
+      }
+
+      return results;
+    },
+    summarize(result, cached, args) {
+      const results = Array.isArray(result) ? (result as Array<{ path?: unknown; matchedBy?: unknown }>) : [];
+      return {
+        query: args.query,
+        path: args.path || "",
+        cached,
+        resultCount: results.length,
+        matches: results
+          .map((item) => ({
+            path: typeof item.path === "string" ? item.path : "",
+            matchedBy: item.matchedBy
+          }))
+          .filter((item) => item.path)
+          .slice(0, 10)
       };
     }
   },
@@ -243,6 +376,12 @@ function parseArguments(rawArguments: string) {
 
 function getCacheKey(toolName: string, args: Record<string, unknown>) {
   if (toolName === "inspectProject") return toolName;
+  if (toolName === "listFiles") {
+    return `${toolName}:${String(args.path || "").trim().toLowerCase()}:${args.recursive === true}:${args.includeIgnored === true}:${String(args.limit || "")}`;
+  }
+  if (toolName === "searchFilesByName") {
+    return `${toolName}:${String(args.query || "").trim().toLowerCase()}:${String(args.path || "").trim().toLowerCase()}:${args.includeIgnored === true}:${String(args.limit || "")}`;
+  }
   if (toolName === "searchCode") return `${toolName}:${String(args.query || "").trim().toLowerCase()}`;
   if (toolName === "readFile") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}`;
   if (toolName === "readFileRange") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
@@ -256,6 +395,14 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
 
   if (toolName === "searchCode") {
     return `Use searchCode to search workspace code with keyword "${String(args.query || "").trim()}".`;
+  }
+
+  if (toolName === "listFiles") {
+    return `Use listFiles to inspect workspace directory "${String(args.path || "").trim() || "."}" without reading file contents.`;
+  }
+
+  if (toolName === "searchFilesByName") {
+    return `Use searchFilesByName to find workspace paths matching "${String(args.query || "").trim()}".`;
   }
 
   if (toolName === "readFile") {
@@ -297,6 +444,35 @@ function createToolApprovalStep(toolName: string, args: Record<string, unknown>)
       status: "auto_approved",
       targets: query ? [query] : undefined,
       details: { query }
+    });
+  }
+
+  if (toolName === "listFiles") {
+    const dir = String(args.path || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "search_code",
+      title: "列出文件",
+      summary: `准备列出${dir || "工作区根目录"}下的文件和目录。`,
+      status: "auto_approved",
+      targets: dir ? [dir] : undefined,
+      details: {
+        path: dir,
+        recursive: args.recursive === true
+      }
+    });
+  }
+
+  if (toolName === "searchFilesByName") {
+    const query = String(args.query || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "search_code",
+      title: "搜索文件名",
+      summary: `准备按文件名或路径片段“${query || "未提供"}”搜索当前工作区。`,
+      status: "auto_approved",
+      targets: query ? [query] : undefined,
+      details: { query, path: args.path }
     });
   }
 

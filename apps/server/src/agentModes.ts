@@ -18,9 +18,9 @@ export type AgentModeConfig = {
 
 const actToolDefinitions: AgentToolDefinition[] = [
   ...readonlyAgentToolDefinitions,
-  // Act 模式优先暴露直接编辑工具，同时保留旧 patch 工具作为明确待审补丁或兜底链路。
-  ...fileEditToolDefinitions,
+  // Act 模式优先暴露 patch 工具，让常规修改先进入 diff 审核；直接编辑工具保留为兜底能力。
   ...patchAgentToolDefinitions,
+  ...fileEditToolDefinitions,
   ...commandAgentToolDefinitions
 ];
 
