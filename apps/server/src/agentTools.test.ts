@@ -71,6 +71,46 @@ test("readFileRange caps very large line ranges", async () => {
   assert.equal(data.truncated, true);
 });
 
+test("readFile returns the first chunk instead of the entire long file", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  const content = Array.from({ length: 205 }, (_item, index) => `line ${index + 1}`).join("\n");
+  await fs.writeFile(path.join(workspaceRoot, "large.txt"), content, "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const response = await executeAgentToolCall(
+    createToolCall("readFile", { filePath: "large.txt" }),
+    createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-read-file-first-chunk" })
+  );
+  const data = JSON.parse(response.content) as Record<string, unknown>;
+
+  assert.equal(data.startLine, 1);
+  assert.equal(data.endLine, 200);
+  assert.equal(data.linesRead, 200);
+  assert.equal(data.totalLines, 205);
+  assert.equal(data.hasMoreAfter, true);
+  assert.equal(data.nextStartLine, 201);
+  assert.equal((data.content as string).split("\n").at(-1), "line 200");
+});
+
+test("readFileChunk reads follow-up chunks with continuation metadata", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  const content = Array.from({ length: 5 }, (_item, index) => `line ${index + 1}`).join("\n");
+  await fs.writeFile(path.join(workspaceRoot, "sample.txt"), content, "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const response = await executeAgentToolCall(
+    createToolCall("readFileChunk", { filePath: "sample.txt", startLine: 3, endLine: 5 }),
+    createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-read-file-chunk" })
+  );
+  const data = JSON.parse(response.content) as Record<string, unknown>;
+
+  assert.equal(data.content, "line 3\nline 4\nline 5");
+  assert.equal(data.startLine, 3);
+  assert.equal(data.endLine, 5);
+  assert.equal(data.hasMoreBefore, true);
+  assert.equal(data.hasMoreAfter, false);
+});
+
 test("searchFilesByName finds workspace paths without reading files", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.mkdir(path.join(workspaceRoot, "src", "views"), { recursive: true });

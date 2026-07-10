@@ -16,6 +16,11 @@ export type WorkspaceFileRange = {
   hasMoreAfter: boolean;
 };
 
+// 标准分块读取结果，帮助 Agent 判断是否需要继续读取前后文。
+export type WorkspaceFileChunk = WorkspaceFileRange & {
+  nextStartLine?: number;
+};
+
 // 文件发现条目只描述路径结构，不读取文件内容，供 Agent 低成本缩小候选范围。
 export type FileDiscoveryEntry = {
   name: string;

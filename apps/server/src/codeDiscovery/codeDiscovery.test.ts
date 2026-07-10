@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { HttpError } from "../errors.js";
 import { setWorkspaceRoot } from "../workspaceStore.js";
-import { listCodeDefinitionNames, listFiles, listWorkspaceFiles, readWorkspaceFileRange, safeResolve, searchWorkspaceCode, searchWorkspaceFilesByName } from "./index.js";
+import { listCodeDefinitionNames, listFiles, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, safeResolve, searchWorkspaceCode, searchWorkspaceFilesByName } from "./index.js";
 
 function flattenTreePaths(nodes: Awaited<ReturnType<typeof listFiles>>) {
   const paths: string[] = [];
@@ -68,6 +68,51 @@ test("readWorkspaceFileRange returns bounded range metadata", async () => {
     assert.equal(range.totalLines, 3);
     assert.equal(range.hasMoreBefore, true);
     assert.equal(range.hasMoreAfter, false);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("readWorkspaceFileChunk returns the default first chunk with continuation metadata", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-code-discovery-"));
+
+  try {
+    const content = Array.from({ length: 205 }, (_item, index) => `line ${index + 1}`).join("\n");
+    await fs.writeFile(path.join(workspaceRoot, "large.ts"), content, "utf8");
+    await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+    const chunk = await readWorkspaceFileChunk("large.ts");
+
+    assert.equal(chunk.startLine, 1);
+    assert.equal(chunk.endLine, 200);
+    assert.equal(chunk.linesRead, 200);
+    assert.equal(chunk.totalLines, 205);
+    assert.equal(chunk.hasMoreBefore, false);
+    assert.equal(chunk.hasMoreAfter, true);
+    assert.equal(chunk.nextStartLine, 201);
+    assert.equal(chunk.content.split("\n").at(0), "line 1");
+    assert.equal(chunk.content.split("\n").at(-1), "line 200");
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("readWorkspaceFileChunk can continue without skipped or duplicated lines", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-code-discovery-"));
+
+  try {
+    const content = Array.from({ length: 6 }, (_item, index) => `line ${index + 1}`).join("\n");
+    await fs.writeFile(path.join(workspaceRoot, "sample.ts"), content, "utf8");
+    await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+    const firstChunk = await readWorkspaceFileChunk("sample.ts", 1, 3);
+    const secondChunk = await readWorkspaceFileChunk("sample.ts", firstChunk.nextStartLine, 6);
+
+    assert.equal(firstChunk.content, "line 1\nline 2\nline 3");
+    assert.equal(firstChunk.nextStartLine, 4);
+    assert.equal(secondChunk.content, "line 4\nline 5\nline 6");
+    assert.equal(secondChunk.hasMoreBefore, true);
+    assert.equal(secondChunk.hasMoreAfter, false);
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }

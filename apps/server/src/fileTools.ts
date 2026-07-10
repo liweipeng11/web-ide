@@ -6,9 +6,10 @@ export {
   listFiles,
   readWorkspaceFile,
   readWorkspaceFileBuffer,
+  readWorkspaceFileChunk,
   readWorkspaceFileForDiff,
   readWorkspaceFileRange,
   workspacePathExists,
   writeWorkspaceFile
 } from "./codeDiscovery/readFile.js";
-export type { ResolveOptions, WorkspaceFileRange } from "./codeDiscovery/types.js";
+export type { ResolveOptions, WorkspaceFileChunk, WorkspaceFileRange } from "./codeDiscovery/types.js";

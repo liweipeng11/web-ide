@@ -1,5 +1,5 @@
 import { logAi } from "./aiHttp.js";
-import { listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFile, readWorkspaceFileRange, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
+import { listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
@@ -11,8 +11,8 @@ export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } 
 // 中等复杂度任务经常需要同时比对多个入口、路由和组件文件，5 个文件的上限过于激进，
 // 容易在真正进入修改/审批前就提前失败。
 const MAX_AUTO_READ_FILES = 8;
-const MAX_READ_FILE_LINES = 240;
 const MAX_READ_FILE_CHARS = 20_000;
+const DEFAULT_READ_CHUNK_LINES = 200;
 const MAX_READ_RANGE_LINES = 240;
 
 function uniquePush(values: string[], value: string) {
@@ -64,19 +64,6 @@ function optionalPositiveInteger(args: Record<string, unknown>, name: string, fa
   }
 
   return value;
-}
-
-function truncateFileForPrompt(content: string) {
-  const lines = content.split(/\r?\n/);
-  const byLines = lines.slice(0, MAX_READ_FILE_LINES).join("\n");
-  const truncatedContent = byLines.length > MAX_READ_FILE_CHARS ? byLines.slice(0, MAX_READ_FILE_CHARS) : byLines;
-
-  return {
-    content: truncatedContent,
-    truncated: lines.length > MAX_READ_FILE_LINES || byLines.length > MAX_READ_FILE_CHARS || content.length > truncatedContent.length,
-    linesRead: Math.min(lines.length, MAX_READ_FILE_LINES),
-    totalLines: lines.length
-  };
 }
 
 export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
@@ -319,7 +306,7 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
   },
   {
     name: "readFile",
-    description: "Read a relevant file from the current workspace. The path must be relative to the workspace. At most 8 files can be read automatically.",
+    description: "Read the first standard chunk of a relevant workspace file. Use readFileChunk to continue with later chunks when hasMoreAfter is true.",
     parameters: {
       type: "object",
       properties: {
@@ -338,20 +325,97 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         throw new Error(`Automatic file read limit reached. You may read at most ${MAX_AUTO_READ_FILES} files.`);
       }
 
-      const content = await readWorkspaceFile(filePath);
-      const truncated = truncateFileForPrompt(content);
+      const chunk = await readWorkspaceFileChunk(filePath, 1, DEFAULT_READ_CHUNK_LINES);
+      const charTruncated = chunk.content.length > MAX_READ_FILE_CHARS;
       uniquePush(runtime.agentContext.filesRead, filePath);
       uniquePush(runtime.agentContext.relevantFiles, filePath);
 
-      return { filePath, ...truncated };
+      return {
+        filePath,
+        ...chunk,
+        content: charTruncated ? chunk.content.slice(0, MAX_READ_FILE_CHARS) : chunk.content,
+        truncated: charTruncated
+      };
     },
     summarize(result, cached) {
       const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
       return {
         filePath: value.filePath,
         cached,
+        startLine: value.startLine,
+        endLine: value.endLine,
         linesRead: value.linesRead,
         totalLines: value.totalLines,
+        hasMoreAfter: value.hasMoreAfter,
+        nextStartLine: value.nextStartLine,
+        truncated: value.truncated
+      };
+    }
+  },
+  {
+    name: "readFileChunk",
+    description: "Read a specific 1-based line chunk from a workspace file and return continuation metadata. Prefer this for long files or follow-up context.",
+    parameters: {
+      type: "object",
+      properties: {
+        filePath: {
+          type: "string",
+          description: "Workspace-relative file path to read."
+        },
+        startLine: {
+          type: "integer",
+          minimum: 1,
+          description: "1-based first line to read. Defaults to 1."
+        },
+        endLine: {
+          type: "integer",
+          minimum: 1,
+          description: "1-based last line to read, inclusive. Defaults to a 200-line chunk from startLine."
+        }
+      },
+      required: ["filePath"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const filePath = requiredString(args, "filePath");
+      const startLine = optionalPositiveInteger(args, "startLine", 1);
+      const requestedEndLine = args.endLine === undefined || args.endLine === null || args.endLine === "" ? startLine + DEFAULT_READ_CHUNK_LINES - 1 : requiredPositiveInteger(args, "endLine");
+      const endLine = Math.min(requestedEndLine, startLine + MAX_READ_RANGE_LINES - 1);
+
+      if (requestedEndLine < startLine) {
+        throw new Error("endLine must be greater than or equal to startLine");
+      }
+
+      if (!runtime.agentContext.filesRead.includes(filePath) && runtime.agentContext.filesRead.length >= MAX_AUTO_READ_FILES) {
+        throw new Error(`Automatic file read limit reached. You may read at most ${MAX_AUTO_READ_FILES} files.`);
+      }
+
+      const chunk = await readWorkspaceFileChunk(filePath, startLine, endLine);
+      const charTruncated = chunk.content.length > MAX_READ_FILE_CHARS;
+      uniquePush(runtime.agentContext.filesRead, filePath);
+      uniquePush(runtime.agentContext.relevantFiles, filePath);
+
+      return {
+        filePath,
+        ...chunk,
+        content: charTruncated ? chunk.content.slice(0, MAX_READ_FILE_CHARS) : chunk.content,
+        requestedStartLine: startLine,
+        requestedEndLine,
+        truncated: charTruncated || requestedEndLine > endLine
+      };
+    },
+    summarize(result, cached) {
+      const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+      return {
+        filePath: value.filePath,
+        cached,
+        startLine: value.startLine,
+        endLine: value.endLine,
+        linesRead: value.linesRead,
+        totalLines: value.totalLines,
+        hasMoreBefore: value.hasMoreBefore,
+        hasMoreAfter: value.hasMoreAfter,
+        nextStartLine: value.nextStartLine,
         truncated: value.truncated
       };
     }
@@ -451,6 +515,7 @@ function getCacheKey(toolName: string, args: Record<string, unknown>) {
   }
   if (toolName === "searchCode") return `${toolName}:${String(args.query || "").trim().toLowerCase()}`;
   if (toolName === "readFile") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}`;
+  if (toolName === "readFileChunk") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
   if (toolName === "readFileRange") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
   return `${toolName}:${JSON.stringify(args)}`;
 }
@@ -477,7 +542,11 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
   }
 
   if (toolName === "readFile") {
-    return `Use readFile to load workspace file "${String(args.filePath || "").trim()}" as context.`;
+    return `Use readFile to load the first chunk of workspace file "${String(args.filePath || "").trim()}" as context.`;
+  }
+
+  if (toolName === "readFileChunk") {
+    return `Use readFileChunk to load lines ${String(args.startLine || "1")} through ${String(args.endLine || "the default chunk end")} from workspace file "${String(args.filePath || "").trim()}".`;
   }
 
   if (toolName === "readFileRange") {
@@ -566,10 +635,27 @@ function createToolApprovalStep(toolName: string, args: Record<string, unknown>)
     return createApprovalRequestStep({
       actionType: "read_file",
       title: "读取文件",
-      summary: `准备用作上下文读取 ${filePath || "目标文件"}。`,
+      summary: `准备读取 ${filePath || "目标文件"} 的首个上下文分块。`,
       status: "auto_approved",
       targets: filePath ? [filePath] : undefined,
       details: { filePath }
+    });
+  }
+
+  if (toolName === "readFileChunk") {
+    const filePath = String(args.filePath || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "read_file",
+      title: "读取文件分块",
+      summary: `准备读取 ${filePath || "目标文件"} 的指定行分块。`,
+      status: "auto_approved",
+      targets: filePath ? [filePath] : undefined,
+      details: {
+        filePath,
+        startLine: args.startLine,
+        endLine: args.endLine
+      }
     });
   }
 

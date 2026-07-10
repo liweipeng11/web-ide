@@ -1,9 +1,13 @@
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import readline from "node:readline";
 import { TextDecoder } from "node:util";
 import { HttpError } from "../errors.js";
-import type { FileTreeNode, ResolveOptions, WorkspaceFileRange } from "./types.js";
+import type { FileTreeNode, ResolveOptions, WorkspaceFileChunk, WorkspaceFileRange } from "./types.js";
 import { hasIgnoredSegment, safeResolve, toWorkspaceRelative } from "./pathPolicy.js";
+
+const DEFAULT_CHUNK_LINE_COUNT = 200;
 
 const BINARY_EXTENSIONS = new Set([
   ".7z",
@@ -146,23 +150,51 @@ export async function readWorkspaceFileForDiff(filePath: string, options: Resolv
   };
 }
 
-// 按 1-based 闭区间读取文件片段，为后续 chunk 读取接口保留清晰边界信息。
-export async function readWorkspaceFileRange(filePath: string, startLine: number, endLine: number, options: ResolveOptions = {}): Promise<WorkspaceFileRange> {
+function normalizeChunkRange(startLine = 1, endLine?: number) {
   if (!Number.isInteger(startLine) || startLine < 1) {
     throw new HttpError(400, "startLine must be a positive integer");
   }
 
-  if (!Number.isInteger(endLine) || endLine < startLine) {
+  const normalizedEndLine = endLine ?? startLine + DEFAULT_CHUNK_LINE_COUNT - 1;
+
+  if (!Number.isInteger(normalizedEndLine) || normalizedEndLine < startLine) {
     throw new HttpError(400, "endLine must be an integer greater than or equal to startLine");
   }
 
-  const content = await readWorkspaceFile(filePath, options);
-  const lines = content.split(/\r?\n/);
-  const totalLines = lines.length;
-  const boundedStartLine = Math.min(startLine, totalLines + 1);
-  const boundedEndLine = Math.min(endLine, totalLines);
-  const selectedLines = boundedStartLine <= boundedEndLine ? lines.slice(boundedStartLine - 1, boundedEndLine) : [];
+  return { startLine, endLine: normalizedEndLine };
+}
+
+// 按行流式读取目标区间，避免为了首块上下文把长文件内容整体放入内存和工具结果。
+export async function readWorkspaceFileChunk(filePath: string, startLine = 1, endLine?: number, options: ResolveOptions = {}): Promise<WorkspaceFileChunk> {
+  const range = normalizeChunkRange(startLine, endLine);
+  const absolutePath = safeResolve(filePath, options);
+
+  await assertWorkspaceFile(absolutePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") {
+      throw new HttpError(404, "File not found");
+    }
+    throw error;
+  });
+
+  const selectedLines: string[] = [];
+  let totalLines = 0;
+
+  const reader = readline.createInterface({
+    input: createReadStream(absolutePath, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+
+  for await (const line of reader) {
+    totalLines += 1;
+
+    if (totalLines >= range.startLine && totalLines <= range.endLine) {
+      selectedLines.push(line);
+    }
+  }
+
+  const boundedStartLine = Math.min(range.startLine, totalLines + 1);
   const actualEndLine = selectedLines.length ? boundedStartLine + selectedLines.length - 1 : boundedStartLine - 1;
+  const hasMoreAfter = actualEndLine < totalLines;
 
   return {
     content: selectedLines.join("\n"),
@@ -171,8 +203,14 @@ export async function readWorkspaceFileRange(filePath: string, startLine: number
     linesRead: selectedLines.length,
     totalLines,
     hasMoreBefore: boundedStartLine > 1,
-    hasMoreAfter: actualEndLine < totalLines
+    hasMoreAfter,
+    ...(hasMoreAfter ? { nextStartLine: actualEndLine + 1 } : {})
   };
+}
+
+// 按 1-based 闭区间读取文件片段，为后续 chunk 读取接口保留清晰边界信息。
+export async function readWorkspaceFileRange(filePath: string, startLine: number, endLine: number, options: ResolveOptions = {}): Promise<WorkspaceFileRange> {
+  return readWorkspaceFileChunk(filePath, startLine, endLine, options);
 }
 
 export async function writeWorkspaceFile(filePath: string, content: string) {
