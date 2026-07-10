@@ -1,5 +1,5 @@
 import { logAi } from "./aiHttp.js";
-import { listWorkspaceFiles, readWorkspaceFile, readWorkspaceFileRange, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
+import { listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFile, readWorkspaceFileRange, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
@@ -214,6 +214,70 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
     }
   },
   {
+    name: "listCodeDefinitionNames",
+    description: "List top-level code definitions such as functions, classes, types, and components under a workspace-relative file or directory without returning full file contents.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Workspace-relative file or directory path to inspect. Defaults to the workspace root."
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Maximum number of files with definitions to return."
+        },
+        includeIgnored: {
+          type: "boolean",
+          description: "Whether to include ignored generated/runtime directories. Defaults to false."
+        }
+      },
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const targetPath = optionalString(args, "path");
+      const limit = optionalPositiveInteger(args, "limit", 80);
+      const includeIgnored = optionalBoolean(args, "includeIgnored");
+      uniquePush(runtime.agentContext.searchQueries, `definitions:${targetPath || "."}`);
+
+      const results = await listCodeDefinitionNames(targetPath, limit, { allowIgnored: includeIgnored });
+
+      for (const result of results) {
+        uniquePush(runtime.agentContext.searchResultFiles, result.filePath);
+        uniquePush(runtime.agentContext.relevantFiles, result.filePath);
+      }
+
+      return results;
+    },
+    summarize(result, cached, args) {
+      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown; definitions?: unknown }>) : [];
+      const definitionCount = results.reduce((count, item) => count + (Array.isArray(item.definitions) ? item.definitions.length : 0), 0);
+
+      return {
+        path: args.path || "",
+        cached,
+        fileCount: results.length,
+        definitionCount,
+        files: results
+          .map((item) => ({
+            filePath: typeof item.filePath === "string" ? item.filePath : "",
+            definitions: Array.isArray(item.definitions)
+              ? item.definitions
+                  .map((definition) => {
+                    const value = definition && typeof definition === "object" ? (definition as Record<string, unknown>) : {};
+                    return typeof value.name === "string" ? `${value.kind || "definition"}:${value.name}` : "";
+                  })
+                  .filter(Boolean)
+                  .slice(0, 8)
+              : []
+          }))
+          .filter((item) => item.filePath)
+          .slice(0, 10)
+      };
+    }
+  },
+  {
     name: "searchCode",
     description: "Search the current workspace code with ripgrep and return up to 50 matching lines.",
     parameters: {
@@ -382,6 +446,9 @@ function getCacheKey(toolName: string, args: Record<string, unknown>) {
   if (toolName === "searchFilesByName") {
     return `${toolName}:${String(args.query || "").trim().toLowerCase()}:${String(args.path || "").trim().toLowerCase()}:${args.includeIgnored === true}:${String(args.limit || "")}`;
   }
+  if (toolName === "listCodeDefinitionNames") {
+    return `${toolName}:${String(args.path || "").trim().toLowerCase()}:${args.includeIgnored === true}:${String(args.limit || "")}`;
+  }
   if (toolName === "searchCode") return `${toolName}:${String(args.query || "").trim().toLowerCase()}`;
   if (toolName === "readFile") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}`;
   if (toolName === "readFileRange") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
@@ -403,6 +470,10 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
 
   if (toolName === "searchFilesByName") {
     return `Use searchFilesByName to find workspace paths matching "${String(args.query || "").trim()}".`;
+  }
+
+  if (toolName === "listCodeDefinitionNames") {
+    return `Use listCodeDefinitionNames to inspect top-level definitions under "${String(args.path || "").trim() || "."}" before reading full files.`;
   }
 
   if (toolName === "readFile") {
@@ -473,6 +544,19 @@ function createToolApprovalStep(toolName: string, args: Record<string, unknown>)
       status: "auto_approved",
       targets: query ? [query] : undefined,
       details: { query, path: args.path }
+    });
+  }
+
+  if (toolName === "listCodeDefinitionNames") {
+    const targetPath = String(args.path || "").trim();
+
+    return createApprovalRequestStep({
+      actionType: "search_code",
+      title: "提取代码定义",
+      summary: `准备提取${targetPath || "工作区"}中的顶级代码定义摘要。`,
+      status: "auto_approved",
+      targets: targetPath ? [targetPath] : undefined,
+      details: { path: targetPath }
     });
   }
 

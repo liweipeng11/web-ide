@@ -109,6 +109,37 @@ test("listFiles lists only the requested directory level by default", async () =
   );
 });
 
+test("listCodeDefinitionNames exposes structure summaries without reading full files", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(
+    path.join(workspaceRoot, "src", "feature.ts"),
+    ["export class FeatureService {}", "export function createFeature() {}", "const localState = true;"].join("\n"),
+    "utf8"
+  );
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const agentContext = createAgentContext();
+  const response = await executeAgentToolCall(
+    createToolCall("listCodeDefinitionNames", { path: "src" }),
+    createAgentToolRuntime({ agentContext, runId: "test-list-code-definition-names" })
+  );
+  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+  const definitions = data[0].definitions as Array<Record<string, unknown>>;
+
+  assert.equal(data[0].filePath, "src/feature.ts");
+  assert.deepEqual(
+    definitions.map((definition) => [definition.name, definition.kind, definition.line]),
+    [
+      ["FeatureService", "class", 1],
+      ["createFeature", "function", 2],
+      ["localState", "variable", 3]
+    ]
+  );
+  assert.deepEqual(agentContext.filesRead, []);
+  assert.deepEqual(agentContext.searchResultFiles, ["src/feature.ts"]);
+});
+
 test("read tools emit activity steps without an approval card", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "hello\n", "utf8");

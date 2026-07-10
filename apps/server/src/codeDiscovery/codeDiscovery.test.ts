@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { HttpError } from "../errors.js";
 import { setWorkspaceRoot } from "../workspaceStore.js";
-import { listFiles, listWorkspaceFiles, readWorkspaceFileRange, safeResolve, searchWorkspaceCode, searchWorkspaceFilesByName } from "./index.js";
+import { listCodeDefinitionNames, listFiles, listWorkspaceFiles, readWorkspaceFileRange, safeResolve, searchWorkspaceCode, searchWorkspaceFilesByName } from "./index.js";
 
 function flattenTreePaths(nodes: Awaited<ReturnType<typeof listFiles>>) {
   const paths: string[] = [];
@@ -154,6 +154,90 @@ test("searchWorkspaceFilesByName matches names, extensions, and directory fragme
 
     const pathMatches = await searchWorkspaceFilesByName("src/config");
     assert.equal(pathMatches.some((entry) => entry.path === "src/config/appConfig.ts"), true);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("listCodeDefinitionNames extracts top-level TypeScript and React definitions", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-code-discovery-"));
+
+  try {
+    await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+    await fs.writeFile(
+      path.join(workspaceRoot, "src", "definitions.tsx"),
+      [
+        "export interface UserCardProps {",
+        "  name: string;",
+        "}",
+        "export type UserRole = 'admin' | 'user';",
+        "export class UserService {}",
+        "export function loadUsers() {",
+        "  const localOnly = true;",
+        "  return localOnly;",
+        "}",
+        "export const UserCard = () => null;",
+        "const internalFlag = true;"
+      ].join("\n"),
+      "utf8"
+    );
+    await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+    const results = await listCodeDefinitionNames("src");
+    const summary = results.find((item) => item.filePath === "src/definitions.tsx");
+
+    assert.ok(summary);
+    assert.equal(summary.language, "typescript");
+    assert.deepEqual(
+      summary.definitions.map((definition) => [definition.name, definition.kind, definition.line]),
+      [
+        ["UserCardProps", "interface", 1],
+        ["UserRole", "type", 4],
+        ["UserService", "class", 5],
+        ["loadUsers", "function", 6],
+        ["UserCard", "function", 10],
+        ["internalFlag", "variable", 11]
+      ]
+    );
+    assert.equal(summary.definitions.some((definition) => definition.name === "localOnly"), false);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("listCodeDefinitionNames extracts Vue component summaries and skips ignored directories", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-code-discovery-"));
+
+  try {
+    await fs.mkdir(path.join(workspaceRoot, "src", "views"), { recursive: true });
+    await fs.mkdir(path.join(workspaceRoot, "node_modules", "pkg"), { recursive: true });
+    await fs.writeFile(
+      path.join(workspaceRoot, "src", "views", "UserPage.vue"),
+      [
+        "<template><div /></template>",
+        "<script lang=\"ts\">",
+        "import { defineComponent } from 'vue';",
+        "export default defineComponent({",
+        "  name: 'UserPage',",
+        "  setup() {",
+        "    return {};",
+        "  }",
+        "});",
+        "</script>"
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(path.join(workspaceRoot, "node_modules", "pkg", "Hidden.ts"), "export function hidden() {}\n", "utf8");
+    await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+    const results = await listCodeDefinitionNames("");
+    const paths = results.map((item) => item.filePath);
+    const vueSummary = results.find((item) => item.filePath === "src/views/UserPage.vue");
+
+    assert.ok(vueSummary);
+    assert.equal(vueSummary.language, "vue");
+    assert.deepEqual(vueSummary.definitions.map((definition) => [definition.name, definition.kind, definition.line]), [["UserPage", "component", 4]]);
+    assert.equal(paths.includes("node_modules/pkg/Hidden.ts"), false);
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }

@@ -30,4 +30,21 @@ export type FileNameSearchResult = FileDiscoveryEntry & {
   matchedBy: "name" | "extension" | "path";
 };
 
+// 结构级定义类型用于给 Agent 提供符号摘要，避免为了判断模块结构而读取完整文件内容。
+export type CodeDefinitionKind = "function" | "class" | "interface" | "type" | "enum" | "component" | "variable";
+
+export type CodeDefinition = {
+  name: string;
+  kind: CodeDefinitionKind;
+  line: number;
+  containerName?: string;
+};
+
+export type CodeDefinitionFileSummary = {
+  filePath: string;
+  language: "typescript" | "javascript" | "vue";
+  definitions: CodeDefinition[];
+  error?: string;
+};
+
 export type { CodeSearchResult, FileTreeNode };
