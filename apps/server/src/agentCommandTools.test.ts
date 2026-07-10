@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createCommandAgentToolDefinitions } from "./agentCommandTools.js";
+import { createContextCache } from "./codeDiscovery/index.js";
 import type { AgentStep, CommandPolicyResult, CommandResult } from "./types.js";
 
 function commandResult(status: CommandResult["status"], command = "pnpm test"): CommandResult {
@@ -27,7 +28,7 @@ function createRuntime(onAgentStep?: (step: AgentStep) => void) {
       relevantFiles: []
     },
     runId: "test-command-tool",
-    cache: new Map<string, unknown>(),
+    cache: createContextCache(),
     onAgentStep
   };
 }

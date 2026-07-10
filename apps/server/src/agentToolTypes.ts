@@ -1,5 +1,6 @@
 import type { AgentStep } from "./types.js";
 import type { FileEditResult } from "./types.js";
+import type { ContextCache } from "./codeDiscovery/index.js";
 
 export type AgentRole = "system" | "user" | "assistant" | "tool";
 
@@ -42,7 +43,7 @@ export type AgentToolRuntime = {
   generatedPatchIds?: string[];
   // 关联任务会话，用于把副作用工具的文件、命令和 checkpoint 记录回任务历史。
   taskSessionId?: string | null;
-  cache: Map<string, unknown>;
+  cache: ContextCache;
   // 记录当前工具调用来源，副作用工具会写入 checkpoint，方便从任务步骤追溯和回滚。
   currentToolCall?: {
     id: string;

@@ -244,3 +244,111 @@ test("read tools emit activity steps without an approval card", async () => {
   assert.equal(steps[0].type, "tool_call");
   assert.equal(steps[0].toolName, "readFile");
 });
+
+test("readFileChunk returns an explicit cached marker for duplicate calls", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "hello\nworld\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const runtime = createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-cache-hit" });
+
+  const firstResponse = await executeAgentToolCall(createToolCall("readFileChunk", { filePath: "sample.txt", startLine: 1, endLine: 1 }), runtime);
+  const secondResponse = await executeAgentToolCall(createToolCall("readFileChunk", { filePath: "sample.txt", startLine: 1, endLine: 1 }), runtime);
+  const firstData = JSON.parse(firstResponse.content) as Record<string, unknown>;
+  const secondData = JSON.parse(secondResponse.content) as Record<string, unknown>;
+
+  assert.equal(firstData.cached, undefined);
+  assert.equal(secondData.cached, true);
+  assert.equal(secondData.content, "hello");
+  assert.match(String(secondData.note), /already called/);
+});
+
+test("readFileChunk cache is invalidated after the target file changes", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "old value\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const runtime = createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-cache-stale" });
+
+  await executeAgentToolCall(createToolCall("readFileChunk", { filePath: "sample.txt", startLine: 1, endLine: 1 }), runtime);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "new value\n", "utf8");
+
+  const response = await executeAgentToolCall(createToolCall("readFileChunk", { filePath: "sample.txt", startLine: 1, endLine: 1 }), runtime);
+  const data = JSON.parse(response.content) as Record<string, unknown>;
+
+  assert.equal(data.cached, undefined);
+  assert.equal(data.content, "new value");
+});
+
+test("cache does not bypass workspace boundary validation", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "safe\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const runtime = createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-cache-boundary" });
+
+  await executeAgentToolCall(createToolCall("readFile", { filePath: "sample.txt" }), runtime);
+
+  const response = await executeAgentToolCall(createToolCall("readFile", { filePath: "../sample.txt" }), runtime);
+  const data = JSON.parse(response.content) as Record<string, unknown>;
+
+  assert.match(String(data.error), /outside workspace/i);
+});
+
+test("case-sensitive searchCode cache keeps differently cased queries separate", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.writeFile(path.join(workspaceRoot, "sample.ts"), "Foo\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const runtime = createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-cache-case-sensitive" });
+
+  const firstResponse = await executeAgentToolCall(createToolCall("searchCode", { query: "Foo", caseSensitive: true }), runtime);
+  const secondResponse = await executeAgentToolCall(createToolCall("searchCode", { query: "foo", caseSensitive: true }), runtime);
+  const firstData = JSON.parse(firstResponse.content) as Array<Record<string, unknown>>;
+  const secondData = JSON.parse(secondResponse.content) as Array<Record<string, unknown>>;
+
+  assert.equal(firstData.length, 1);
+  assert.equal(secondData.length, 0);
+});
+
+test("empty searchCode cache is invalidated when the searched directory changes", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const runtime = createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-empty-search-cache-stale" });
+
+  const firstResponse = await executeAgentToolCall(createToolCall("searchCode", { query: "newMarker", path: "src" }), runtime);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await fs.writeFile(path.join(workspaceRoot, "src", "feature.ts"), "export const newMarker = true;\n", "utf8");
+  const secondResponse = await executeAgentToolCall(createToolCall("searchCode", { query: "newMarker", path: "src" }), runtime);
+  const firstData = JSON.parse(firstResponse.content) as Array<Record<string, unknown>>;
+  const secondData = JSON.parse(secondResponse.content) as Array<Record<string, unknown>>;
+
+  assert.equal(firstData.length, 0);
+  assert.equal(secondData.length, 1);
+  assert.equal(secondData[0].cached, undefined);
+  assert.equal(secondData[0].filePath, "src/feature.ts");
+});
+
+test("listFiles cache is invalidated when a listed directory changes", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "a.ts"), "a\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const runtime = createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-list-files-cache-stale" });
+
+  await executeAgentToolCall(createToolCall("listFiles", { path: "src" }), runtime);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await fs.writeFile(path.join(workspaceRoot, "src", "b.ts"), "b\n", "utf8");
+
+  const response = await executeAgentToolCall(createToolCall("listFiles", { path: "src" }), runtime);
+  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+
+  assert.deepEqual(
+    data.map((entry) => entry.path),
+    ["src/a.ts", "src/b.ts"]
+  );
+});

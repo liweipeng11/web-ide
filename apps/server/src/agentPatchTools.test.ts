@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { patchAgentToolDefinitions } from "./agentPatchTools.js";
+import { createContextCache } from "./codeDiscovery/index.js";
 import { getCheckpoint } from "./checkpointStore.js";
 import { clearPendingPatches, createPendingPatch, getPendingPatch } from "./patchStore.js";
 import { runtimeAgentToolRegistry } from "./runtimeAgentTools.js";
@@ -21,7 +22,7 @@ function createToolRuntime(options: Partial<AgentToolRuntime> = {}): AgentToolRu
       relevantFiles: []
     },
     runId: "test-agent-patch-tool",
-    cache: new Map(),
+    cache: createContextCache(),
     ...options
   };
 }

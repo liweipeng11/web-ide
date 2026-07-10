@@ -1,5 +1,5 @@
 import { logAi } from "./aiHttp.js";
-import { listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, searchTextRegex, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
+import { createContextCache, listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, searchTextRegex, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
@@ -629,29 +629,6 @@ function parseArguments(rawArguments: string) {
   }
 }
 
-function getCacheKey(toolName: string, args: Record<string, unknown>) {
-  if (toolName === "inspectProject") return toolName;
-  if (toolName === "listFiles") {
-    return `${toolName}:${String(args.path || "").trim().toLowerCase()}:${args.recursive === true}:${args.includeIgnored === true}:${String(args.limit || "")}`;
-  }
-  if (toolName === "searchFilesByName") {
-    return `${toolName}:${String(args.query || "").trim().toLowerCase()}:${String(args.path || "").trim().toLowerCase()}:${args.includeIgnored === true}:${String(args.limit || "")}`;
-  }
-  if (toolName === "listCodeDefinitionNames") {
-    return `${toolName}:${String(args.path || "").trim().toLowerCase()}:${args.includeIgnored === true}:${String(args.limit || "")}`;
-  }
-  if (toolName === "searchCode") {
-    return `${toolName}:${String(args.query || "").trim().toLowerCase()}:${String(args.path || "").trim().toLowerCase()}:${String(args.filePattern || "").trim().toLowerCase()}:${args.caseSensitive === true}:${String(args.contextLines || "")}:${String(args.limit || "")}`;
-  }
-  if (toolName === "searchCodeRegex") {
-    return `${toolName}:${String(args.regex || "").trim()}:${String(args.path || "").trim().toLowerCase()}:${String(args.filePattern || "").trim().toLowerCase()}:${args.caseSensitive === true}:${String(args.contextLines || "")}:${String(args.limit || "")}`;
-  }
-  if (toolName === "readFile") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}`;
-  if (toolName === "readFileChunk") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
-  if (toolName === "readFileRange") return `${toolName}:${String(args.filePath || "").trim().toLowerCase()}:${String(args.startLine || "")}:${String(args.endLine || "")}`;
-  return `${toolName}:${JSON.stringify(args)}`;
-}
-
 function getToolPurpose(toolName: string, args: Record<string, unknown>) {
   if (toolName === "inspectProject") {
     return "Use inspectProject to verify package manager, framework, and dependency versions before choosing APIs.";
@@ -867,7 +844,56 @@ function createToolApprovalStep(toolName: string, args: Record<string, unknown>)
 }
 
 export function createAgentToolRuntime(options: Omit<AgentToolRuntime, "cache"> & { registry?: AgentToolRegistry }): AgentToolRuntime & { registry?: AgentToolRegistry } {
-  return { ...options, cache: new Map<string, unknown>() };
+  return { ...options, cache: createContextCache() };
+}
+
+function collectCacheResourcePaths(toolName: string, args: Record<string, unknown>, result: unknown) {
+  const resourcePaths = new Set<string>();
+
+  if (typeof args.filePath === "string") {
+    resourcePaths.add(args.filePath);
+  }
+
+  if (typeof args.path === "string") {
+    resourcePaths.add(args.path);
+  }
+
+  if (["listFiles", "searchFilesByName", "listCodeDefinitionNames", "searchCode", "searchCodeRegex"].includes(toolName) && typeof args.path !== "string") {
+    resourcePaths.add("");
+  }
+
+  if (Array.isArray(result)) {
+    for (const item of result) {
+      if (item && typeof item === "object") {
+        const value = item as Record<string, unknown>;
+        if (typeof value.filePath === "string") resourcePaths.add(value.filePath);
+        if (typeof value.path === "string") resourcePaths.add(value.path);
+      }
+    }
+  }
+
+  if (result && typeof result === "object") {
+    const value = result as Record<string, unknown>;
+    if (typeof value.filePath === "string") resourcePaths.add(value.filePath);
+  }
+
+  return [...resourcePaths];
+}
+
+function withCacheMarker(result: unknown, toolName: string) {
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    return {
+      note: `${toolName} was already called with these arguments.`,
+      cached: true,
+      ...result
+    };
+  }
+
+  return {
+    note: `${toolName} was already called with these arguments.`,
+    cached: true,
+    results: result
+  };
 }
 
 export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: AgentToolRuntime): Promise<AgentToolMessage> {
@@ -898,11 +924,12 @@ export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: Age
     return { role: "tool", tool_call_id: toolCall.id, content: JSON.stringify({ error }) };
   }
 
-  const cacheKey = getCacheKey(toolName, args);
+  const cacheKey = { toolName, args };
 
   try {
     const cacheable = definition.cacheable !== false;
-    const cached = cacheable && runtime.cache.has(cacheKey);
+    const cachedEntry = cacheable ? await runtime.cache.get(cacheKey) : { hit: false, stale: false };
+    const cached = cachedEntry.hit;
     const perToolRuntime = {
       ...runtime,
       currentToolCall: {
@@ -912,11 +939,17 @@ export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: Age
         actionId: runtime.pendingActionId || null
       }
     };
-    const result = cached ? runtime.cache.get(cacheKey) : await definition.execute(args, perToolRuntime);
 
-    if (cacheable && !cached) runtime.cache.set(cacheKey, result);
-
+    const result = cached ? cachedEntry.result : await definition.execute(args, perToolRuntime);
     const summary = definition.summarize(result, cached, args);
+
+    if (cacheable && !cached) {
+      await runtime.cache.set(cacheKey, result, {
+        summary,
+        resourcePaths: collectCacheResourcePaths(toolName, args, result)
+      });
+    }
+
     logAi(runtime.runId, `tool.${toolName}.${cached ? "cacheHit" : "ok"}`, summary);
     runtime.onAgentStep?.(
       createAgentStep({
@@ -932,13 +965,7 @@ export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: Age
     return {
       role: "tool",
       tool_call_id: toolCall.id,
-      content: JSON.stringify(
-        cached && result && typeof result === "object" && !Array.isArray(result)
-          ? { note: `${toolName} was already called with these arguments.`, ...result }
-          : cached
-            ? { note: `${toolName} was already called with these arguments.`, results: result }
-            : result
-      )
+      content: JSON.stringify(cached ? withCacheMarker(result, toolName) : result)
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : `${toolName} failed`;

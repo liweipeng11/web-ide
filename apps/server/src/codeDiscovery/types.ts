@@ -61,4 +61,39 @@ export type TextSearchOptions = {
   contextLines?: number;
 };
 
+// 上下文缓存使用结构化 key，避免工具层继续用脆弱的字符串拼接规则。
+export type ContextCacheKey = {
+  toolName: string;
+  args: Record<string, unknown>;
+};
+
+// 资源签名用于缓存失效判断，文件或目录变更后不能继续复用旧的发现/读取/搜索结果。
+export type ContextCacheResourceSignature = {
+  path: string;
+  type: "file" | "directory";
+  mtimeMs: number;
+  size: number;
+};
+
+export type ContextCacheEntry = {
+  key: ContextCacheKey;
+  result: unknown;
+  summary?: unknown;
+  resourceSignatures: ContextCacheResourceSignature[];
+  createdAt: number;
+};
+
+export type ContextCacheReadResult = {
+  hit: boolean;
+  stale: boolean;
+  result?: unknown;
+  entry?: ContextCacheEntry;
+};
+
+export type ContextCache = {
+  get(key: ContextCacheKey): Promise<ContextCacheReadResult>;
+  set(key: ContextCacheKey, result: unknown, options?: { summary?: unknown; resourcePaths?: string[] }): Promise<void>;
+  describeKey(key: ContextCacheKey): string;
+};
+
 export type { CodeSearchResult, FileTreeNode };

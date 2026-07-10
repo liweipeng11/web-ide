@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createContextCache } from "./codeDiscovery/index.js";
 import { executeAgentToolCall } from "./agentTools.js";
 import { getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
 import { fileEditToolDefinitions } from "./fileEditTools.js";
@@ -22,7 +23,7 @@ function createToolRuntime(options: Partial<AgentToolRuntime> = {}): AgentToolRu
       relevantFiles: []
     },
     runId: "test-agent-file-edit-tool",
-    cache: new Map(),
+    cache: createContextCache(),
     registry: runtimeAgentToolRegistry,
     ...options
   };
