@@ -75,6 +75,65 @@ function getApprovalStatusText(status: ApprovalStep["status"]) {
   return "等待审批";
 }
 
+function getBooleanField(value: unknown, field: string) {
+  return value && typeof value === "object" && typeof (value as Record<string, unknown>)[field] === "boolean" ? Boolean((value as Record<string, unknown>)[field]) : null;
+}
+
+function getDiscoveryToolLabel(toolName: string) {
+  if (toolName === "searchFilesByName") return "文件名发现";
+  if (toolName === "listFiles") return "目录发现";
+  if (toolName === "listCodeDefinitionNames") return "结构发现";
+  if (toolName === "searchCodeRegex") return "正则搜索";
+  if (toolName === "searchCode") return "文本搜索";
+  if (toolName === "readFileChunk" || toolName === "readFileRange") return "分块读取";
+  if (toolName === "readFile") return "首块读取";
+  return "";
+}
+
+function formatLineRange(value: unknown) {
+  const startLine = getNumberField(value, "startLine");
+  const endLine = getNumberField(value, "endLine");
+
+  if (startLine === null || endLine === null) return "";
+
+  return `${startLine}-${endLine} 行`;
+}
+
+function getAgentObservationChips(step: AgentStep) {
+  const chips: string[] = [];
+
+  if (step.type === "message" && step.content.includes("Tool budget warning")) {
+    return ["预算即将耗尽"];
+  }
+
+  if (step.type === "error" && step.message.includes("Tool budget limit reached")) {
+    return ["预算限制停止"];
+  }
+
+  if (step.type !== "tool_result") return [];
+
+  const discoveryLabel = getDiscoveryToolLabel(step.toolName);
+  const cached = getBooleanField(step.output, "cached");
+  const resultCount = getNumberField(step.output, "resultCount");
+  const fileCount = getNumberField(step.output, "fileCount");
+  const definitionCount = getNumberField(step.output, "definitionCount");
+  const linesRead = getNumberField(step.output, "linesRead");
+  const hasMoreAfter = getBooleanField(step.output, "hasMoreAfter");
+  const lineRange = formatLineRange(step.output);
+
+  // 观测信息只取工具摘要中的稳定字段，避免把完整文件内容再次渲染到步骤面板。
+  if (discoveryLabel) chips.push(discoveryLabel);
+  if (cached === true) chips.push("命中缓存");
+  if (resultCount !== null) chips.push(`${resultCount} 个结果`);
+  if (fileCount !== null) chips.push(`${fileCount} 个文件`);
+  if (definitionCount !== null) chips.push(`${definitionCount} 个定义`);
+  if (lineRange) chips.push(lineRange);
+  if (linesRead !== null) chips.push(`读取 ${linesRead} 行`);
+  if (hasMoreAfter === true) chips.push("仍有后续 chunk");
+
+  return chips;
+}
+
 function getRiskText(riskLevel: ApprovalStep["riskLevel"]) {
   if (riskLevel === "high") return "高风险";
   if (riskLevel === "medium") return "中风险";
@@ -115,8 +174,32 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
       return { label: "Search", title: `Searching ${getStringField(step.input, "query") || summarizeUnknown(step.input)}`, detail: "" };
     }
 
+    if (step.toolName === "searchFilesByName") {
+      return { label: "Discover", title: `Finding files ${getStringField(step.input, "query") || summarizeUnknown(step.input)}`, detail: getStringField(step.input, "path") };
+    }
+
+    if (step.toolName === "listFiles") {
+      return { label: "Discover", title: `Listing ${getStringField(step.input, "path") || "."}`, detail: "" };
+    }
+
+    if (step.toolName === "listCodeDefinitionNames") {
+      return { label: "Discover", title: `Inspecting definitions in ${getStringField(step.input, "path") || "."}`, detail: "" };
+    }
+
+    if (step.toolName === "searchCodeRegex") {
+      return { label: "Regex", title: `Searching ${getStringField(step.input, "regex") || summarizeUnknown(step.input)}`, detail: getStringField(step.input, "filePattern") };
+    }
+
     if (step.toolName === "readFile") {
       return { label: "Read", title: `Reading ${getStringField(step.input, "filePath") || summarizeUnknown(step.input)}`, detail: "" };
+    }
+
+    if (step.toolName === "readFileChunk" || step.toolName === "readFileRange") {
+      const filePath = getStringField(step.input, "filePath") || summarizeUnknown(step.input);
+      const startLine = getNumberField(step.input, "startLine");
+      const endLine = getNumberField(step.input, "endLine");
+      const range = startLine !== null && endLine !== null ? `${startLine}-${endLine}` : "";
+      return { label: "Chunk", title: `Reading ${filePath}`, detail: range };
     }
 
     return { label: "Tool", title: `Calling ${step.toolName}`, detail: summarizeUnknown(step.input) };
@@ -128,10 +211,32 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
       return { label: "Result", title: `Search completed with ${count ?? 0} result(s)`, detail: getStringField(step.output, "query") };
     }
 
-    if (step.toolName === "readFile") {
+    if (step.toolName === "searchFilesByName") {
+      const count = getNumberField(step.output, "resultCount");
+      return { label: "Result", title: `File discovery completed with ${count ?? 0} match(es)`, detail: getStringField(step.output, "query") };
+    }
+
+    if (step.toolName === "listFiles") {
+      const count = getNumberField(step.output, "resultCount");
+      return { label: "Result", title: `Listed ${count ?? 0} path(s)`, detail: getStringField(step.output, "path") || "." };
+    }
+
+    if (step.toolName === "listCodeDefinitionNames") {
+      const fileCount = getNumberField(step.output, "fileCount");
+      const definitionCount = getNumberField(step.output, "definitionCount");
+      return { label: "Result", title: `Found ${definitionCount ?? 0} definition(s)`, detail: `${fileCount ?? 0} file(s)` };
+    }
+
+    if (step.toolName === "searchCodeRegex") {
+      const count = getNumberField(step.output, "resultCount");
+      return { label: "Result", title: `Regex search completed with ${count ?? 0} result(s)`, detail: getStringField(step.output, "regex") };
+    }
+
+    if (step.toolName === "readFile" || step.toolName === "readFileChunk" || step.toolName === "readFileRange") {
       const filePath = getStringField(step.output, "filePath");
       const linesRead = getNumberField(step.output, "linesRead");
-      return { label: "Result", title: `Read ${filePath || summarizeUnknown(step.output)}`, detail: linesRead === null ? "" : `${linesRead} line(s)` };
+      const lineRange = formatLineRange(step.output);
+      return { label: "Result", title: `Read ${filePath || summarizeUnknown(step.output)}`, detail: [lineRange, linesRead === null ? "" : `${linesRead} line(s)`].filter(Boolean).join(" / ") };
     }
 
     return { label: "Result", title: `Received ${step.toolName} result`, detail: summarizeUnknown(step.output) };
@@ -252,6 +357,20 @@ function AgentStepDetailBlock({ step }: { step: AgentStep }) {
   );
 }
 
+function AgentStepObservation({ step }: { step: AgentStep }) {
+  const chips = getAgentObservationChips(step);
+
+  if (!chips.length) return null;
+
+  return (
+    <div className="agent-step-observation" aria-label="Agent 工具观测信息">
+      {chips.map((chip) => (
+        <span key={chip}>{chip}</span>
+      ))}
+    </div>
+  );
+}
+
 type Props = {
   disabled?: boolean;
   inline?: boolean;
@@ -294,6 +413,7 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
                   <b>{view.title}</b>
                   {view.detail && <small>{view.detail}</small>}
                 </summary>
+                <AgentStepObservation step={step} />
                 {step.type === "approval_request" && showApprovalCard && <ApprovalRequestCard disabled={disabled} pending={pendingActionId === step.actionId} step={step} onDecideApproval={decideApproval} />}
                 {step.type === "checkpoint" && <CheckpointCard disabled={disabled} step={step} onRollbackCheckpoint={onRollbackCheckpoint} />}
                 <AgentStepDetailBlock step={step} />

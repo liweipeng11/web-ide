@@ -325,6 +325,30 @@ export type CodeSearchResponse = {
   results: CodeSearchResult[];
 };
 
+export type CodeSearchMode = "literal" | "regex";
+
+export type CodeSearchOptions = {
+  mode?: CodeSearchMode;
+  path?: string;
+  filePattern?: string;
+  limit?: number;
+  caseSensitive?: boolean;
+  contextLines?: number;
+};
+
+export type FileNameSearchResult = {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  depth: number;
+  score: number;
+  matchedBy: "name" | "extension" | "path";
+};
+
+export type FileNameSearchResponse = {
+  results: FileNameSearchResult[];
+};
+
 export type ProjectCommand = {
   name: string;
   command: string;
@@ -470,8 +494,33 @@ export function fetchFile(path: string, includeIgnored = false) {
   return request<ReadFileResponse>(`/api/file?path=${encodeURIComponent(path)}&includeIgnored=${includeIgnored ? "true" : "false"}`);
 }
 
-export function searchCode(query: string) {
-  return request<CodeSearchResponse>(`/api/search?q=${encodeURIComponent(query)}`);
+function appendOptionalSearchParam(params: URLSearchParams, key: string, value: string | number | boolean | undefined) {
+  if (value === undefined || value === "" || value === false) return;
+  params.set(key, String(value));
+}
+
+export function searchCode(query: string, options: CodeSearchOptions = {}) {
+  const params = new URLSearchParams({ q: query });
+
+  // 搜索参数在前端集中序列化，避免组件直接拼接查询字符串导致遗漏编码。
+  appendOptionalSearchParam(params, "mode", options.mode);
+  appendOptionalSearchParam(params, "path", options.path?.trim());
+  appendOptionalSearchParam(params, "filePattern", options.filePattern?.trim());
+  appendOptionalSearchParam(params, "limit", options.limit);
+  appendOptionalSearchParam(params, "caseSensitive", options.caseSensitive);
+  appendOptionalSearchParam(params, "contextLines", options.contextLines);
+
+  return request<CodeSearchResponse>(`/api/search?${params.toString()}`);
+}
+
+export function searchFilesByName(query: string, options: Pick<CodeSearchOptions, "path" | "limit"> = {}) {
+  const params = new URLSearchParams({ q: query });
+
+  // 文件名搜索用于低成本路径发现，不携带正文搜索才需要的 filePattern/contextLines。
+  appendOptionalSearchParam(params, "path", options.path?.trim());
+  appendOptionalSearchParam(params, "limit", options.limit);
+
+  return request<FileNameSearchResponse>(`/api/search/files?${params.toString()}`);
 }
 
 export function fetchProjectCommands() {

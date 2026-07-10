@@ -888,6 +888,27 @@
   font-weight: 700;
 }
 
+.agent-step-observation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.agent-step-observation span {
+  background: #eef2f7;
+  border: 1px solid #d8dee5;
+  border-radius: 999px;
+  color: #334155;
+  font-size: 9px;
+  line-height: 18px;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-step-approval_request > span {
   background: #fff7ed;
   color: #9a3412;

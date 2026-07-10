@@ -243,6 +243,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       messages.push(warningMessage);
       await persistAgentMessage(options.taskSessionId, warningMessage);
       budgetWarningSent = true;
+      // 把预算预警写入步骤流，前端可直接展示“即将触达工具预算”的观测信号。
+      options.onAgentStep?.(createAgentStep({ type: "message", content: `Tool budget warning: ${remainingSteps} model step(s) remaining.` }));
       logAi(runId, "runtime.budgetWarning", { step, remainingSteps, generatedPatchIds });
     }
 
@@ -352,7 +354,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     }
   }
 
-  const content = `Agent runtime stopped after ${maxSteps} step(s) because the tool-call limit was reached.`;
+  const content = `Tool budget limit reached: Agent runtime stopped after ${maxSteps} step(s) because the tool-call limit was reached.`;
   options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
   logAi(runId, "runtime.stepLimitReached", { mode, maxSteps });
 

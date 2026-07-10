@@ -4,6 +4,7 @@ import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime
 import { createAgentToolRegistry } from "./agentToolRegistry.js";
 import { AI_AGENT_ACT_SYSTEM_PROMPT } from "./prompts.js";
 import type { AgentCompletionResponse, AgentToolDefinition } from "./agentToolTypes.js";
+import type { AgentStep } from "./types.js";
 
 function createRuntimeTestTool(name: string, result: unknown, onExecute?: () => void): AgentToolDefinition {
   return {
@@ -641,12 +642,16 @@ test("agent runtime resumes after rejecting a pending tool call", async () => {
 
 test("agent runtime stops when tool-call step limit is reached", async () => {
   const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
+  const steps: AgentStep[] = [];
 
   const result = await runAgentRuntime({
     userRequest: "Search code",
     registry,
     runId: "test-runtime-limit",
     maxSteps: 2,
+    onAgentStep(step) {
+      steps.push(step);
+    },
     requestCompletion: async () => ({
       choices: [
         {
@@ -668,6 +673,41 @@ test("agent runtime stops when tool-call step limit is reached", async () => {
 
   assert.equal(result.status, "step_limit_reached");
   assert.match(result.content, /tool-call limit/);
+  assert.equal(steps.some((step) => step.type === "error" && step.message.includes("Tool budget limit reached")), true);
+});
+
+test("agent runtime emits a visible budget warning step before exhausting tool budget", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
+  const steps: AgentStep[] = [];
+
+  await runAgentRuntime({
+    userRequest: "Search until budget warning",
+    registry,
+    runId: "test-runtime-visible-budget-warning",
+    maxSteps: 4,
+    onAgentStep(step) {
+      steps.push(step);
+    },
+    requestCompletion: async () => ({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: `tool-budget-visible-${Date.now()}-${Math.random()}`,
+                type: "function",
+                function: { name: "searchCode", arguments: JSON.stringify({ query: "Agent" }) }
+              }
+            ]
+          }
+        }
+      ]
+    })
+  });
+
+  assert.equal(steps.some((step) => step.type === "message" && step.content.includes("Tool budget warning")), true);
 });
 
 test("plan mode exposes only readonly tools to the model", async () => {

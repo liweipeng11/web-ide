@@ -7,7 +7,6 @@ import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime
 import { normalizeAgentMode } from "./agentModes.js";
 import { appendFileChatMessage, appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, ensureFileChatMessages, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
 import { getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
-import { searchWorkspaceCode } from "./codeSearch.js";
 import { discoverProjectCommands } from "./commandDiscovery.js";
 import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { getRecentCommandResults } from "./commandResults.js";
@@ -18,6 +17,7 @@ import { runAutoValidation } from "./autoValidationService.js";
 import { listFiles, readWorkspaceFile, writeWorkspaceFile } from "./fileTools.js";
 import { createGitWorkflowRouter } from "./gitWorkflow/routes.js";
 import { createVue2TemplateRouter } from "./vue2Template/routes.js";
+import { createSearchRouter } from "./searchRoutes.js";
 import { clearPendingPatches, deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
 import { applyPendingPatch } from "./patchApplyService.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
@@ -36,6 +36,7 @@ const maxChatContextFiles = 8;
 const maxChatContextCharsPerFile = 20_000;
 
 app.use(express.json({ limit: "5mb" }));
+app.use("/api", createSearchRouter());
 app.use("/api/git-workflow", createGitWorkflowRouter());
 app.use("/api/vue2-template", createVue2TemplateRouter());
 
@@ -250,14 +251,6 @@ app.get(
       path: filePath,
       content: await readWorkspaceFile(filePath, { allowIgnored: includeIgnored })
     });
-  })
-);
-
-app.get(
-  "/api/search",
-  asyncRoute(async (request, response) => {
-    const query = typeof request.query.q === "string" ? request.query.q : "";
-    response.json({ results: await searchWorkspaceCode(query) });
   })
 );
 
