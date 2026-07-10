@@ -1,6 +1,5 @@
 import { logAi } from "./aiHttp.js";
-import { searchWorkspaceCode } from "./codeSearch.js";
-import { readWorkspaceFile, readWorkspaceFileRange } from "./fileTools.js";
+import { readWorkspaceFile, readWorkspaceFileRange, searchWorkspaceCode } from "./codeDiscovery/index.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
