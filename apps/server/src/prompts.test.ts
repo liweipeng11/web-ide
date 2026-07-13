@@ -43,4 +43,6 @@ test("agent, edit, and chat prompts all include the shared discovery strategy", 
     assertIncludes(prompt, "listCodeDefinitionNames");
     assertIncludes(prompt, "readFileChunk");
   }
+
+  assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "Before implementing or editing code, call findSimilarPatterns");
 });

@@ -5,6 +5,7 @@ import { getCheckpoint } from "./checkpointStore.js";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
 import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
+import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 
 function taskSessionDirectory() {
@@ -165,6 +166,18 @@ function isPatchFilterStage(value: unknown): value is PatchFilterStage {
   return value === "path_validation" || value === "scope_validation" || value === "dedupe" || value === "content_diff" || value === "retry";
 }
 
+function isCompanionStatus(value: unknown): RequiredCompanionFile["status"] {
+  return value === "read" || value === "missing" || value === "pending" ? value : "pending";
+}
+
+function isMissingRequirementSeverity(value: unknown): MissingRequirementRecord["severity"] {
+  return value === "warning" || value === "blocking" ? value : "warning";
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())) : [];
+}
+
 function isPatchLifecycleEventType(value: unknown): value is PatchLifecycleEventType {
   return value === "patch_created" || value === "patch_filtered" || value === "patch_file_applied" || value === "patch_file_rejected" || value === "patch_completed" || value === "patch_superseded" || value === "auto_fix_patch_created";
 }
@@ -227,6 +240,117 @@ function normalizeFileEditLifecycleEvents(value: unknown): FileEditLifecycleEven
     .sort((left, right) => left.createdAt - right.createdAt);
 }
 
+function normalizeCandidateFiles(value: unknown): CandidateFileRecord[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is Partial<CandidateFileRecord> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      filePath: typeof item.filePath === "string" ? item.filePath : "",
+      role: item.role === "target" || item.role === "companion" || item.role === "context" ? item.role : "context",
+      score: typeof item.score === "number" ? item.score : 0,
+      reasons: normalizeStringArray(item.reasons),
+      read: Boolean(item.read),
+      fromTools: Array.isArray(item.fromTools) ? item.fromTools.filter((tool): tool is CandidateFileRecord["fromTools"][number] => typeof tool === "string") : []
+    }))
+    .filter((item) => item.filePath.trim());
+}
+
+function normalizeEvidenceRecords(value: unknown): EvidenceRecord[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is Partial<EvidenceRecord> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      filePath: typeof item.filePath === "string" ? item.filePath : "",
+      evidenceType:
+        item.evidenceType === "filename" ||
+        item.evidenceType === "definition" ||
+        item.evidenceType === "text_match" ||
+        item.evidenceType === "import_relation" ||
+        item.evidenceType === "selected_file" ||
+        item.evidenceType === "previous_failure" ||
+        item.evidenceType === "session_history"
+          ? item.evidenceType
+          : "session_history",
+      sourceTool: typeof item.sourceTool === "string" ? item.sourceTool : "unknown",
+      detail: typeof item.detail === "string" ? item.detail : "",
+      line: typeof item.line === "number" ? item.line : undefined,
+      score: typeof item.score === "number" ? item.score : 0
+    }))
+    .filter((item) => item.filePath.trim());
+}
+
+function normalizeRequiredCompanions(value: unknown): RequiredCompanionFile[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is Partial<RequiredCompanionFile> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      filePath: typeof item.filePath === "string" ? item.filePath : "",
+      reason: typeof item.reason === "string" ? item.reason : "",
+      requiredBy: typeof item.requiredBy === "string" ? item.requiredBy : "unknown",
+      status: isCompanionStatus(item.status)
+    }))
+    .filter((item) => item.filePath.trim());
+}
+
+function normalizeMissingRequirements(value: unknown): MissingRequirementRecord[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .filter((item): item is Partial<MissingRequirementRecord> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      requirement: typeof item.requirement === "string" ? item.requirement : "unknown",
+      reason: typeof item.reason === "string" ? item.reason : "",
+      severity: isMissingRequirementSeverity(item.severity),
+      relatedFiles: normalizeStringArray(item.relatedFiles)
+    }));
+}
+
+function normalizeContextSelectionSnapshot(value: unknown): ContextSelectionSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const item = value as Partial<ContextSelectionSnapshot>;
+
+  if (typeof item.userGoal !== "string") return null;
+
+  return {
+    taskSessionId: typeof item.taskSessionId === "string" && item.taskSessionId.trim() ? item.taskSessionId : item.taskSessionId === null ? null : undefined,
+    userGoal: item.userGoal,
+    candidateFiles: normalizeCandidateFiles(item.candidateFiles),
+    evidence: normalizeEvidenceRecords(item.evidence),
+    requiredCompanions: normalizeRequiredCompanions(item.requiredCompanions),
+    missingRequirements: normalizeMissingRequirements(item.missingRequirements),
+    readyForPatch: Boolean(item.readyForPatch),
+    summary: typeof item.summary === "string" ? item.summary : "",
+    createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now()
+  };
+}
+
+function normalizeContextSelectionSnapshots(value: unknown): ContextSelectionSnapshot[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map(normalizeContextSelectionSnapshot)
+    .filter((item): item is ContextSelectionSnapshot => Boolean(item))
+    .sort((left, right) => right.createdAt - left.createdAt)
+    .slice(0, 50);
+}
+
+function normalizePatchCompletenessReport(value: unknown): PatchCompletenessReport | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+
+  const item = value as Partial<PatchCompletenessReport>;
+
+  return {
+    ready: Boolean(item.ready),
+    risks: normalizeMissingRequirements(item.risks),
+    checkedFiles: normalizeStringArray(item.checkedFiles),
+    createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now()
+  };
+}
+
 function normalizePatchDiagnostics(value: unknown): PatchGenerationDiagnostics[] {
   if (!Array.isArray(value)) return [];
 
@@ -259,6 +383,8 @@ function normalizePatchDiagnostics(value: unknown): PatchGenerationDiagnostics[]
             })
             .filter((record) => record.filePath.trim())
         : [],
+      contextSelection: normalizeContextSelectionSnapshot(item.contextSelection) || undefined,
+      patchCompleteness: normalizePatchCompletenessReport(item.patchCompleteness),
       generatedAt: typeof item.generatedAt === "number" ? item.generatedAt : Date.now()
     }))
     .sort((left, right) => right.generatedAt - left.generatedAt);
@@ -323,6 +449,7 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     planItems: normalizeTaskPlanItems(session.planItems),
     planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
     patchDiagnostics: normalizePatchDiagnostics(session.patchDiagnostics),
+    contextSelectionSnapshots: normalizeContextSelectionSnapshots(session.contextSelectionSnapshots),
     patchEvents: normalizePatchLifecycleEvents(session.patchEvents),
     fileEditEvents: normalizeFileEditLifecycleEvents(session.fileEditEvents)
   };
@@ -421,6 +548,7 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     planApproval: { required: false, status: "not_required" },
     checkpointIds: [],
     patchDiagnostics: [],
+    contextSelectionSnapshots: [],
     patchEvents: [],
     fileEditEvents: [],
     gitCommits: [],
@@ -1035,6 +1163,17 @@ export async function recordTaskSessionPatchDiagnostics(taskSessionId: string | 
       updatedAt: Date.now()
     };
   });
+}
+
+export async function recordTaskSessionContextSelection(taskSessionId: string | null | undefined, snapshot: ContextSelectionSnapshot) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    // 保留最近 50 次上下文选取快照，既支持复盘又避免任务文件无限膨胀。
+    contextSelectionSnapshots: [snapshot, ...normalizeContextSelectionSnapshots(session.contextSelectionSnapshots)].slice(0, 50),
+    updatedAt: Date.now()
+  }));
 }
 
 export async function appendTaskSessionPatchEvent(taskSessionId: string | null | undefined, event: Omit<PatchLifecycleEvent, "id" | "createdAt" | "taskSessionId"> & Partial<Pick<PatchLifecycleEvent, "id" | "createdAt" | "taskSessionId">>) {

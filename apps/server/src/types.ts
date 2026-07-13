@@ -347,6 +347,8 @@ export type TaskSession = {
   diffView?: TaskSessionDiffView;
   // 按 patch 维度沉淀生成诊断，旧任务读取时会自动补成空数组。
   patchDiagnostics?: PatchGenerationDiagnostics[];
+  // 记录每轮 patch 前的上下文选取快照，用于回放“为什么这些文件足够或不足”。
+  contextSelectionSnapshots?: import("./contextSelection/types.js").ContextSelectionSnapshot[];
   // 按时间顺序沉淀 patch 生命周期事件，用于历史回放和审计。
   patchEvents?: PatchLifecycleEvent[];
   // 按时间顺序沉淀工具式文件编辑事件，用于追踪 replaceInFile/writeFile 的真实落盘历史。
@@ -465,6 +467,8 @@ export type PatchGenerationDiagnostics = {
   filteredCount: number;
   noEffectCount: number;
   records: PatchFilterRecord[];
+  contextSelection?: import("./contextSelection/types.js").ContextSelectionSnapshot;
+  patchCompleteness?: import("./contextSelection/types.js").PatchCompletenessReport;
   generatedAt: number;
 };
 

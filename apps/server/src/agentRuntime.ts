@@ -45,8 +45,26 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
     filesRead: [],
     searchQueries: [],
     searchResultFiles: [],
-    relevantFiles: []
+    relevantFiles: [],
+    patternSearchPerformed: false,
+    patternCandidateFiles: []
   };
+}
+
+function getPatternFinderBlockReason(toolName: string, agentContext: AgentContext, registry: AgentToolRegistry) {
+  const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile"]);
+  if (!editingTools.has(toolName) || !registry.get("findSimilarPatterns")) return null;
+
+  if (agentContext.patternSearchPerformed !== true) {
+    return "Before editing, call findSimilarPatterns to inspect existing implementation patterns.";
+  }
+
+  const candidates = agentContext.patternCandidateFiles || [];
+  if (candidates.length && !candidates.some((filePath) => agentContext.filesRead.includes(filePath))) {
+    return "findSimilarPatterns returned candidate files. Read at least one candidate with readFile before editing.";
+  }
+
+  return null;
 }
 
 function createInitialMessages(userRequest: string, mode: AgentMode) {
@@ -304,6 +322,16 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
     for (const toolCall of message.tool_calls) {
       const definition = registry.get(toolCall.function.name);
+      const patternFinderBlockReason = getPatternFinderBlockReason(toolCall.function.name, agentContext, registry);
+
+      if (patternFinderBlockReason) {
+        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: patternFinderBlockReason });
+        options.onAgentStep?.(createAgentStep({ type: "error", message: patternFinderBlockReason }));
+        const blockedMessage = createBlockedToolMessage(toolCall, patternFinderBlockReason);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        continue;
+      }
       const approval = evaluateAgentToolApproval(toolCall, definition);
 
       if (approval.status === "blocked") {

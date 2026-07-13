@@ -10,6 +10,10 @@ export type AgentContext = {
   searchQueries: string[];
   searchResultFiles: string[];
   relevantFiles: string[];
+  /** 记录本轮是否已经执行过相似实现检索，供编辑门禁判断。 */
+  patternSearchPerformed?: boolean;
+  /** 最近一次检索得到的候选文件，存在候选时至少应阅读一个。 */
+  patternCandidateFiles?: string[];
 };
 
 export type AgentToolCall = {

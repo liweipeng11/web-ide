@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildPatchCompletenessReport, createContextSelectionSnapshot } from "./contextSelection/index.js";
 import { buildFinalPatchSummary, buildPatchGenerationDiagnostics } from "./editPatchService.js";
 
 test("final patch summary uses cleaned file count instead of model candidate count", () => {
@@ -55,4 +56,43 @@ test("patch generation diagnostics summarizes filtered candidate records", () =>
     diagnostics.records.map((record) => record.reason),
     ["duplicate_path", "no_effect_change"]
   );
+});
+
+test("patch diagnostics can carry context selection and completeness report", () => {
+  const contextSelection = createContextSelectionSnapshot({
+    userGoal: "把按钮文案改成保存",
+    selectedFilePath: "src/Button.tsx",
+    filesRead: ["src/Button.tsx"]
+  });
+  const patchCompleteness = buildPatchCompletenessReport({
+    snapshot: contextSelection,
+    patchFiles: ["src/Button.tsx"]
+  });
+  const diagnostics = buildPatchGenerationDiagnostics({
+    rawPatchCount: 1,
+    normalizedFilePaths: ["src/Button.tsx"],
+    preDedupeCount: 1,
+    postDedupeCount: 1,
+    finalPatchCount: 1,
+    records: [],
+    contextSelection,
+    patchCompleteness
+  });
+
+  assert.equal(diagnostics.contextSelection?.readyForPatch, true);
+  assert.equal(diagnostics.patchCompleteness?.risks.length, 0);
+});
+
+test("patch completeness reports missed selected target file", () => {
+  const contextSelection = createContextSelectionSnapshot({
+    userGoal: "修改当前组件文案",
+    selectedFilePath: "src/Target.tsx",
+    filesRead: ["src/Target.tsx"]
+  });
+  const report = buildPatchCompletenessReport({
+    snapshot: contextSelection,
+    patchFiles: ["src/Other.tsx"]
+  });
+
+  assert.equal(report.risks.some((risk) => risk.requirement === "patch-cover-target-files"), true);
 });

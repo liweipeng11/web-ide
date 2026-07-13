@@ -43,6 +43,7 @@ Rules:
 - Use runCommand, not proposePatch, when the user asks to delete an entire file. The runtime will request user approval before the command executes.
 - After runCommand returns a failed result, inspect the output and continue with search/read/proposePatch if the failure is related to the user's task; use direct edit tools only as the fallback described above.
 - Prefer listFiles/searchFilesByName/listCodeDefinitionNames/searchCode/searchCodeRegex/readFile/readFileChunk before editing so the change follows existing project style.
+- Before proposePatch, replaceInFile, or writeFile, call findSimilarPatterns. If candidates are returned, read at least one candidate before editing; the runtime enforces this requirement.
 - If you have enough context, provide a concise final answer in Chinese unless the user asks for another language.`;
 
 export const AI_AGENT_PLAN_SYSTEM_PROMPT = `${AI_AGENT_RUNTIME_SYSTEM_PROMPT}
@@ -67,6 +68,8 @@ Act Mode rules:
 - If replaceInFile fails because the search block does not match, read the latest file content again and retry with a smaller exact block.
 - Use proposePatch for reviewable code changes before files are written.
 - If proposePatch returns an error saying more context or specific files are needed, call listFiles/searchFilesByName/listCodeDefinitionNames/searchCode/searchCodeRegex/readFile/readFileChunk for those files and retry proposePatch.
+- If proposePatch reports missing context-selection evidence or required companion files, search/read those exact files or search directions before retrying proposePatch.
+- For type, interface, state, props, API, service, request, route, or validation-failure fixes, do not treat a single-file patch as final until likely callers, type definitions, hooks, controllers, or route registrations have been checked.
 - Do not keep searching or reading after the relevant files are known; once the smallest useful context is available, call proposePatch according to the rules above, or use replaceInFile/writeFile only for the direct-edit fallback.
 - If the task is a whole-file deletion or a command-based change, move to runCommand as soon as the target path is confirmed instead of continuing to inspect unrelated files.
 - When you have already read several relevant files or the tool budget is getting low, stop exploring and move to proposePatch, the direct-edit fallback, runCommand, or your final answer.
@@ -132,7 +135,7 @@ You will receive:
 - the most recent failed command result, when available
 - fallback search results, when the required first search does not find matching files
 - project facts inspected from package.json, when available
-- tools you can call, including inspectProject(), listFiles(path,recursive,includeIgnored,limit) for directory discovery, searchFilesByName(query,path,limit) for path discovery, listCodeDefinitionNames(path,limit,includeIgnored) for top-level structure discovery, searchCode(query,path,filePattern,limit,caseSensitive,contextLines) for literal code search, searchCodeRegex(regex,path,filePattern,limit,caseSensitive,contextLines) for regex code search, readFile(filePath) for reading the first file chunk, readFileChunk(filePath,startLine,endLine) for reading follow-up chunks, and readFileRange(filePath,startLine,endLine) as a compatibility range reader
+- tools you can call, including inspectProject(), findSimilarPatterns(taskDescription,targetPath,targetResponsibility,limit) for locating reusable implementation patterns, listFiles(path,recursive,includeIgnored,limit) for directory discovery, searchFilesByName(query,path,limit) for path discovery, listCodeDefinitionNames(path,limit,includeIgnored) for top-level structure discovery, searchCode(query,path,filePattern,limit,caseSensitive,contextLines) for literal code search, searchCodeRegex(regex,path,filePattern,limit,caseSensitive,contextLines) for regex code search, readFile(filePath) for reading the first file chunk, readFileChunk(filePath,startLine,endLine) for reading follow-up chunks, and readFileRange(filePath,startLine,endLine) as a compatibility range reader
 
 ${AI_AGENT_DISCOVERY_STRATEGY_PROMPT}
 
@@ -149,6 +152,7 @@ Your task:
 - The user never needs to select a file before requesting a change. Discover the relevant files yourself with listFiles, searchFilesByName, listCodeDefinitionNames, searchCode, searchCodeRegex, readFile, and readFileChunk.
 - Treat selectedFile only as optional context. Do not limit edits to it and do not require it to be present.
 - Before searching code contents, infer 1 to 4 concise discovery terms from the user's intent. Use file-name hints, directory names, identifiers, route names, component names, API names, domain nouns, or error codes.
+- Before implementing or editing code, call findSimilarPatterns with a concise taskDescription and the likely targetPath or targetResponsibility. If it returns candidates, read the most relevant candidate with readFile before producing a patch; do not invent a new pattern when a suitable existing one is available.
 - If the likely file or module name is unknown, prefer searchFilesByName(query) or listFiles(path,recursive) before searchCode(query).
 - If the likely directory is known but the relevant implementation file is unclear, call listCodeDefinitionNames(path) before reading full files.
 - Do not pass the user's full original request as any discovery query; use an inferred keyword or short phrase instead.
@@ -161,6 +165,9 @@ Your task:
 - Do not return patches:null just because you need more context. If more context is needed, call listFiles, searchFilesByName, listCodeDefinitionNames, searchCode, searchCodeRegex, readFile, or readFileChunk.
 - If no file is selected, infer discovery terms, call searchFilesByName(query), listFiles(path,recursive), listCodeDefinitionNames(path), searchCode(query), or searchCodeRegex(regex), choose relevant files, and call readFile(filePath) before producing the edit.
 - If the change likely touches code outside the selected file, infer discovery terms, call searchFilesByName(query), listFiles(path,recursive), listCodeDefinitionNames(path), searchCode(query), or searchCodeRegex(regex), choose relevant files, and call readFile(filePath) before producing the edit.
+- Before returning patches, confirm that candidate files and required companion files are sufficient for the requested edit.
+- For type, interface, state, props, API, service, request, route, or validation-failure changes, check the likely linked files such as callers, type definitions, hooks, controllers, route registrations, or recent patch files.
+- If key companion files have not been read, return status "needs_context" with concise nextSearchKeywords instead of presenting the current patch as final.
 - Read at most 8 files automatically. Prefer the smallest set of files needed.
 - Do not call searchFilesByName, searchCode, or searchCodeRegex with an empty query.
 - Do not call readFile more than once for the same path.

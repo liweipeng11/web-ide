@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { analyzeProject, type ProjectAnalysis } from "./projectAnalyzer.js";
 import { detectPackageManager } from "./commandDiscovery.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
@@ -11,6 +12,7 @@ export type ProjectInspection = {
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
   frameworkHints: string[];
+  analysis: ProjectAnalysis;
 };
 
 const frameworkDependencyHints: Array<[string, string]> = [
@@ -51,6 +53,8 @@ function detectFrameworkHints(dependencies: Record<string, string>, devDependenc
 }
 
 export async function inspectProject(workspaceRoot: string | null | undefined): Promise<ProjectInspection> {
+  const analysis = await analyzeProject(workspaceRoot);
+
   if (!workspaceRoot) {
     return {
       packageManager: null,
@@ -59,7 +63,8 @@ export async function inspectProject(workspaceRoot: string | null | undefined): 
       scripts: {},
       dependencies: {},
       devDependencies: {},
-      frameworkHints: []
+      frameworkHints: [],
+      analysis
     };
   }
 
@@ -75,7 +80,8 @@ export async function inspectProject(workspaceRoot: string | null | undefined): 
       scripts: {},
       dependencies: {},
       devDependencies: {},
-      frameworkHints: []
+      frameworkHints: [],
+      analysis
     };
   }
 
@@ -91,7 +97,8 @@ export async function inspectProject(workspaceRoot: string | null | undefined): 
       scripts: {},
       dependencies: {},
       devDependencies: {},
-      frameworkHints: []
+      frameworkHints: [],
+      analysis
     };
   }
 
@@ -107,7 +114,8 @@ export async function inspectProject(workspaceRoot: string | null | undefined): 
     scripts,
     dependencies,
     devDependencies,
-    frameworkHints: detectFrameworkHints(dependencies, devDependencies)
+    frameworkHints: detectFrameworkHints(dependencies, devDependencies),
+    analysis
   };
 }
 

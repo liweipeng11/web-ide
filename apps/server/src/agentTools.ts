@@ -1,10 +1,12 @@
 import { logAi } from "./aiHttp.js";
 import { createContextCache, listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, searchTextRegex, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
 import { inspectCurrentProject } from "./projectInspector.js";
+import { findSimilarPatterns } from "./patternFinder/index.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
 import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
+import { getWorkspaceRoot } from "./workspaceStore.js";
 
 export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
@@ -94,8 +96,53 @@ function getSearchOptions(args: Record<string, unknown>) {
 
 export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
   {
+    name: "findSimilarPatterns",
+    description: "Find one to three relevant existing implementation patterns before editing. Ranks candidates by directory, responsibility, naming, imports, structure, error handling, test pairing, recency, and reuse signals.",
+    parameters: {
+      type: "object",
+      properties: {
+        taskDescription: { type: "string", description: "Concise description of the implementation task." },
+        targetPath: { type: "string", description: "Optional workspace-relative target file path, including a planned new file path." },
+        targetResponsibility: { type: "string", description: "Optional responsibility label, such as service, route, component, repository, utility, or test." },
+        limit: { type: "integer", minimum: 1, maximum: 3, description: "Maximum candidates to return. Defaults to 3." }
+      },
+      required: ["taskDescription"],
+      additionalProperties: false
+    },
+    // 相似度结果依赖整个工作区，候选文件的变更不能复用旧排序结果。
+    cacheable: false,
+    async execute(args, runtime) {
+      const taskDescription = requiredString(args, "taskDescription");
+      const targetPath = optionalString(args, "targetPath");
+      const targetResponsibility = optionalString(args, "targetResponsibility");
+      const limit = optionalPositiveInteger(args, "limit", 3);
+      const workspaceRoot = getWorkspaceRoot();
+      if (!workspaceRoot) throw new Error("No workspace selected");
+
+      uniquePush(runtime.agentContext.searchQueries, `pattern:${targetResponsibility || taskDescription}`);
+      const result = await findSimilarPatterns(workspaceRoot, { taskDescription, targetPath, targetResponsibility, limit });
+      runtime.agentContext.patternSearchPerformed = true;
+      runtime.agentContext.patternCandidateFiles = result.candidates.map((candidate) => candidate.filePath);
+      for (const candidate of result.candidates) {
+        uniquePush(runtime.agentContext.searchResultFiles, candidate.filePath);
+        uniquePush(runtime.agentContext.relevantFiles, candidate.filePath);
+      }
+      return result;
+    },
+    summarize(result, cached) {
+      const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+      const candidates = Array.isArray(value.candidates) ? (value.candidates as Array<Record<string, unknown>>) : [];
+      return {
+        cached,
+        indexedFileCount: value.indexedFileCount,
+        candidateCount: candidates.length,
+        candidates: candidates.map((candidate) => ({ filePath: candidate.filePath, score: candidate.score, reasons: candidate.reasons })).slice(0, 3)
+      };
+    }
+  },
+  {
     name: "inspectProject",
-    description: "Inspect package.json and project metadata, including scripts, dependencies, devDependencies, package manager, and framework hints.",
+    description: "Inspect project metadata with Project Analyzer, including package manager, tech stack, structure summary, test system, validation commands, and high-risk directories.",
     parameters: {
       type: "object",
       properties: {},
@@ -108,6 +155,7 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
       const dependencies = value.dependencies && typeof value.dependencies === "object" && !Array.isArray(value.dependencies) ? Object.keys(value.dependencies) : [];
       const devDependencies = value.devDependencies && typeof value.devDependencies === "object" && !Array.isArray(value.devDependencies) ? Object.keys(value.devDependencies) : [];
+      const analysis = value.analysis && typeof value.analysis === "object" && !Array.isArray(value.analysis) ? (value.analysis as Record<string, unknown>) : {};
 
       return {
         cached,
@@ -115,7 +163,11 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         packageName: value.packageName,
         frameworkHints: value.frameworkHints,
         dependencies: dependencies.slice(0, 20),
-        devDependencies: devDependencies.slice(0, 20)
+        devDependencies: devDependencies.slice(0, 20),
+        techStack: analysis.techStack,
+        testSystem: analysis.testSystem,
+        validationCommands: analysis.validationCommands,
+        highRiskDirectories: analysis.highRiskDirectories
       };
     }
   },

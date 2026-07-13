@@ -1299,6 +1299,28 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, onAgentStep });
   let nullPatchRecoveryAttempts = 0;
 
+  // 所有待审查补丁入口都先执行 Pattern Finder，并自动读取候选，避免此链路绕过连续 Agent 的编辑门禁。
+  const patternPreflightCall: AgentToolCall = {
+    id: "preflight-pattern-finder",
+    type: "function",
+    function: {
+      name: "findSimilarPatterns",
+      arguments: JSON.stringify({ taskDescription: userRequest, targetPath: filePath || undefined, limit: 3 })
+    }
+  };
+  const patternPreflightResult = await executeAgentToolCall(patternPreflightCall, toolRuntime);
+  toolMessages.push(patternPreflightResult);
+  const patternContextFiles = await readEditContextFiles(agentContext.patternCandidateFiles || [], agentContext, runId, onAgentStep);
+  toolMessages.push({
+    role: "user",
+    content: JSON.stringify({
+      patternFinderPreflight: JSON.parse(patternPreflightResult.content),
+      automaticPatternContextFiles: patternContextFiles,
+      instruction:
+        "The server completed Pattern Finder before patch generation. Reuse the returned candidates and automaticPatternContextFiles as the project's reference implementation; only call further tools when more context is necessary."
+    })
+  });
+
   // 先做一次服务端预搜索，降低 provider 不支持强制 tool_choice 时卡在“需要先搜索”的概率。
   if (shouldRunServerPreflightSearch(userRequest, filePath, pathRetryContext)) {
     const preflightSearch = await runMandatoryEditPreflightSearch(userRequest, filePath, agentContext, runId, onAgentStep);

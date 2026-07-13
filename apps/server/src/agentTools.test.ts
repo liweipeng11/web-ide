@@ -130,6 +130,44 @@ test("searchFilesByName finds workspace paths without reading files", async () =
   assert.deepEqual(agentContext.searchResultFiles, ["src/views/SettingsPage.tsx"]);
 });
 
+test("findSimilarPatterns returns reusable candidates and records them as relevant files", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src", "services"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "services", "userService.ts"), "export async function getUser() { return true; }\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const agentContext = createAgentContext();
+  const response = await executeAgentToolCall(
+    createToolCall("findSimilarPatterns", {
+      taskDescription: "新增订单服务",
+      targetPath: "src/services/orderService.ts",
+      targetResponsibility: "service"
+    }),
+    createAgentToolRuntime({ agentContext, runId: "test-find-similar-patterns" })
+  );
+  const data = JSON.parse(response.content) as { candidates: Array<{ filePath: string }> };
+
+  assert.equal(data.candidates[0]?.filePath, "src/services/userService.ts");
+  assert.deepEqual(agentContext.searchResultFiles, ["src/services/userService.ts"]);
+  assert.deepEqual(agentContext.relevantFiles, ["src/services/userService.ts"]);
+});
+
+test("findSimilarPatterns does not reuse stale cached candidates", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src", "services"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "services", "userService.ts"), "export async function getUser() { return true; }\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const runtime = createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-find-similar-patterns-cache" });
+  const call = createToolCall("findSimilarPatterns", { taskDescription: "新增订单服务", targetPath: "src/services/orderService.ts", targetResponsibility: "service" });
+
+  await executeAgentToolCall(call, runtime);
+  await fs.writeFile(path.join(workspaceRoot, "src", "services", "orderService.ts"), "export async function orderService() { return true; }\n", "utf8");
+  const response = await executeAgentToolCall(call, runtime);
+  const data = JSON.parse(response.content) as Record<string, unknown>;
+
+  assert.equal(data.cached, undefined);
+});
+
 test("searchCodeRegex searches code patterns and records relevant files", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });

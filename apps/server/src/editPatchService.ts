@@ -1,5 +1,6 @@
 import path from "node:path";
 import { generateAiEdit, type AgentStep, type EditPathRetryContext } from "./aiClient.js";
+import { buildPatchCompletenessReport, createContextSelectionSnapshot, formatContextSelectionNeed, type ContextSelectionSnapshot, type PatchCompletenessReport } from "./contextSelection/index.js";
 import { createBinaryDiffHtml, createDiffHtml, createEditHunks, createMultiFileDiffHtml } from "./diffTools.js";
 import { buildEditScope, validatePatchesAgainstEditScope } from "./editScope.js";
 import { HttpError } from "./errors.js";
@@ -7,7 +8,7 @@ import { listFiles, readWorkspaceFile, readWorkspaceFileForDiff, safeResolve } f
 import { createPendingPatch } from "./patchStore.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import { resolvePatchNewContent, StaleFullFileRewriteError } from "./searchReplacePatch.js";
-import { appendTaskSessionPatchEvent, recordTaskSessionPatchDiagnostics } from "./taskSessionStore.js";
+import { appendTaskSessionPatchEvent, getTaskSession, recordTaskSessionContextSelection, recordTaskSessionPatchDiagnostics } from "./taskSessionStore.js";
 import type { AiEditResult, FileTreeNode, PatchFileChange, PatchFilterRecord, PatchGenerationDiagnostics } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { isValidationCommand, selectDefaultValidationCommand } from "./validationCommand.js";
@@ -250,6 +251,8 @@ export function buildPatchGenerationDiagnostics(input: {
   postDedupeCount: number;
   finalPatchCount: number;
   records: PatchFilterRecord[];
+  contextSelection?: ContextSelectionSnapshot;
+  patchCompleteness?: PatchCompletenessReport;
 }): PatchGenerationDiagnostics {
   const noEffectCount = input.records.filter((record) => record.reason === "no_effect_change").length;
 
@@ -265,8 +268,49 @@ export function buildPatchGenerationDiagnostics(input: {
     filteredCount: input.records.length,
     noEffectCount,
     records: input.records,
+    contextSelection: input.contextSelection,
+    patchCompleteness: input.patchCompleteness,
     generatedAt: Date.now()
   };
+}
+
+function getStringRecordField(value: unknown, field: string) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const record = value as Record<string, unknown>;
+  return typeof record[field] === "string" ? record[field] : "";
+}
+
+function getSearchResultFilesFromStep(step: AgentStep) {
+  if (step.type !== "tool_result" || !["searchCode", "searchCodeRegex", "searchFilesByName"].includes(step.toolName)) {
+    return [];
+  }
+
+  const output = step.output;
+  const values = Array.isArray(output) ? output : output && typeof output === "object" && Array.isArray((output as Record<string, unknown>).results) ? ((output as Record<string, unknown>).results as unknown[]) : [];
+
+  return values
+    .map((item) => getStringRecordField(item, "filePath") || getStringRecordField(item, "path"))
+    .filter(Boolean);
+}
+
+async function createPrePatchContextSnapshot(input: { taskSessionId?: string; userRequest: string; selectedFilePath: string | null }) {
+  const session = input.taskSessionId
+    ? await getTaskSession(input.taskSessionId).catch((error) => {
+        if (error instanceof HttpError && error.status === 404) return null;
+        throw error;
+      })
+    : null;
+  const sessionFilesRead = session?.filesRead || [];
+  const selectedFilesRead = input.selectedFilePath ? [input.selectedFilePath] : [];
+  const searchResultFiles = session?.steps.flatMap(getSearchResultFilesFromStep) || [];
+
+  return createContextSelectionSnapshot({
+    taskSessionId: input.taskSessionId || null,
+    userGoal: input.userRequest,
+    selectedFilePath: input.selectedFilePath,
+    filesRead: [...sessionFilesRead, ...selectedFilesRead],
+    searchResultFiles
+  });
 }
 
 function assertNoDeletePatches(aiResult: AiEditResult) {
@@ -343,6 +387,26 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     onAgentStep?.(createAgentStep({ type: "tool_call", toolName: "readFile", input: { filePath: selectedFilePath, selected: true } }));
     oldContent = await readWorkspaceFile(selectedFilePath);
     onAgentStep?.(createAgentStep({ type: "tool_result", toolName: "readFile", output: { filePath: selectedFilePath, chars: oldContent.length, selected: true } }));
+  }
+
+  const contextSelection = await createPrePatchContextSnapshot({ taskSessionId, userRequest, selectedFilePath });
+  await recordTaskSessionContextSelection(taskSessionId, contextSelection);
+  logRoute(runId, "contextSelection.ready", {
+    readyForPatch: contextSelection.readyForPatch,
+    candidateFiles: contextSelection.candidateFiles.map((file) => file.filePath),
+    missingRequirements: contextSelection.missingRequirements.map((item) => item.requirement)
+  });
+
+  if ((taskSessionId || selectedFilePath) && !contextSelection.readyForPatch) {
+    const contextNeed = formatContextSelectionNeed(contextSelection);
+
+    onAgentStep?.(
+      createAgentStep({
+        type: "message",
+        content: contextNeed.message
+      })
+    );
+    throw new HttpError(428, contextNeed.message);
   }
 
   let retryContext: EditPathRetryContext | undefined;
@@ -508,6 +572,10 @@ export async function createEditPatchResponse(filePath: string | null | undefine
   const selectedFileChange = (selectedFilePath ? files.find((change) => change.path === selectedFilePath) : null) || files[0];
   const rawPatchCount = aiResult.patches.length;
   const finalSummary = buildFinalPatchSummary({ files, rawPatchCount, commandsToRun });
+  const patchCompleteness = buildPatchCompletenessReport({
+    snapshot: contextSelection,
+    patchFiles: files.map((file) => file.path)
+  });
   const diagnosticsWithoutPatchId = buildPatchGenerationDiagnostics({
     modelSummary: aiResult.summary,
     rawPatchCount,
@@ -515,7 +583,9 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     preDedupeCount: finalPreDedupeCount || validatedPaths.files?.length || 0,
     postDedupeCount: finalPostDedupeCount || uniqueChanges.length,
     finalPatchCount: files.length,
-    records: diagnosticsRecords
+    records: diagnosticsRecords,
+    contextSelection,
+    patchCompleteness
   });
   const patch = createPendingPatch(files, taskSessionId, commandsToRun, diagnosticsWithoutPatchId);
   const diagnostics = {

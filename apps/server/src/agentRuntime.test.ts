@@ -727,7 +727,7 @@ test("plan mode exposes only readonly tools to the model", async () => {
 
   const toolNames = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   assert.equal(result.status, "completed");
-  assert.deepEqual(toolNames.sort(), ["inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "searchCode", "searchCodeRegex", "searchFilesByName"].sort());
+  assert.deepEqual(toolNames.sort(), ["findSimilarPatterns", "inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "searchCode", "searchCodeRegex", "searchFilesByName"].sort());
 });
 
 test("act mode exposes edit, patch, and command tools to the model", async () => {
@@ -755,6 +755,24 @@ test("act mode exposes edit, patch, and command tools to the model", async () =>
   // patch 工具排在直接编辑工具前面，引导常规修改先进入 diff 审核。
   assert.ok(toolNames.indexOf("proposePatch") < toolNames.indexOf("replaceInFile"));
   assert.ok(toolNames.indexOf("applyPatch") < toolNames.indexOf("writeFile"));
+});
+
+test("act mode blocks edits until Pattern Finder has been called", async () => {
+  let requestCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "实现一个新服务",
+    runId: "test-runtime-pattern-finder-gate",
+    mode: "act",
+    requestCompletion: async () => {
+      requestCount += 1;
+      return requestCount === 1
+        ? { choices: [{ message: { role: "assistant", tool_calls: [{ id: "patch-before-pattern", type: "function", function: { name: "proposePatch", arguments: "{}" } }] } }] }
+        : { choices: [{ message: { role: "assistant", content: "已收到检索要求。" } }] };
+    }
+  });
+
+  const blockedToolMessage = result.messages.find((message) => message.role === "tool" && message.tool_call_id === "patch-before-pattern");
+  assert.match(blockedToolMessage?.content || "", /findSimilarPatterns/);
 });
 
 test("act prompt 优先引导生成可审查 patch", () => {
