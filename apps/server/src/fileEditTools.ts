@@ -1,10 +1,12 @@
 import { createFileEditCheckpoint } from "./checkpointStore.js";
 import { replaceInFile, writeFile } from "./fileEditService.js";
 import { createAgentStep } from "./routeAgentSteps.js";
+import { checkCodeImports } from "./existenceChecker/index.js";
 import { addTaskSessionCheckpoint, addTaskSessionFilesChanged, appendTaskSessionFileEditEvent } from "./taskSessionStore.js";
 import type { AgentFileEditToolResult, AgentToolDefinition } from "./agentToolTypes.js";
 import type { CheckpointSource, FileEditResult } from "./types.js";
 import type { AgentToolRuntime } from "./agentToolTypes.js";
+import { getWorkspaceRoot } from "./workspaceStore.js";
 
 const OLD_CONTENT_PREVIEW_LIMIT = 1200;
 
@@ -64,6 +66,14 @@ function summarizeFileEditResult(result: unknown, cached: boolean) {
 }
 
 type FileEditToolName = "replaceInFile" | "writeFile";
+
+async function ensureWrittenImportsExist(content: string, filePath: string) {
+  const workspaceRoot = getWorkspaceRoot();
+  if (!workspaceRoot) throw new Error("No workspace selected");
+  const { result } = await checkCodeImports(workspaceRoot, content, filePath);
+  const unresolved = result.checks.filter((check) => check.status !== "exists");
+  if (unresolved.length) throw new Error(`Cannot write unresolved import references: ${unresolved.map((check) => `${check.target.value} (${check.status})`).join(", ")}`);
+}
 
 function createCheckpointSource(runtime: AgentToolRuntime, toolName: FileEditToolName): CheckpointSource {
   return {
@@ -164,6 +174,8 @@ export const fileEditToolDefinitions: AgentToolDefinition[] = [
     },
     async execute(args, runtime) {
       const filePath = requiredString(args, "filePath");
+      // replacement 中新增的 import 必须先在真实工作区中解析成功，防止直接编辑绕过 Agent 门禁。
+      await ensureWrittenImportsExist(requiredRawString(args, "replace"), filePath);
       const result = await executeFileEditWithLifecycle("replaceInFile", filePath, runtime, () =>
         replaceInFile({
           filePath,
@@ -203,6 +215,8 @@ export const fileEditToolDefinitions: AgentToolDefinition[] = [
     },
     async execute(args, runtime) {
       const filePath = requiredString(args, "filePath");
+      // 全量写入前校验最终内容中的 import，避免将不存在的模块落盘。
+      await ensureWrittenImportsExist(requiredRawString(args, "content"), filePath);
       const result = await executeFileEditWithLifecycle("writeFile", filePath, runtime, () =>
         writeFile({
           filePath,

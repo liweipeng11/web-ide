@@ -1,6 +1,9 @@
 import { createEditPatchResponse } from "./editPatchService.js";
 import { applyPendingPatch } from "./patchApplyService.js";
+import { checkCodeImports } from "./existenceChecker/index.js";
+import { deletePendingPatch } from "./patchStore.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
+import { getWorkspaceRoot } from "./workspaceStore.js";
 
 function optionalString(args: Record<string, unknown>, name: string) {
   return typeof args[name] === "string" && args[name].trim() ? args[name].trim() : null;
@@ -39,6 +42,14 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
       const userRequest = optionalString(args, "userRequest") || runtime.agentContext.userGoal;
       const filePath = optionalString(args, "filePath");
       const patch = await createEditPatchResponse(filePath, userRequest, runtime.onAgentStep, runtime.taskSessionId || undefined);
+      const workspaceRoot = getWorkspaceRoot();
+      if (!workspaceRoot) throw new Error("No workspace selected");
+      const importChecks = await Promise.all(patch.files.map((file) => checkCodeImports(workspaceRoot, file.newContent, file.path)));
+      const unresolved = importChecks.flatMap(({ result }) => result.checks).filter((check) => check.status !== "exists");
+      if (unresolved.length) {
+        deletePendingPatch(patch.patchId);
+        throw new Error(`Generated patch contains unresolved import references: ${unresolved.map((check) => `${check.target.value} (${check.status})`).join(", ")}`);
+      }
       runtime.generatedPatchIds?.push(patch.patchId);
 
       // ????????????? HTML diff ??????????????

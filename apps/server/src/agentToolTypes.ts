@@ -14,6 +14,10 @@ export type AgentContext = {
   patternSearchPerformed?: boolean;
   /** 最近一次检索得到的候选文件，存在候选时至少应阅读一个。 */
   patternCandidateFiles?: string[];
+  /** 本轮是否已执行引用存在性检查，避免在未确认路径或符号时直接编辑。 */
+  existenceCheckPerformed?: boolean;
+  /** 最近一次检查中仍缺失或歧义的引用，用于阻止不可靠的代码生成。 */
+  unresolvedExistenceChecks?: string[];
 };
 
 export type AgentToolCall = {

@@ -44,6 +44,8 @@ Rules:
 - After runCommand returns a failed result, inspect the output and continue with search/read/proposePatch if the failure is related to the user's task; use direct edit tools only as the fallback described above.
 - Prefer listFiles/searchFilesByName/listCodeDefinitionNames/searchCode/searchCodeRegex/readFile/readFileChunk before editing so the change follows existing project style.
 - Before proposePatch, replaceInFile, or writeFile, call findSimilarPatterns. If candidates are returned, read at least one candidate before editing; the runtime enforces this requirement.
+- Before proposePatch, replaceInFile, or writeFile, call checkExistence for every import path, symbol, package script, environment variable source, or directory that the edit depends on. Do not edit while it reports missing or ambiguous references.
+- Never report a package script as having run unless checkExistence confirms the script exists and runCommand returns its actual result.
 - If you have enough context, provide a concise final answer in Chinese unless the user asks for another language.`;
 
 export const AI_AGENT_PLAN_SYSTEM_PROMPT = `${AI_AGENT_RUNTIME_SYSTEM_PROMPT}
@@ -135,7 +137,7 @@ You will receive:
 - the most recent failed command result, when available
 - fallback search results, when the required first search does not find matching files
 - project facts inspected from package.json, when available
-- tools you can call, including inspectProject(), findSimilarPatterns(taskDescription,targetPath,targetResponsibility,limit) for locating reusable implementation patterns, listFiles(path,recursive,includeIgnored,limit) for directory discovery, searchFilesByName(query,path,limit) for path discovery, listCodeDefinitionNames(path,limit,includeIgnored) for top-level structure discovery, searchCode(query,path,filePattern,limit,caseSensitive,contextLines) for literal code search, searchCodeRegex(regex,path,filePattern,limit,caseSensitive,contextLines) for regex code search, readFile(filePath) for reading the first file chunk, readFileChunk(filePath,startLine,endLine) for reading follow-up chunks, and readFileRange(filePath,startLine,endLine) as a compatibility range reader
+- tools you can call, including inspectProject(), findSimilarPatterns(taskDescription,targetPath,targetResponsibility,limit) for locating reusable implementation patterns, checkExistence(targets) for confirming imports, symbols, scripts, environment-variable sources, and directories, listFiles(path,recursive,includeIgnored,limit) for directory discovery, searchFilesByName(query,path,limit) for path discovery, listCodeDefinitionNames(path,limit,includeIgnored) for top-level structure discovery, searchCode(query,path,filePattern,limit,caseSensitive,contextLines) for literal code search, searchCodeRegex(regex,path,filePattern,limit,caseSensitive,contextLines) for regex code search, readFile(filePath) for reading the first file chunk, readFileChunk(filePath,startLine,endLine) for reading follow-up chunks, and readFileRange(filePath,startLine,endLine) as a compatibility range reader
 
 ${AI_AGENT_DISCOVERY_STRATEGY_PROMPT}
 
@@ -153,6 +155,7 @@ Your task:
 - Treat selectedFile only as optional context. Do not limit edits to it and do not require it to be present.
 - Before searching code contents, infer 1 to 4 concise discovery terms from the user's intent. Use file-name hints, directory names, identifiers, route names, component names, API names, domain nouns, or error codes.
 - Before implementing or editing code, call findSimilarPatterns with a concise taskDescription and the likely targetPath or targetResponsibility. If it returns candidates, read the most relevant candidate with readFile before producing a patch; do not invent a new pattern when a suitable existing one is available.
+- Before implementing or editing code, call checkExistence for the concrete references the change will use. A missing import or script must be corrected first; multiple symbol candidates must be resolved by narrowing the file path.
 - If the likely file or module name is unknown, prefer searchFilesByName(query) or listFiles(path,recursive) before searchCode(query).
 - If the likely directory is known but the relevant implementation file is unclear, call listCodeDefinitionNames(path) before reading full files.
 - Do not pass the user's full original request as any discovery query; use an inferred keyword or short phrase instead.

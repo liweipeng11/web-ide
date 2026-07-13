@@ -2,6 +2,7 @@ import { logAi } from "./aiHttp.js";
 import { createContextCache, listCodeDefinitionNames, listWorkspaceFiles, readWorkspaceFileChunk, readWorkspaceFileRange, searchTextRegex, searchWorkspaceCode, searchWorkspaceFilesByName } from "./codeDiscovery/index.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { findSimilarPatterns } from "./patternFinder/index.js";
+import { checkExistence, type ExistenceCheckTarget } from "./existenceChecker/index.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
@@ -95,6 +96,56 @@ function getSearchOptions(args: Record<string, unknown>) {
 }
 
 export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
+  {
+    name: "checkExistence",
+    description: "Verify that imports, symbols, package scripts, environment-variable sources, and directories actually exist. Returns exists, missing, or ambiguous; resolve missing and ambiguous results before editing or claiming a command ran.",
+    cacheable: false,
+    parameters: {
+      type: "object",
+      properties: {
+        targets: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["import", "symbol", "script", "environment", "directory"] },
+              value: { type: "string" },
+              fromPath: { type: "string", description: "Optional workspace-relative source file for import/symbol lookup or package.json path for script lookup." },
+              environmentMode: { type: "string", description: "Optional environment mode used to explain environment-variable lookup." }
+            },
+            required: ["kind", "value"],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ["targets"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const rawTargets = Array.isArray(args.targets) ? args.targets : [];
+      if (!rawTargets.length) throw new Error("targets is required");
+      const targets = rawTargets.map((value): ExistenceCheckTarget => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Each target must be an object");
+        const target = value as Record<string, unknown>;
+        const kind = optionalString(target, "kind");
+        const validKinds = new Set(["import", "symbol", "script", "environment", "directory"]);
+        if (!validKinds.has(kind)) throw new Error("target.kind is invalid");
+        return { kind: kind as ExistenceCheckTarget["kind"], value: requiredString(target, "value"), ...(optionalString(target, "fromPath") ? { fromPath: optionalString(target, "fromPath") } : {}), ...(optionalString(target, "environmentMode") ? { environmentMode: optionalString(target, "environmentMode") } : {}) };
+      });
+      const workspaceRoot = getWorkspaceRoot();
+      if (!workspaceRoot) throw new Error("No workspace selected");
+      const result = await checkExistence(workspaceRoot, targets);
+      runtime.agentContext.existenceCheckPerformed = true;
+      runtime.agentContext.unresolvedExistenceChecks = result.checks.filter((check) => check.status !== "exists").map((check) => `${check.target.kind}:${check.target.value}`);
+      for (const check of result.checks) for (const candidate of check.candidates) uniquePush(runtime.agentContext.relevantFiles, candidate.path);
+      return result;
+    },
+    summarize(result, cached) {
+      const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+      return { cached, summary: value.summary, checks: Array.isArray(value.checks) ? value.checks : [] };
+    }
+  },
   {
     name: "findSimilarPatterns",
     description: "Find one to three relevant existing implementation patterns before editing. Ranks candidates by directory, responsibility, naming, imports, structure, error handling, test pairing, recency, and reuse signals.",

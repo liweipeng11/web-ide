@@ -47,7 +47,9 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
     searchResultFiles: [],
     relevantFiles: [],
     patternSearchPerformed: false,
-    patternCandidateFiles: []
+    patternCandidateFiles: [],
+    existenceCheckPerformed: false,
+    unresolvedExistenceChecks: []
   };
 }
 
@@ -64,6 +66,14 @@ function getPatternFinderBlockReason(toolName: string, agentContext: AgentContex
     return "findSimilarPatterns returned candidate files. Read at least one candidate with readFile before editing.";
   }
 
+  return null;
+}
+
+function getExistenceCheckBlockReason(toolName: string, agentContext: AgentContext, registry: AgentToolRegistry) {
+  const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile"]);
+  if (!editingTools.has(toolName) || !registry.get("checkExistence")) return null;
+  if (agentContext.existenceCheckPerformed !== true) return "Before editing, call checkExistence to verify referenced imports, symbols, scripts, or directories.";
+  if (agentContext.unresolvedExistenceChecks?.length) return `Resolve missing or ambiguous references before editing: ${agentContext.unresolvedExistenceChecks.join(", ")}.`;
   return null;
 }
 
@@ -323,11 +333,20 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     for (const toolCall of message.tool_calls) {
       const definition = registry.get(toolCall.function.name);
       const patternFinderBlockReason = getPatternFinderBlockReason(toolCall.function.name, agentContext, registry);
+      const existenceCheckBlockReason = getExistenceCheckBlockReason(toolCall.function.name, agentContext, registry);
 
       if (patternFinderBlockReason) {
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: patternFinderBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: patternFinderBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, patternFinderBlockReason);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        continue;
+      }
+      if (existenceCheckBlockReason) {
+        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: existenceCheckBlockReason });
+        options.onAgentStep?.(createAgentStep({ type: "error", message: existenceCheckBlockReason }));
+        const blockedMessage = createBlockedToolMessage(toolCall, existenceCheckBlockReason);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
         continue;

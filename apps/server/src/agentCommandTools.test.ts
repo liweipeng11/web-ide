@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createCommandAgentToolDefinitions } from "./agentCommandTools.js";
+import { createCommandAgentToolDefinitions, parsePackageScript } from "./agentCommandTools.js";
 import { createContextCache } from "./codeDiscovery/index.js";
 import type { AgentStep, CommandPolicyResult, CommandResult } from "./types.js";
 
@@ -33,13 +33,14 @@ function createRuntime(onAgentStep?: (step: AgentStep) => void) {
   };
 }
 
-function createTool(options: { policy?: CommandPolicyResult; result?: CommandResult; onRun?: () => void } = {}) {
+function createTool(options: { policy?: CommandPolicyResult; result?: CommandResult; onRun?: () => void; scriptProblem?: string | null } = {}) {
   return createCommandAgentToolDefinitions({
     evaluateCommandPolicy: () => options.policy || { level: "safe", reason: "allowlisted" },
     runProjectCommand: async () => {
       options.onRun?.();
       return options.result || commandResult("success");
-    }
+    },
+    verifyPackageScript: async () => options.scriptProblem || null
   })[0];
 }
 
@@ -83,4 +84,17 @@ test("runCommand blocks command when command policy rejects it", async () => {
   await assert.rejects(() => tool.execute({ command: "rm -rf dist" }, createRuntime((step) => steps.push(step))), /blocked command/);
   assert.equal(ran, false);
   assert.deepEqual(commandStatuses(steps), ["blocked"]);
+});
+
+test("runCommand blocks missing package scripts before execution", async () => {
+  let ran = false;
+  const tool = createTool({ scriptProblem: 'Package script "typecheck" is missing.', onRun: () => { ran = true; } });
+
+  await assert.rejects(() => tool.execute({ command: "pnpm typecheck" }, createRuntime()), /typecheck.*missing/i);
+  assert.equal(ran, false);
+});
+
+test("识别 Monorepo 包目录中的包管理器脚本", () => {
+  assert.deepEqual(parsePackageScript("pnpm --dir apps/server typecheck"), { script: "typecheck", directory: "apps/server" });
+  assert.deepEqual(parsePackageScript("npm --prefix apps/server run test"), { script: "test", directory: "apps/server" });
 });

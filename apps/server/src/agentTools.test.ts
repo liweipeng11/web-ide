@@ -152,6 +152,26 @@ test("findSimilarPatterns returns reusable candidates and records them as releva
   assert.deepEqual(agentContext.relevantFiles, ["src/services/userService.ts"]);
 });
 
+test("checkExistence records unresolved references for the runtime edit gate", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.writeFile(path.join(workspaceRoot, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }), "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const agentContext = createAgentContext();
+  const response = await executeAgentToolCall(
+    createToolCall("checkExistence", {
+      targets: [{ kind: "script", value: "test" }, { kind: "import", value: "./missing", fromPath: "src/app.ts" }]
+    }),
+    createAgentToolRuntime({ agentContext, runId: "test-check-existence" })
+  );
+  const data = JSON.parse(response.content) as { summary: { exists: number; missing: number } };
+
+  assert.deepEqual(data.summary, { exists: 1, missing: 1, ambiguous: 0 });
+  assert.equal(agentContext.existenceCheckPerformed, true);
+  assert.deepEqual(agentContext.unresolvedExistenceChecks, ["import:./missing"]);
+  await fs.rm(workspaceRoot, { recursive: true, force: true });
+});
+
 test("findSimilarPatterns does not reuse stale cached candidates", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.mkdir(path.join(workspaceRoot, "src", "services"), { recursive: true });
