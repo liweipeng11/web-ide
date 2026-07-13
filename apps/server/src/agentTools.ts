@@ -3,6 +3,7 @@ import { createContextCache, listCodeDefinitionNames, listWorkspaceFiles, readWo
 import { inspectCurrentProject } from "./projectInspector.js";
 import { findSimilarPatterns } from "./patternFinder/index.js";
 import { checkExistence, type ExistenceCheckTarget } from "./existenceChecker/index.js";
+import { analyzeImpact, type ImpactChangeKind, type ImpactChangeTarget } from "./impactAnalyzer/index.js";
 import { buildSymbolGraph, querySymbolGraph, type SymbolGraphQuery, type SymbolQueryKind } from "./symbolGraph/index.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
@@ -97,6 +98,77 @@ function getSearchOptions(args: Record<string, unknown>) {
 }
 
 export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
+  // 影响分析只读取静态索引，规划阶段即可用于约束后续修改范围。
+  {
+    name: "analyzeImpact",
+    description: "Analyze direct and indirect consumers of planned file or symbol changes. Returns affected files, related tests, boundary files, risk, and completeness diagnostics. Use before changing shared symbols, contracts, routes, or multi-file behavior.",
+    cacheable: false,
+    parameters: {
+      type: "object",
+      properties: {
+        changes: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            properties: {
+              filePath: { type: "string", description: "Workspace-relative source file to be changed." },
+              symbolName: { type: "string", description: "Optional symbol that narrows analysis within the file." },
+              changeKind: { type: "string", enum: ["add", "modify", "delete", "rename", "signature"] }
+            },
+            required: ["filePath"],
+            additionalProperties: false
+          }
+        },
+        maxDepth: { type: "integer", minimum: 1, maximum: 10 },
+        maxFiles: { type: "integer", minimum: 1, maximum: 1000 }
+      },
+      required: ["changes"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      if (!Array.isArray(args.changes) || !args.changes.length) throw new Error("changes must be a non-empty array");
+      const validKinds = new Set<ImpactChangeKind>(["add", "modify", "delete", "rename", "signature"]);
+      const changes: ImpactChangeTarget[] = args.changes.map((rawChange, index) => {
+        if (!rawChange || typeof rawChange !== "object" || Array.isArray(rawChange)) throw new Error(`changes[${index}] must be an object`);
+        const change = rawChange as Record<string, unknown>;
+        const filePath = requiredString(change, "filePath");
+        const symbolName = optionalString(change, "symbolName");
+        const changeKind = optionalString(change, "changeKind", "modify") as ImpactChangeKind;
+        if (!validKinds.has(changeKind)) throw new Error(`changes[${index}].changeKind is invalid`);
+        return { filePath, symbolName: symbolName || undefined, changeKind };
+      });
+      const workspaceRoot = getWorkspaceRoot();
+      if (!workspaceRoot) throw new Error("No workspace selected");
+
+      uniquePush(runtime.agentContext.searchQueries, `impact:${changes.map((change) => `${change.filePath}${change.symbolName ? `#${change.symbolName}` : ""}`).join(",")}`);
+      const result = await analyzeImpact(workspaceRoot, changes, {
+        maxDepth: optionalPositiveInteger(args, "maxDepth", 4),
+        maxFiles: optionalPositiveInteger(args, "maxFiles", 300)
+      });
+      for (const change of result.changes) uniquePush(runtime.agentContext.relevantFiles, change.filePath);
+      for (const impacted of result.impactedFiles) {
+        uniquePush(runtime.agentContext.searchResultFiles, impacted.filePath);
+        uniquePush(runtime.agentContext.relevantFiles, impacted.filePath);
+      }
+      return result;
+    },
+    summarize(result, cached) {
+      const value = result && typeof result === "object" ? result as Record<string, unknown> : {};
+      const risk = value.risk && typeof value.risk === "object" ? value.risk as Record<string, unknown> : {};
+      return {
+        cached,
+        complete: value.complete,
+        truncated: value.truncated,
+        riskLevel: risk.level,
+        impactedFileCount: Array.isArray(value.impactedFiles) ? value.impactedFiles.length : 0,
+        relatedTestCount: Array.isArray(value.relatedTests) ? value.relatedTests.length : 0,
+        diagnosticCount: Array.isArray(value.diagnostics) ? value.diagnostics.length : 0,
+        unresolvedReferenceCount: value.unresolvedReferenceCount,
+        indexedUnresolvedReferenceCount: value.indexedUnresolvedReferenceCount
+      };
+    }
+  },
   // 符号图属于只读分析能力，规划模式和执行模式都可安全调用。
   {
     name: "analyzeSymbolGraph",
@@ -802,6 +874,11 @@ function parseArguments(rawArguments: string) {
 }
 
 function getToolPurpose(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "analyzeImpact") {
+    const count = Array.isArray(args.changes) ? args.changes.length : 0;
+    return `Use analyzeImpact to inspect direct and indirect consumers for ${count || "the planned"} change target(s).`;
+  }
+
   if (toolName === "analyzeSymbolGraph") {
     return `Use analyzeSymbolGraph to inspect ${String(args.kind || "symbol relationships")} for "${String(args.symbolName || args.filePath || "the selected scope")}".`;
   }
@@ -854,6 +931,20 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
 }
 
 function createToolApprovalStep(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "analyzeImpact") {
+    const targets = Array.isArray(args.changes)
+      ? args.changes.map((change) => change && typeof change === "object" ? String((change as Record<string, unknown>).filePath || "") : "").filter(Boolean)
+      : [];
+    return createApprovalRequestStep({
+      actionType: "search_code",
+      title: "分析变更影响范围",
+      summary: `准备分析 ${targets.length || 1} 个拟变更目标的直接与间接影响。`,
+      status: "auto_approved",
+      targets: targets.length ? targets : undefined,
+      details: { changes: args.changes, maxDepth: args.maxDepth, maxFiles: args.maxFiles }
+    });
+  }
+
   if (toolName === "analyzeSymbolGraph") {
     const target = String(args.symbolName || args.filePath || args.path || "工作区").trim();
     return createApprovalRequestStep({

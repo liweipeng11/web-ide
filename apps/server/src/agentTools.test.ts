@@ -305,6 +305,57 @@ test("analyzeSymbolGraph returns symbol references and records related files", a
   assert.equal(agentContext.searchQueries[0], "symbol:references:loadUser");
 });
 
+test("analyzeImpact returns upstream consumers and records the impact scope", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src", "routes"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "service.ts"), "export function loadUser() { return true }\n", "utf8");
+  await fs.writeFile(
+    path.join(workspaceRoot, "src", "routes", "userRoute.ts"),
+    "import { loadUser } from '../service.js'\nexport function getUser() { return loadUser() }\n",
+    "utf8"
+  );
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const agentContext = createAgentContext();
+  const response = await executeAgentToolCall(
+    createToolCall("analyzeImpact", { changes: [{ filePath: "src/service.ts", symbolName: "loadUser", changeKind: "signature" }] }),
+    createAgentToolRuntime({ agentContext, runId: "test-impact-analyzer" })
+  );
+  const data = JSON.parse(response.content) as {
+    impactedFiles: Array<{ filePath: string }>;
+    boundaryFiles: string[];
+    risk: { level: string };
+  };
+
+  assert.deepEqual(data.impactedFiles.map((file) => file.filePath), ["src/routes/userRoute.ts"]);
+  assert.deepEqual(data.boundaryFiles, ["src/routes/userRoute.ts"]);
+  assert.equal(data.risk.level, "high");
+  assert.deepEqual(agentContext.searchResultFiles, ["src/routes/userRoute.ts"]);
+  assert.deepEqual(agentContext.relevantFiles.sort(), ["src/routes/userRoute.ts", "src/service.ts"]);
+  assert.equal(agentContext.searchQueries[0], "impact:src/service.ts#loadUser");
+  await fs.rm(workspaceRoot, { recursive: true, force: true });
+});
+
+test("analyzeImpact tool enforces maxFiles and exposes truncation metadata", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "service.ts"), "export function loadUser() { return true }\n", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "src", "consumerA.ts"), "import { loadUser } from './service.js'\nloadUser()\n", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "src", "consumerB.ts"), "import { loadUser } from './service.js'\nloadUser()\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const response = await executeAgentToolCall(
+    createToolCall("analyzeImpact", { changes: [{ filePath: "src/service.ts", symbolName: "loadUser" }], maxFiles: 1 }),
+    createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-impact-analyzer-limit" })
+  );
+  const data = JSON.parse(response.content) as { impactedFiles: unknown[]; truncated: boolean; diagnostics: string[] };
+
+  assert.equal(data.impactedFiles.length, 1);
+  assert.equal(data.truncated, true);
+  assert.match(data.diagnostics.at(-1) || "", /结果已截断/);
+  await fs.rm(workspaceRoot, { recursive: true, force: true });
+});
+
 test("read tools emit activity steps without an approval card", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "hello\n", "utf8");

@@ -728,7 +728,7 @@ test("plan mode exposes only readonly tools to the model", async () => {
   const toolNames = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   assert.equal(result.status, "completed");
   // Symbol Graph 只读取源码并返回静态关系，因此规划模式也应允许使用。
-  assert.deepEqual(toolNames.sort(), ["analyzeSymbolGraph", "checkExistence", "findSimilarPatterns", "inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "searchCode", "searchCodeRegex", "searchFilesByName"].sort());
+  assert.deepEqual(toolNames.sort(), ["analyzeImpact", "analyzeSymbolGraph", "checkExistence", "findSimilarPatterns", "inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "searchCode", "searchCodeRegex", "searchFilesByName"].sort());
 });
 
 test("act mode exposes edit, patch, and command tools to the model", async () => {
