@@ -6,6 +6,13 @@ import type { TerminalCommandCompletion, TerminalCommandRequest } from "../compo
 const MAX_FIX_ATTEMPTS = 3;
 const commandOutputPreviewChars = 2000;
 
+// 验证类建议统一交给 Verifier，避免终端路径和自动回修路径产生两套结果。
+function isValidationSuggestion(command: string) {
+  const normalized = command.trim().toLowerCase();
+  return /(?:^|\s|:)(?:format:check|format-check|check|typecheck|type-check|lint|test|build)(?::[a-z0-9_.-]+)*(?:\s|$)/.test(normalized)
+    || /(?:^|\s)(?:tsc|eslint|vitest|jest|pytest|mypy|ruff\s+check)(?:\s|$)/.test(normalized);
+}
+
 type UseCommandCenterOptions = {
   state: AppState;
   setState: Dispatch<SetStateAction<AppState>>;
@@ -177,10 +184,11 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
     }
   }
 
-  async function handleValidateAndFix(command: string, options: { confirmed?: boolean } = {}): Promise<AutoValidationResponse | null> {
+  async function handleValidateAndFix(command: string | null = null, options: { confirmed?: boolean } = {}): Promise<AutoValidationResponse | null> {
     if (!state.workspaceRoot || state.loading || state.streaming) return null;
 
-    const currentAutoFix = state.autoFix?.command === command ? state.autoFix : null;
+    // 自动流水线没有固定命令，回修次数需要跨不同失败阶段连续累计。
+    const currentAutoFix = command ? state.autoFix?.command === command ? state.autoFix : null : state.autoFix;
     const attempts = currentAutoFix?.attempts || 0;
     const maxAttempts = currentAutoFix?.maxAttempts || MAX_FIX_ATTEMPTS;
 
@@ -237,6 +245,13 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
         return validation;
       }
 
+      if (validation.status === "no_commands") {
+        const message = "当前项目未发现可执行的验证命令，请先添加 typecheck、lint、test 或 build 脚本。";
+        setState((current) => ({ ...current, loading: false, error: message, autoFix: null, agentSteps: nextAgentSteps(current.agentSteps) }));
+        void refreshTaskSessions(state.currentTaskSessionId);
+        return validation;
+      }
+
       const message =
         validation.status === "blocked"
           ? validation.policy.reason
@@ -287,6 +302,11 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
 
       if (options?.autoSafeOnly && policy.level !== "safe") {
         return null;
+      }
+
+      if (isValidationSuggestion(suggestion.command)) {
+        const validation = await handleValidateAndFix(suggestion.command, { confirmed: policy.level === "safe" });
+        return validation?.result || null;
       }
 
       setState((current) => ({ ...current, loading: true, error: null }));

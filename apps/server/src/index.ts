@@ -309,13 +309,9 @@ app.post(
   asyncRoute(async (request, response) => {
     const { command, selectedPath, taskSessionId, attempts, maxAttempts, confirmed } = request.body as Partial<AutoValidationRequest>;
 
-    if (!command?.trim()) {
-      throw new HttpError(400, "command is required");
-    }
-
     response.json(
       await runAutoValidation({
-        command,
+        command: command?.trim() || null,
         selectedPath,
         taskSessionId,
         attempts,

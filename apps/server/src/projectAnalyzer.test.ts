@@ -35,7 +35,7 @@ test("analyzeProject detects pnpm workspace stack and validation commands", asyn
     JSON.stringify(
       {
         name: "web",
-        scripts: { typecheck: "tsc --noEmit", build: "vite build" },
+        scripts: { typecheck: "tsc --noEmit", "test:unit": "vitest run", build: "vite build" },
         dependencies: { react: "^19.0.0", "react-dom": "^19.0.0" },
         devDependencies: { vite: "^7.0.0", typescript: "^5.0.0", vitest: "^3.0.0" }
       },
@@ -62,6 +62,7 @@ test("analyzeProject detects pnpm workspace stack and validation commands", asyn
   assert.ok(analysis.testSystem.tools.includes("vitest"));
   assert.ok(analysis.validationCommands.some((command) => command.command === "pnpm test"));
   assert.ok(analysis.validationCommands.some((command) => command.command === "pnpm --dir apps/web typecheck"));
+  assert.ok(analysis.validationCommands.some((command) => command.command === "pnpm --dir apps/web test:unit"));
   assert.ok(analysis.highRiskDirectories.some((directory) => directory.path === "node_modules"));
   assert.ok(analysis.highRiskDirectories.some((directory) => directory.path === "dist"));
 });

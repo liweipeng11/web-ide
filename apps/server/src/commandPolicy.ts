@@ -12,6 +12,8 @@ const safeCommands = [
   "npm run typecheck",
   "npm run type-check",
   "npm run check",
+  "npm run format:check",
+  "npm run format-check",
   "npm test",
   "pnpm build",
   "pnpm test",
@@ -19,12 +21,16 @@ const safeCommands = [
   "pnpm typecheck",
   "pnpm type-check",
   "pnpm check",
+  "pnpm format:check",
+  "pnpm format-check",
   "yarn build",
   "yarn test",
   "yarn lint",
   "yarn typecheck",
   "yarn type-check",
   "yarn check",
+  "yarn format:check",
+  "yarn format-check",
   "npm run dev",
   "npm run serve"
 ];
@@ -39,6 +45,25 @@ function normalizeCommand(command: string) {
 
 function matchesCommandPrefix(command: string, policyCommand: string) {
   return command === policyCommand || command.startsWith(`${policyCommand} `);
+}
+
+function isValidationScriptName(value: string) {
+  return /^(?:format:check|format-check|check|typecheck|type-check|lint|test|build)(?::[a-z0-9_.-]+)*$/i.test(value);
+}
+
+// 自动验证白名单只接受完整命令结构，不允许通过命令参数拼接额外 shell 操作。
+function isSafeRootValidationCommand(command: string) {
+  const pnpmOrYarn = command.match(/^(?:pnpm|yarn)\s+([^\s]+)$/i);
+  if (pnpmOrYarn) return isValidationScriptName(pnpmOrYarn[1]);
+
+  const npm = command.match(/^npm\s+(?:run\s+)?([^\s]+)$/i);
+  return Boolean(npm && isValidationScriptName(npm[1]));
+}
+
+// workspace 子包验证命令仅允许受控目录和验证脚本名。
+function isSafeWorkspaceValidationCommand(command: string) {
+  const matched = command.match(/^(?:pnpm\s+--dir|npm\s+--prefix)\s+([a-z0-9_./\\-]+)\s+(?:run\s+)?([^\s]+)$/i);
+  return Boolean(matched && isValidationScriptName(matched[2]));
 }
 
 export function evaluateCommandPolicy(command: string): CommandPolicyResult {
@@ -69,12 +94,12 @@ export function evaluateCommandPolicy(command: string): CommandPolicyResult {
     };
   }
 
-  const safeCommand = safeCommands.find((policyCommand) => matchesCommandPrefix(normalizedCommand, policyCommand.toLowerCase()));
+  const safeCommand = safeCommands.find((policyCommand) => normalizedCommand === policyCommand.toLowerCase());
 
-  if (safeCommand) {
+  if (safeCommand || isSafeRootValidationCommand(normalizedCommand) || isSafeWorkspaceValidationCommand(normalizedCommand)) {
     return {
       level: "safe",
-      reason: `Command is allowlisted: ${safeCommand}`
+      reason: `Command is allowlisted: ${safeCommand || "validation script"}`
     };
   }
 

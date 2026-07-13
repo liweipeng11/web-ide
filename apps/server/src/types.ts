@@ -126,7 +126,8 @@ export type RunCommandRequest = {
 };
 
 export type AutoValidationRequest = {
-  command: string;
+  // 未指定命令时由 Verifier 根据当前项目自动生成完整验证流水线。
+  command?: string | null;
   selectedPath?: string | null;
   taskSessionId?: string | null;
   attempts?: number;
@@ -190,12 +191,13 @@ export type GenerateEditResponse = {
 };
 
 export type AutoValidationResponse = {
-  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached";
+  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached" | "no_commands";
   command: string;
   attempts: number;
   maxAttempts: number;
   policy: CommandPolicyResult;
   result?: CommandResult;
+  verification?: import("./verifier/types.js").VerificationReport;
   patch?: GenerateEditResponse;
   failureSummary?: string;
   agentSteps: AgentStep[];

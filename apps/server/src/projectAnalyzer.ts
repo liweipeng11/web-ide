@@ -146,8 +146,17 @@ function discoverValidationCommands(packageManager: string | null, packages: Pac
   const candidates: ValidationCommandCandidate[] = [];
 
   for (const packageJson of packages) {
-    for (const scriptName of validationScriptPriority) {
-      if (!packageJson.scripts[scriptName]) continue;
+    const scriptNames = Object.keys(packageJson.scripts)
+      .map((scriptName) => {
+        const exactIndex = validationScriptPriority.indexOf(scriptName);
+        const prefixIndex = validationScriptPriority.findIndex((candidate) => scriptName.startsWith(`${candidate}:`));
+        return { scriptName, priority: exactIndex >= 0 ? exactIndex * 2 : prefixIndex >= 0 ? prefixIndex * 2 + 1 : Number.POSITIVE_INFINITY };
+      })
+      .filter((item) => Number.isFinite(item.priority))
+      .sort((left, right) => left.priority - right.priority || left.scriptName.localeCompare(right.scriptName));
+
+    // 同时识别 test:unit、lint:ci 等常见命名空间脚本，避免项目没有基础脚本时漏检。
+    for (const { scriptName } of scriptNames) {
       candidates.push({
         name: scriptName,
         command: buildScriptCommand(packageManager, packageJson, scriptName),

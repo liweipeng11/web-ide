@@ -81,15 +81,41 @@ export type PatchLifecycleEvent = {
 };
 
 export type AutoValidationResponse = {
-  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached";
+  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached" | "no_commands";
   command: string;
   attempts: number;
   maxAttempts: number;
   policy: CommandPolicyResult;
   result?: CommandResult;
+  verification?: VerificationReport;
   patch?: GenerateEditResponse;
   failureSummary?: string;
   agentSteps: AgentStep[];
+};
+
+export type VerificationStage = "format_syntax" | "typecheck" | "lint" | "test" | "build";
+
+export type VerificationIssue = {
+  category: "syntax" | "type" | "lint" | "test" | "build" | "timeout" | "command" | "unknown";
+  message: string;
+  file?: string;
+  line?: number;
+  column?: number;
+  code?: string;
+};
+
+export type VerificationReport = {
+  status: "success" | "failed" | "needs_confirmation" | "blocked" | "no_commands";
+  plannedCommands: Array<{ name: string; command: string; source: string; reason: string; stage: VerificationStage }>;
+  executions: VerificationExecution[];
+  failedExecution?: VerificationExecution;
+};
+
+export type VerificationExecution = {
+  command: { name: string; command: string; source: string; reason: string; stage: VerificationStage };
+  policy: CommandPolicyResult;
+  result?: CommandResult;
+  issues: VerificationIssue[];
 };
 
 export type Checkpoint = {
@@ -546,7 +572,7 @@ export function runProjectCommand(command: string, cwd?: string, chatId?: string
   });
 }
 
-export function validateAndFix(command: string, options: { selectedPath?: string | null; taskSessionId?: string | null; attempts?: number; maxAttempts?: number; confirmed?: boolean } = {}) {
+export function validateAndFix(command?: string | null, options: { selectedPath?: string | null; taskSessionId?: string | null; attempts?: number; maxAttempts?: number; confirmed?: boolean } = {}) {
   return request<AutoValidationResponse>("/api/ai/validate-and-fix", {
     method: "POST",
     body: JSON.stringify({

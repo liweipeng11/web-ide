@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createAutoValidationRunner, type AutoValidationDependencies } from "./autoValidationService.js";
 import type { AgentStep, CommandPolicyResult, CommandResult, GenerateEditResponse, TaskSession } from "./types.js";
+import type { RunVerificationOptions, VerificationReport } from "./verifier/types.js";
 
 function commandResult(status: CommandResult["status"], command = "pnpm test"): CommandResult {
   return {
@@ -38,12 +39,27 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
   const progressPhases: string[] = [];
   const storedSteps: AgentStep[] = [];
   const patchCalls: Array<{ selectedPath: string | null | undefined; prompt: string; taskSessionId?: string }> = [];
+  const verificationCalls: RunVerificationOptions[] = [];
   let commandCalls = 0;
+  const policy = options.policy || { level: "safe", reason: "test allowlist" };
+  const command = options.result?.command || "pnpm test";
+  const plannedCommand = { name: "test", command, source: "package.json", reason: "测试脚本", stage: "test" as const };
   const dependencies = {
-    evaluateCommandPolicy: () => options.policy || { level: "safe", reason: "test allowlist" },
-    runProjectCommand: async () => {
+    getWorkspaceRoot: () => "C:/workspace",
+    runVerification: async (verificationOptions): Promise<VerificationReport> => {
+      verificationCalls.push(verificationOptions);
+      if (policy.level === "confirm") {
+        return { status: "needs_confirmation", plannedCommands: [plannedCommand], executions: [{ command: plannedCommand, policy, issues: [] }], failedExecution: { command: plannedCommand, policy, issues: [] } };
+      }
+      if (policy.level === "blocked") {
+        return { status: "blocked", plannedCommands: [plannedCommand], executions: [{ command: plannedCommand, policy, issues: [] }], failedExecution: { command: plannedCommand, policy, issues: [] } };
+      }
       commandCalls += 1;
-      return options.result || commandResult("success");
+      const result = options.result || commandResult("success");
+      const execution = { command: plannedCommand, policy, result, issues: result.status === "success" ? [] : [{ category: "test" as const, file: "src/app.test.ts", line: 12, message: "1 test failed" }] };
+      return result.status === "success"
+        ? { status: "success", plannedCommands: [plannedCommand], executions: [execution] }
+        : { status: "failed", plannedCommands: [plannedCommand], executions: [execution], failedExecution: execution };
     },
     createEditPatchResponse: async (selectedPath, prompt, onAgentStep, taskSessionId) => {
       patchCalls.push({ selectedPath, prompt, taskSessionId });
@@ -70,6 +86,7 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
     storedSteps,
     progressPhases,
     patchCalls,
+    verificationCalls,
     commandCalls: () => commandCalls
   };
 }
@@ -87,6 +104,15 @@ test("stops successfully when validation passes", async () => {
     result.agentSteps.filter((step) => step.type === "command").map((step) => step.status),
     ["running", "success"]
   );
+});
+
+test("未指定命令时请求 Verifier 自动发现完整流水线", async () => {
+  const harness = createHarness();
+  const result = await harness.run({ taskSessionId: "task-1" });
+
+  assert.equal(result.status, "success");
+  assert.equal(harness.verificationCalls[0].preferredCommand, null);
+  assert.equal(harness.verificationCalls[0].workspaceRoot, "C:/workspace");
 });
 
 test("requires confirmation before running an unknown command", async () => {
@@ -127,4 +153,13 @@ test("stops and marks the task failed after the retry limit", async () => {
   assert.deepEqual(harness.statuses, ["failed"]);
   assert.equal(harness.patchCalls.length, 0);
   assert.equal(result.agentSteps.some((step) => step.type === "error"), true);
+});
+
+test("将调用方传入的回修上限限制为最多三轮", async () => {
+  const harness = createHarness({ result: commandResult("failed") });
+  const result = await harness.run({ command: "pnpm test", attempts: 3, maxAttempts: 10 });
+
+  assert.equal(result.status, "max_attempts_reached");
+  assert.equal(result.maxAttempts, 3);
+  assert.equal(harness.patchCalls.length, 0);
 });

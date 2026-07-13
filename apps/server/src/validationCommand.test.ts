@@ -16,11 +16,11 @@ async function createProject(scripts: Record<string, string>, packageManager: "n
   return directory;
 }
 
-test("selects test before other validation scripts", async (context) => {
+test("selects the lowest-cost validation script first", async (context) => {
   const directory = await createProject({ build: "vite build", lint: "eslint .", typecheck: "tsc --noEmit", test: "vitest run" }, "pnpm");
   context.after(() => fs.rm(directory, { recursive: true, force: true }));
 
-  assert.equal(await selectDefaultValidationCommandForRoot(directory), "pnpm test");
+  assert.equal(await selectDefaultValidationCommandForRoot(directory), "pnpm typecheck");
 });
 
 test("falls back through typecheck, check, lint, and build", async (context) => {
@@ -38,6 +38,8 @@ test("returns null when the project has no validation script", async (context) =
 });
 
 test("recognizes package scripts and direct validation tools", () => {
+  assert.equal(isValidationCommand("pnpm format:check"), true);
+  assert.equal(isValidationCommand("npm run format-check"), true);
   assert.equal(isValidationCommand("pnpm test"), true);
   assert.equal(isValidationCommand("npm run typecheck"), true);
   assert.equal(isValidationCommand("tsc --noEmit"), true);

@@ -11,7 +11,7 @@ type UsePatchActionsOptions = {
 
 // 统一处理 patch 应用和 checkpoint 回滚，避免文件状态同步分散在多个地方。
 export function usePatchActions({ state, setState, setFiles, refreshTaskSessions }: UsePatchActionsOptions) {
-  async function handleApply(filePath: string | undefined, onValidateAndFix: (command: string) => Promise<unknown>) {
+  async function handleApply(filePath: string | undefined, onValidateAndFix: (command?: string | null) => Promise<unknown>) {
     if (!state.patch) return;
 
     const patchToApply = state.patch;
@@ -30,7 +30,7 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
       }
       void refreshTaskSessions(patchToApply.taskSessionId || state.currentTaskSessionId);
       const remainingFiles = filePath ? patchToApply.files.filter((file) => file.path !== filePath) : [];
-      const validationCommand = !remainingFiles.length ? state.autoFix?.awaitingPatchId === patchToApply.patchId ? state.autoFix.command : patchToApply.commandsToRun?.[0] || null : null;
+      const shouldRunFullValidation = !remainingFiles.length;
       setState((current) => {
         const selectedFileChange = targetFiles.find((file) => file.path === current.selectedPath);
         const fallbackSelectedChange = current.selectedPath === selectedPathToApply && !filePath ? patchToApply : null;
@@ -63,8 +63,9 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
         };
       });
 
-      if (validationCommand) {
-        await onValidateAndFix(validationCommand);
+      if (shouldRunFullValidation) {
+        // 每次完整应用 patch 后都重新发现并执行全量验证，回修后也不会遗漏后续阶段。
+        await onValidateAndFix(null);
       }
     } catch (error) {
       setState((current) => ({

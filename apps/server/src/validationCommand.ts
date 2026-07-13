@@ -1,7 +1,7 @@
 import { discoverProjectCommands } from "./commandDiscovery.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
-const validationScriptPriority = ["test", "typecheck", "type-check", "check", "lint", "build"];
+const validationScriptPriority = ["format:check", "format-check", "check", "typecheck", "type-check", "lint", "test", "build"];
 
 export function isValidationCommand(command: string) {
   const normalized = command.trim().toLowerCase();

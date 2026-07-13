@@ -1,9 +1,10 @@
 import { createEditPatchResponse } from "./editPatchService.js";
-import { evaluateCommandPolicy } from "./commandPolicy.js";
-import { runProjectCommand } from "./commandRunner.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import { advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, updateTaskSessionStatus } from "./taskSessionStore.js";
 import type { AgentStep, AutoValidationResponse, CommandResult } from "./types.js";
+import { runVerification } from "./verifier/index.js";
+import type { VerificationReport } from "./verifier/types.js";
+import { getWorkspaceRoot } from "./workspaceStore.js";
 
 const defaultMaxAttempts = 3;
 const maxFailurePromptChars = 6_000;
@@ -15,7 +16,8 @@ function clampAttemptCount(value: unknown) {
 
 function clampMaxAttempts(value: unknown) {
   const count = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : defaultMaxAttempts;
-  return Math.min(5, Math.max(1, count));
+  // 自动回修最多三轮，避免错误方向导致无限生成补丁。
+  return Math.min(3, Math.max(1, count));
 }
 
 function tail(value: string | undefined, maxLength: number) {
@@ -42,7 +44,19 @@ function summarizeCommandFailure(result: CommandResult) {
   ].join("\n");
 }
 
-function buildFixPrompt(result: CommandResult, attempts: number, maxAttempts: number) {
+function summarizeIssues(report: VerificationReport) {
+  const issues = report.failedExecution?.issues || [];
+  if (!issues.length) return "(未提取到结构化错误)";
+
+  return issues
+    .map((issue) => {
+      const location = issue.file ? `${issue.file}${issue.line ? `:${issue.line}${issue.column ? `:${issue.column}` : ""}` : ""}` : "未定位文件";
+      return `- [${issue.category}] ${location}${issue.code ? ` ${issue.code}` : ""}: ${issue.message}`;
+    })
+    .join("\n");
+}
+
+function buildFixPrompt(result: CommandResult, report: VerificationReport, attempts: number, maxAttempts: number) {
   return [
     "Automatic validation failed. Generate a new repair patch from the command output below.",
     "",
@@ -55,6 +69,9 @@ function buildFixPrompt(result: CommandResult, attempts: number, maxAttempts: nu
     "- Return a reviewable patch and do not claim the command was run.",
     "- commandsToRun must include the same validation command.",
     "",
+    "Structured issues:",
+    summarizeIssues(report),
+    "",
     "Failure output:",
     tail(summarizeCommandFailure(result), maxFailurePromptChars)
   ].join("\n");
@@ -65,7 +82,7 @@ function commandSucceeded(result: CommandResult) {
 }
 
 export type AutoValidationOptions = {
-  command: string;
+  command?: string | null;
   selectedPath?: string | null;
   taskSessionId?: string | null;
   attempts?: number;
@@ -74,8 +91,8 @@ export type AutoValidationOptions = {
 };
 
 export type AutoValidationDependencies = {
-  evaluateCommandPolicy: typeof evaluateCommandPolicy;
-  runProjectCommand: typeof runProjectCommand;
+  runVerification: typeof runVerification;
+  getWorkspaceRoot: typeof getWorkspaceRoot;
   createEditPatchResponse: typeof createEditPatchResponse;
   appendTaskSessionStep: typeof appendTaskSessionStep;
   appendTaskSessionPatchEvent?: typeof appendTaskSessionPatchEvent;
@@ -84,8 +101,8 @@ export type AutoValidationDependencies = {
 };
 
 const defaultDependencies: AutoValidationDependencies = {
-  evaluateCommandPolicy,
-  runProjectCommand,
+  runVerification,
+  getWorkspaceRoot,
   createEditPatchResponse,
   appendTaskSessionStep,
   appendTaskSessionPatchEvent,
@@ -95,7 +112,7 @@ const defaultDependencies: AutoValidationDependencies = {
 
 export function createAutoValidationRunner(dependencies: AutoValidationDependencies = defaultDependencies) {
   return async function run(options: AutoValidationOptions): Promise<AutoValidationResponse> {
-    const command = options.command.trim();
+    const requestedCommand = options.command?.trim() || null;
     const attempts = clampAttemptCount(options.attempts);
     const maxAttempts = clampMaxAttempts(options.maxAttempts);
     const taskSessionId = options.taskSessionId || undefined;
@@ -109,29 +126,53 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
       await Promise.all(taskStepWrites);
       return response;
     };
-    const policy = dependencies.evaluateCommandPolicy(command);
+    const workspaceRoot = dependencies.getWorkspaceRoot();
+    if (!workspaceRoot) throw new Error("Open a workspace before running validation");
 
-    if (policy.level === "blocked") {
-      pushAgentStep(createAgentStep({ type: "command", command, policy, status: "blocked", result: null }));
+    const verification = await dependencies.runVerification({ workspaceRoot, preferredCommand: requestedCommand, confirmed: options.confirmed });
+    const activeExecution = verification.failedExecution || verification.executions.at(-1);
+    const command = activeExecution?.command.command || requestedCommand || "";
+    const policy = activeExecution?.policy || { level: "blocked" as const, reason: "未发现可执行的验证命令" };
+    const result = activeExecution?.result;
+
+    // 将流水线内每条命令映射为现有 Agent 步骤，保持任务历史和前端展示兼容。
+    for (const execution of verification.executions) {
+      if (execution.result) {
+        pushAgentStep(createAgentStep({ type: "command", command: execution.command.command, policy: execution.policy, status: "running", result: null }));
+        pushAgentStep(createAgentStep({ type: "command", command: execution.command.command, policy: execution.policy, status: commandSucceeded(execution.result) ? "success" : "failed", result: execution.result }));
+      } else {
+        pushAgentStep(createAgentStep({
+          type: "command",
+          command: execution.command.command,
+          policy: execution.policy,
+          status: execution.policy.level === "blocked" ? "blocked" : "cancelled",
+          result: null
+        }));
+      }
+    }
+
+    if (verification.status === "no_commands") {
+      await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
+      return finish({ status: "no_commands", command, attempts, maxAttempts, policy, verification, agentSteps });
+    }
+
+    if (verification.status === "blocked") {
       await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
       await dependencies.updateTaskSessionStatus(taskSessionId, "failed");
-      return finish({ status: "blocked", command, attempts, maxAttempts, policy, agentSteps });
+      return finish({ status: "blocked", command, attempts, maxAttempts, policy, verification, agentSteps });
     }
 
-    if (policy.level === "confirm" && !options.confirmed) {
-      pushAgentStep(createAgentStep({ type: "command", command, policy, status: "cancelled", result: null }));
-      return finish({ status: "needs_confirmation", command, attempts, maxAttempts, policy, agentSteps });
+    if (verification.status === "needs_confirmation") {
+      return finish({ status: "needs_confirmation", command, attempts, maxAttempts, policy, verification, agentSteps });
     }
 
-    pushAgentStep(createAgentStep({ type: "command", command, policy, status: "running", result: null }));
-    const result = await dependencies.runProjectCommand(command, undefined, undefined, options.confirmed || policy.level === "safe");
-    pushAgentStep(createAgentStep({ type: "command", command, policy, status: commandSucceeded(result) ? "success" : "failed", result }));
-
-    if (commandSucceeded(result)) {
+    if (verification.status === "success") {
       await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_success");
       await dependencies.updateTaskSessionStatus(taskSessionId, "success");
-      return finish({ status: "success", command, attempts, maxAttempts, policy, result, agentSteps });
+      return finish({ status: "success", command, attempts, maxAttempts, policy, result, verification, agentSteps });
     }
+
+    if (!result) throw new Error("验证失败，但没有可用于回修的命令结果");
 
     const nextAttempt = attempts + 1;
     const failureSummary = summarizeCommandFailure(result);
@@ -140,12 +181,12 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
       pushAgentStep(createAgentStep({ type: "error", message: `Auto-fix stopped after ${maxAttempts} failed repair attempts for: ${command}` }));
       await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
       await dependencies.updateTaskSessionStatus(taskSessionId, "failed");
-      return finish({ status: "max_attempts_reached", command, attempts: maxAttempts, maxAttempts, policy, result, failureSummary, agentSteps });
+      return finish({ status: "max_attempts_reached", command, attempts: maxAttempts, maxAttempts, policy, result, verification, failureSummary, agentSteps });
     }
 
     pushAgentStep(createAgentStep({ type: "message", content: `Validation failed. Generating repair patch ${nextAttempt}/${maxAttempts} for: ${command}` }));
     await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
-    const patch = await dependencies.createEditPatchResponse(options.selectedPath, buildFixPrompt(result, nextAttempt, maxAttempts), pushAgentStep, taskSessionId);
+    const patch = await dependencies.createEditPatchResponse(options.selectedPath, buildFixPrompt(result, verification, nextAttempt, maxAttempts), pushAgentStep, taskSessionId);
     await dependencies.appendTaskSessionPatchEvent?.(taskSessionId, {
       type: "auto_fix_patch_created",
       patchId: patch.patchId,
@@ -166,6 +207,7 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
       maxAttempts,
       policy,
       result,
+      verification,
       patch: { ...patch, agentSteps },
       failureSummary,
       agentSteps

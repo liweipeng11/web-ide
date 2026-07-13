@@ -14,7 +14,7 @@ export const highRiskDirectoryReasons = new Map<string, string>([
   ["__pycache__", "Python 字节码缓存目录，不应直接编辑"]
 ]);
 
-export const validationScriptPriority = ["test", "typecheck", "type-check", "check", "lint", "build"];
+export const validationScriptPriority = ["format:check", "format-check", "check", "typecheck", "type-check", "lint", "test", "build"];
 
 // 配置文件匹配规则用于补足依赖未安装或 package.json 不完整时的技术栈判断。
 export const configMatchers: Array<[RegExp, keyof Omit<TechStackAnalysis, "languages" | "configFiles">, string]> = [
