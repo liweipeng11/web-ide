@@ -12,7 +12,7 @@ export const AI_AGENT_DISCOVERY_STRATEGY_PROMPT = `Discovery scheduling strategy
 // 控制自动探索成本，防止模型在同一问题里反复搜索和大范围读取。
 export const AI_AGENT_CONTEXT_BUDGET_PROMPT = `Context budget rules:
 - Infer 1 to 4 concise discovery terms before using search tools; never pass the full user request as a query.
-- Prefer directory and definition summaries before reading file contents.
+- Prefer directory and definition summaries before reading file contents; use analyzeSymbolGraph for exact definitions, references, dependencies, calls, and type propagation.
 - Read at most 8 files automatically, and prefer fewer whenever the target is clear.
 - Read only the smallest useful chunks. If hasMoreAfter is true, continue only when the missing section is necessary.
 - Do not call searchFilesByName, searchCode, or searchCodeRegex with an empty query.
@@ -42,7 +42,7 @@ Rules:
 - Use runCommand when the user asks to run a command, or after applying changes when a focused validation command is useful.
 - Use runCommand, not proposePatch, when the user asks to delete an entire file. The runtime will request user approval before the command executes.
 - After runCommand returns a failed result, inspect the output and continue with search/read/proposePatch if the failure is related to the user's task; use direct edit tools only as the fallback described above.
-- Prefer listFiles/searchFilesByName/listCodeDefinitionNames/searchCode/searchCodeRegex/readFile/readFileChunk before editing so the change follows existing project style.
+- Prefer listFiles/searchFilesByName/listCodeDefinitionNames/analyzeSymbolGraph/searchCode/searchCodeRegex/readFile/readFileChunk before editing so the change follows existing project style.
 - Before proposePatch, replaceInFile, or writeFile, call findSimilarPatterns. If candidates are returned, read at least one candidate before editing; the runtime enforces this requirement.
 - Before proposePatch, replaceInFile, or writeFile, call checkExistence for every import path, symbol, package script, environment variable source, or directory that the edit depends on. Do not edit while it reports missing or ambiguous references.
 - Never report a package script as having run unless checkExistence confirms the script exists and runCommand returns its actual result.
@@ -137,7 +137,7 @@ You will receive:
 - the most recent failed command result, when available
 - fallback search results, when the required first search does not find matching files
 - project facts inspected from package.json, when available
-- tools you can call, including inspectProject(), findSimilarPatterns(taskDescription,targetPath,targetResponsibility,limit) for locating reusable implementation patterns, checkExistence(targets) for confirming imports, symbols, scripts, environment-variable sources, and directories, listFiles(path,recursive,includeIgnored,limit) for directory discovery, searchFilesByName(query,path,limit) for path discovery, listCodeDefinitionNames(path,limit,includeIgnored) for top-level structure discovery, searchCode(query,path,filePattern,limit,caseSensitive,contextLines) for literal code search, searchCodeRegex(regex,path,filePattern,limit,caseSensitive,contextLines) for regex code search, readFile(filePath) for reading the first file chunk, readFileChunk(filePath,startLine,endLine) for reading follow-up chunks, and readFileRange(filePath,startLine,endLine) as a compatibility range reader
+- tools you can call, including inspectProject(), findSimilarPatterns(taskDescription,targetPath,targetResponsibility,limit) for locating reusable implementation patterns, checkExistence(targets) for confirming imports, symbols, scripts, environment-variable sources, and directories, listFiles(path,recursive,includeIgnored,limit) for directory discovery, searchFilesByName(query,path,limit) for path discovery, listCodeDefinitionNames(path,limit,includeIgnored) for top-level structure discovery, analyzeSymbolGraph(kind,symbolName,filePath,path,direction,maxDepth) for definitions, references, reverse dependencies, call chains, and type propagation, searchCode(query,path,filePattern,limit,caseSensitive,contextLines) for literal code search, searchCodeRegex(regex,path,filePattern,limit,caseSensitive,contextLines) for regex code search, readFile(filePath) for reading the first file chunk, readFileChunk(filePath,startLine,endLine) for reading follow-up chunks, and readFileRange(filePath,startLine,endLine) as a compatibility range reader
 
 ${AI_AGENT_DISCOVERY_STRATEGY_PROMPT}
 
@@ -233,7 +233,7 @@ You will receive:
 - recent conversation history
 - the user's latest message
 - the most recent failed command result, when available
-- tools you can call, including listFiles(path,recursive,includeIgnored,limit) for directory discovery, searchFilesByName(query,path,limit) for path discovery, listCodeDefinitionNames(path,limit,includeIgnored) for top-level structure discovery, searchCode(query,path,filePattern,limit,caseSensitive,contextLines) for literal code search, searchCodeRegex(regex,path,filePattern,limit,caseSensitive,contextLines) for regex code search, readFile(filePath) for reading the first file chunk, readFileChunk(filePath,startLine,endLine) for reading follow-up chunks, and readFileRange(filePath,startLine,endLine) as a compatibility range reader
+- tools you can call, including listFiles(path,recursive,includeIgnored,limit) for directory discovery, searchFilesByName(query,path,limit) for path discovery, listCodeDefinitionNames(path,limit,includeIgnored) for top-level structure discovery, analyzeSymbolGraph(kind,symbolName,filePath,path,direction,maxDepth) for symbol relationships, searchCode(query,path,filePattern,limit,caseSensitive,contextLines) for literal code search, searchCodeRegex(regex,path,filePattern,limit,caseSensitive,contextLines) for regex code search, readFile(filePath) for reading the first file chunk, readFileChunk(filePath,startLine,endLine) for reading follow-up chunks, and readFileRange(filePath,startLine,endLine) as a compatibility range reader
 
 ${AI_AGENT_DISCOVERY_STRATEGY_PROMPT}
 

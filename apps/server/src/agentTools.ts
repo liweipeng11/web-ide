@@ -3,6 +3,7 @@ import { createContextCache, listCodeDefinitionNames, listWorkspaceFiles, readWo
 import { inspectCurrentProject } from "./projectInspector.js";
 import { findSimilarPatterns } from "./patternFinder/index.js";
 import { checkExistence, type ExistenceCheckTarget } from "./existenceChecker/index.js";
+import { buildSymbolGraph, querySymbolGraph, type SymbolGraphQuery, type SymbolQueryKind } from "./symbolGraph/index.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
@@ -96,6 +97,74 @@ function getSearchOptions(args: Record<string, unknown>) {
 }
 
 export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
+  // 符号图属于只读分析能力，规划模式和执行模式都可安全调用。
+  {
+    name: "analyzeSymbolGraph",
+    description: "Build a symbol-level workspace index and query definitions, references, reverse dependencies, call chains, or type propagation. Use filePath to disambiguate duplicate symbol names.",
+    cacheable: false,
+    parameters: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["definition", "references", "reverseDependencies", "callChain", "typePropagation"] },
+        symbolName: { type: "string", description: "Symbol name for definition, reference, call-chain, and type-propagation queries." },
+        filePath: { type: "string", description: "Optional defining file, or dependency target when symbolName is omitted." },
+        path: { type: "string", description: "Optional workspace-relative directory used to limit indexing scope." },
+        direction: { type: "string", enum: ["incoming", "outgoing", "both"] },
+        maxDepth: { type: "integer", minimum: 1, maximum: 10 }
+      },
+      required: ["kind"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      const kind = requiredString(args, "kind") as SymbolQueryKind;
+      const validKinds = new Set<SymbolQueryKind>(["definition", "references", "reverseDependencies", "callChain", "typePropagation"]);
+      if (!validKinds.has(kind)) throw new Error("kind is invalid");
+      const symbolName = optionalString(args, "symbolName");
+      const filePath = optionalString(args, "filePath");
+      const direction = optionalString(args, "direction") as SymbolGraphQuery["direction"];
+      if (direction && !new Set(["incoming", "outgoing", "both"]).has(direction)) throw new Error("direction is invalid");
+      const maxDepth = optionalPositiveInteger(args, "maxDepth", 4);
+      const workspaceRoot = getWorkspaceRoot();
+      if (!workspaceRoot) throw new Error("No workspace selected");
+
+      uniquePush(runtime.agentContext.searchQueries, `symbol:${kind}:${symbolName || filePath}`);
+      const graph = await buildSymbolGraph(workspaceRoot, { path: optionalString(args, "path") || undefined });
+      const result = querySymbolGraph(graph, { kind, symbolName: symbolName || undefined, filePath: filePath || undefined, direction: direction || undefined, maxDepth });
+      const relevantFiles = new Set<string>();
+      // 将图查询命中的定义、引用和依赖文件统一纳入后续上下文选择。
+      for (const definition of result.definitions) relevantFiles.add(definition.filePath);
+      for (const reference of result.references) relevantFiles.add(reference.filePath);
+      for (const dependency of result.dependencies) {
+        relevantFiles.add(dependency.fromFile);
+        if (dependency.toFile) relevantFiles.add(dependency.toFile);
+      }
+      for (const relation of result.relations) {
+        relevantFiles.add(relation.reference.filePath);
+        if (relation.from) relevantFiles.add(relation.from.filePath);
+        if (relation.to) relevantFiles.add(relation.to.filePath);
+      }
+      for (const relevantFile of relevantFiles) {
+        uniquePush(runtime.agentContext.searchResultFiles, relevantFile);
+        uniquePush(runtime.agentContext.relevantFiles, relevantFile);
+      }
+      return result;
+    },
+    summarize(result, cached) {
+      const value = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+      return {
+        cached,
+        indexedFileCount: value.indexedFileCount,
+        indexedSymbolCount: value.indexedSymbolCount,
+        unresolvedReferenceCount: value.unresolvedReferenceCount,
+        indexTruncated: value.indexTruncated,
+        ambiguous: value.ambiguous,
+        definitionCount: Array.isArray(value.definitions) ? value.definitions.length : 0,
+        referenceCount: Array.isArray(value.references) ? value.references.length : 0,
+        dependencyCount: Array.isArray(value.dependencies) ? value.dependencies.length : 0,
+        relationCount: Array.isArray(value.relations) ? value.relations.length : 0
+      };
+    }
+  },
   {
     name: "checkExistence",
     description: "Verify that imports, symbols, package scripts, environment-variable sources, and directories actually exist. Returns exists, missing, or ambiguous; resolve missing and ambiguous results before editing or claiming a command ran.",
@@ -733,6 +802,10 @@ function parseArguments(rawArguments: string) {
 }
 
 function getToolPurpose(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "analyzeSymbolGraph") {
+    return `Use analyzeSymbolGraph to inspect ${String(args.kind || "symbol relationships")} for "${String(args.symbolName || args.filePath || "the selected scope")}".`;
+  }
+
   if (toolName === "inspectProject") {
     return "Use inspectProject to verify package manager, framework, and dependency versions before choosing APIs.";
   }
@@ -781,6 +854,18 @@ function getToolPurpose(toolName: string, args: Record<string, unknown>) {
 }
 
 function createToolApprovalStep(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "analyzeSymbolGraph") {
+    const target = String(args.symbolName || args.filePath || args.path || "工作区").trim();
+    return createApprovalRequestStep({
+      actionType: "search_code",
+      title: "分析符号关系",
+      summary: `准备分析“${target}”的定义、引用或依赖关系。`,
+      status: "auto_approved",
+      targets: target ? [target] : undefined,
+      details: { kind: args.kind, symbolName: args.symbolName, filePath: args.filePath, direction: args.direction }
+    });
+  }
+
   if (toolName === "inspectProject") {
     return createApprovalRequestStep({
       actionType: "inspect_project",

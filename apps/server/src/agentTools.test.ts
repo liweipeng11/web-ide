@@ -280,6 +280,31 @@ test("listCodeDefinitionNames exposes structure summaries without reading full f
   assert.deepEqual(agentContext.searchResultFiles, ["src/feature.ts"]);
 });
 
+test("analyzeSymbolGraph returns symbol references and records related files", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "service.ts"), "export function loadUser() { return true }\n", "utf8");
+  await fs.writeFile(
+    path.join(workspaceRoot, "src", "controller.ts"),
+    "import { loadUser } from './service.js'\nexport function getUser() { return loadUser() }\n",
+    "utf8"
+  );
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const agentContext = createAgentContext();
+  const response = await executeAgentToolCall(
+    createToolCall("analyzeSymbolGraph", { kind: "references", symbolName: "loadUser" }),
+    createAgentToolRuntime({ agentContext, runId: "test-symbol-graph" })
+  );
+  const data = JSON.parse(response.content) as { references: Array<{ filePath: string; kind: string }>; indexedSymbolCount: number; indexTruncated: boolean };
+
+  assert.equal(data.indexedSymbolCount >= 2, true);
+  assert.equal(data.indexTruncated, false);
+  assert.equal(data.references.some((reference) => reference.filePath === "src/controller.ts" && reference.kind === "call"), true);
+  assert.deepEqual(agentContext.searchResultFiles.sort(), ["src/controller.ts", "src/service.ts"]);
+  assert.equal(agentContext.searchQueries[0], "symbol:references:loadUser");
+});
+
 test("read tools emit activity steps without an approval card", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "hello\n", "utf8");

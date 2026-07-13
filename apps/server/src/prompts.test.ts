@@ -41,6 +41,7 @@ test("agent, edit, and chat prompts all include the shared discovery strategy", 
     assertIncludes(prompt, "Context budget rules");
     assertIncludes(prompt, "searchFilesByName");
     assertIncludes(prompt, "listCodeDefinitionNames");
+    assertIncludes(prompt, "analyzeSymbolGraph");
     assertIncludes(prompt, "readFileChunk");
   }
 
