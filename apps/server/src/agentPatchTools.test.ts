@@ -11,6 +11,7 @@ import { runtimeAgentToolRegistry } from "./runtimeAgentTools.js";
 import type { AgentToolRuntime } from "./agentToolTypes.js";
 import type { AgentStep, PatchFileChange } from "./types.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
+import { buildSafeEditRecommendation, evaluateSafeEdit } from "./safeEditor/index.js";
 
 function createToolRuntime(options: Partial<AgentToolRuntime> = {}): AgentToolRuntime {
   return {
@@ -81,6 +82,34 @@ test("applyPatch tool applies a pending patch and removes it from the store", as
     assert.equal(checkpoint.source?.patchId, patch.patchId);
     assert.equal(checkpoint.source?.toolCallId, "tool-apply-1");
     assert.equal(steps.some((step) => step.type === "checkpoint" && step.checkpointId === checkpointId), true);
+  } finally {
+    clearPendingPatches();
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("applyPatch tool requires explicit acknowledgement for Safe Editor high-risk changes", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-safe-patch-"));
+
+  try {
+    await setWorkspaceRoot(workspaceRoot, { persist: false });
+    await fs.writeFile(path.join(workspaceRoot, "target.ts"), "export const value = 1;\n", "utf8");
+    const change: PatchFileChange = { path: "target.ts", filePath: "target.ts", status: "modify", oldContent: "export const value = 1;\n", newContent: "export const value = 2;\n", summary: "Update value", diffHtml: "" };
+    const safeEditReport = evaluateSafeEdit({ taskDescription: "更新数值", recommendation: buildSafeEditRecommendation({}), candidates: [change] });
+    const patch = createPendingPatch([change], undefined, undefined, {
+      rawPatchCount: 1, normalizedFilePaths: ["target.ts"], preDedupeCount: 1, postDedupeCount: 1, finalPatchCount: 1,
+      filteredCount: 0, noEffectCount: 0, records: [], safeEditReport, generatedAt: Date.now()
+    });
+    const tool = patchAgentToolDefinitions.find((definition) => definition.name === "applyPatch");
+
+    assert.ok(tool);
+    await assert.rejects(() => tool.execute({ patchId: patch.patchId }, createToolRuntime()), /explicit confirmation/i);
+    assert.ok(getPendingPatch(patch.patchId));
+    await tool.execute(
+      { patchId: patch.patchId },
+      createToolRuntime({ currentToolCall: { id: "approved-safe-apply", name: "applyPatch", arguments: { patchId: patch.patchId }, actionId: "apply_patch:approved" } })
+    );
+    assert.equal(await fs.readFile(path.join(workspaceRoot, "target.ts"), "utf8"), "export const value = 2;\n");
   } finally {
     clearPendingPatches();
     await fs.rm(workspaceRoot, { recursive: true, force: true });

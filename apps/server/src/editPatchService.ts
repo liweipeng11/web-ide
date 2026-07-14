@@ -8,6 +8,7 @@ import { listFiles, readWorkspaceFile, readWorkspaceFileForDiff, safeResolve } f
 import { createPendingPatch } from "./patchStore.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import { resolvePatchNewContent, StaleFullFileRewriteError } from "./searchReplacePatch.js";
+import { buildSafeEditRecommendation, evaluateSafeEdit } from "./safeEditor/index.js";
 import { appendTaskSessionPatchEvent, getTaskSession, recordTaskSessionContextSelection, recordTaskSessionPatchDiagnostics } from "./taskSessionStore.js";
 import type { AiEditResult, FileTreeNode, PatchFileChange, PatchFilterRecord, PatchGenerationDiagnostics } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
@@ -253,6 +254,7 @@ export function buildPatchGenerationDiagnostics(input: {
   records: PatchFilterRecord[];
   contextSelection?: ContextSelectionSnapshot;
   patchCompleteness?: PatchCompletenessReport;
+  safeEditReport?: PatchGenerationDiagnostics["safeEditReport"];
 }): PatchGenerationDiagnostics {
   const noEffectCount = input.records.filter((record) => record.reason === "no_effect_change").length;
 
@@ -270,6 +272,7 @@ export function buildPatchGenerationDiagnostics(input: {
     records: input.records,
     contextSelection: input.contextSelection,
     patchCompleteness: input.patchCompleteness,
+    safeEditReport: input.safeEditReport,
     generatedAt: Date.now()
   };
 }
@@ -375,7 +378,13 @@ async function buildPatchFileChanges(changes: ValidatedFileChange[], userRequest
   return { files, noEffectRecords };
 }
 
-export async function createEditPatchResponse(filePath: string | null | undefined, userRequest: string, onAgentStep?: (step: AgentStep) => void, taskSessionId?: string) {
+export async function createEditPatchResponse(
+  filePath: string | null | undefined,
+  userRequest: string,
+  onAgentStep?: (step: AgentStep) => void,
+  taskSessionId?: string,
+  safeEditRecommendationOverride?: import("./safeEditor/index.js").SafeEditRecommendation
+) {
   const runId = createRouteRunId("edit");
   const startedAt = Date.now();
   const selectedFilePath = typeof filePath === "string" && filePath.trim() ? filePath.trim() : null;
@@ -576,6 +585,22 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     snapshot: contextSelection,
     patchFiles: files.map((file) => file.path)
   });
+  const generatedSafeEditRecommendation = aiResult.editScope?.safeEditRecommendation;
+  // 内层补丁生成若执行了更新的影响分析，应优先使用；否则复用连续 Agent 外层已有证据。
+  const safeEditRecommendation = generatedSafeEditRecommendation?.evidenceSource === "impact_analysis"
+    ? generatedSafeEditRecommendation
+    : safeEditRecommendationOverride || generatedSafeEditRecommendation || buildSafeEditRecommendation({ fallbackTargetFiles: selectedFilePath ? [selectedFilePath] : [] });
+  const safeEditReport = evaluateSafeEdit({
+    taskDescription: userRequest,
+    recommendation: safeEditRecommendation,
+    candidates: files.map((file) => ({
+      filePath: file.path,
+      status: file.status,
+      oldContent: file.oldContent,
+      newContent: file.newContent,
+      summary: file.summary
+    }))
+  });
   const diagnosticsWithoutPatchId = buildPatchGenerationDiagnostics({
     modelSummary: aiResult.summary,
     rawPatchCount,
@@ -585,7 +610,8 @@ export async function createEditPatchResponse(filePath: string | null | undefine
     finalPatchCount: files.length,
     records: diagnosticsRecords,
     contextSelection,
-    patchCompleteness
+    patchCompleteness,
+    safeEditReport
   });
   const patch = createPendingPatch(files, taskSessionId, commandsToRun, diagnosticsWithoutPatchId);
   const diagnostics = {

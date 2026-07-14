@@ -543,6 +543,24 @@
   gap: 8px;
 }
 
+/* 任务历史保留 Safe Editor 判定，便于回放补丁为何被标记为扩散。 */
+.task-safe-edit {
+  margin-top: 8px;
+  padding: 8px;
+  border-left: 3px solid #88733b;
+  background: rgba(136, 115, 59, 0.12);
+}
+
+.task-safe-edit.high_risk {
+  border-left-color: #b55252;
+  background: rgba(181, 82, 82, 0.12);
+}
+
+.task-safe-edit ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
 .task-patch-diagnostics article {
   background: #f8fafc;
   border: 1px solid #e2e8f0;

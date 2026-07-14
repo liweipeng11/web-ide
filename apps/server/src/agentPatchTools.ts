@@ -4,6 +4,7 @@ import { checkCodeImports } from "./existenceChecker/index.js";
 import { deletePendingPatch } from "./patchStore.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
+import { buildSafeEditRecommendation } from "./safeEditor/index.js";
 
 function optionalString(args: Record<string, unknown>, name: string) {
   return typeof args[name] === "string" && args[name].trim() ? args[name].trim() : null;
@@ -41,7 +42,11 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
     async execute(args, runtime) {
       const userRequest = optionalString(args, "userRequest") || runtime.agentContext.userGoal;
       const filePath = optionalString(args, "filePath");
-      const patch = await createEditPatchResponse(filePath, userRequest, runtime.onAgentStep, runtime.taskSessionId || undefined);
+      const outerImpactAnalysis = runtime.agentContext.impactAnalyses?.at(-1);
+      const safeEditRecommendation = outerImpactAnalysis
+        ? buildSafeEditRecommendation({ impactAnalysis: outerImpactAnalysis, fallbackTargetFiles: filePath ? [filePath] : [], editableScopeFiles: runtime.agentContext.filesRead })
+        : undefined;
+      const patch = await createEditPatchResponse(filePath, userRequest, runtime.onAgentStep, runtime.taskSessionId || undefined, safeEditRecommendation);
       const workspaceRoot = getWorkspaceRoot();
       if (!workspaceRoot) throw new Error("No workspace selected");
       const importChecks = await Promise.all(patch.files.map((file) => checkCodeImports(workspaceRoot, file.newContent, file.path)));
@@ -57,6 +62,9 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
         patchId: patch.patchId,
         summary: patch.summary,
         files: patch.files.map((file) => ({ path: file.path, status: file.status, summary: file.summary })),
+        safeEdit: patch.diagnostics?.safeEditReport
+          ? { status: patch.diagnostics.safeEditReport.status, risks: patch.diagnostics.safeEditReport.risks, expansionFiles: patch.diagnostics.safeEditReport.expansionFiles }
+          : null,
         commandsToRun: patch.commandsToRun || []
       };
     },
@@ -69,7 +77,8 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
         patchId: value.patchId,
         summary: value.summary,
         fileCount: files.length,
-        files
+        files,
+        safeEdit: value.safeEdit
       };
     }
   },
@@ -87,6 +96,10 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
         filePath: {
           type: "string",
           description: "Optional workspace-relative file path to apply from the patch."
+        },
+        acknowledgeSafeEditRisk: {
+          type: "boolean",
+          description: "Set true only after the user approves applying a patch whose Safe Editor status is high_risk."
         }
       },
       required: ["patchId"],
@@ -96,6 +109,8 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
       return applyPendingPatch({
         patchId: requiredString(args, "patchId"),
         filePath: optionalString(args, "filePath"),
+        // Agent Runtime 的 applyPatch 始终经过人工审批，已批准的 actionId 本身就是高风险确认凭据。
+        acknowledgeSafeEditRisk: args.acknowledgeSafeEditRisk === true || Boolean(runtime.currentToolCall?.actionId),
         onAgentStep: runtime.onAgentStep,
         source: {
           taskSessionId: runtime.taskSessionId || null,

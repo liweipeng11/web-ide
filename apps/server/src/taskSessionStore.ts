@@ -435,7 +435,8 @@ function normalizePendingToolCall(value: unknown): PendingAgentToolCall | null {
     arguments: record.arguments,
     riskLevel,
     status: "pending",
-    createdAt: typeof record.createdAt === "number" ? record.createdAt : Date.now()
+    createdAt: typeof record.createdAt === "number" ? record.createdAt : Date.now(),
+    agentContext: record.agentContext && typeof record.agentContext === "object" && !Array.isArray(record.agentContext) ? record.agentContext : undefined
   };
 }
 
@@ -1022,7 +1023,8 @@ function createPendingToolCall(input: PendingToolCallInput): PendingAgentToolCal
     arguments: input.arguments,
     riskLevel: input.riskLevel,
     status: "pending",
-    createdAt: input.createdAt || Date.now()
+    createdAt: input.createdAt || Date.now(),
+    agentContext: input.agentContext
   };
 }
 

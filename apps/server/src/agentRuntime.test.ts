@@ -3,10 +3,10 @@ import test from "node:test";
 import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime.js";
 import { createAgentToolRegistry } from "./agentToolRegistry.js";
 import { AI_AGENT_ACT_SYSTEM_PROMPT } from "./prompts.js";
-import type { AgentCompletionResponse, AgentToolDefinition } from "./agentToolTypes.js";
+import type { AgentCompletionResponse, AgentToolDefinition, AgentToolRuntime } from "./agentToolTypes.js";
 import type { AgentStep } from "./types.js";
 
-function createRuntimeTestTool(name: string, result: unknown, onExecute?: () => void): AgentToolDefinition {
+function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runtime: AgentToolRuntime) => void): AgentToolDefinition {
   return {
     name,
     description: `Test tool ${name}`,
@@ -15,8 +15,8 @@ function createRuntimeTestTool(name: string, result: unknown, onExecute?: () => 
       properties: {},
       additionalProperties: true
     },
-    async execute() {
-      onExecute?.();
+    async execute(_args, runtime) {
+      onExecute?.(runtime);
       return result;
     },
     summarize(value, cached) {
@@ -346,6 +346,7 @@ test("agent runtime pauses before approval-required tools", async () => {
     userRequest: "Run tests",
     registry,
     runId: "test-runtime-approval",
+    agentContext: { userGoal: "Run tests", filesRead: ["src/service.ts"], searchQueries: [], searchResultFiles: [], relevantFiles: ["src/service.ts"] },
     onAgentStep(step) {
       steps.push({ type: step.type, status: step.type === "approval_request" ? step.status : undefined, actionType: step.type === "approval_request" ? step.actionType : undefined });
     },
@@ -371,6 +372,7 @@ test("agent runtime pauses before approval-required tools", async () => {
   assert.equal(result.status, "awaiting_approval");
   assert.equal(result.pendingToolCall?.toolName, "runCommand");
   assert.equal(result.pendingToolCall?.riskLevel, "medium");
+  assert.deepEqual(result.pendingToolCall?.agentContext?.filesRead, ["src/service.ts"]);
   assert.equal(executed, false);
   assert.deepEqual(steps, [{ type: "approval_request", status: "pending", actionType: "run_command" }]);
 });
@@ -674,6 +676,23 @@ test("agent runtime stops when tool-call step limit is reached", async () => {
   assert.equal(result.status, "step_limit_reached");
   assert.match(result.content, /tool-call limit/);
   assert.equal(steps.some((step) => step.type === "error" && step.message.includes("Tool budget limit reached")), true);
+});
+
+test("agent runtime restores Safe Editor context after approval", async () => {
+  let restoredFilesRead: string[] = [];
+  const registry = createAgentToolRegistry([createRuntimeTestTool("runCommand", { exitCode: 0 }, (runtime) => { restoredFilesRead = runtime.agentContext.filesRead; })]);
+  await resumeAgentRuntimeAfterApproval({
+    userRequest: "Run tests",
+    registry,
+    pendingToolCall: {
+      actionId: "run_command:restore-context", toolCallId: "tool-restore-context", toolName: "runCommand", arguments: { command: "pnpm test" }, riskLevel: "medium", status: "pending", createdAt: Date.now(),
+      agentContext: { userGoal: "Run tests", filesRead: ["src/service.ts"], searchQueries: ["impact:src/service.ts"], searchResultFiles: [], relevantFiles: ["src/service.ts"] }
+    },
+    decision: "approved",
+    requestCompletion: async () => ({ choices: [{ message: { role: "assistant", content: "done" } }] })
+  });
+
+  assert.deepEqual(restoredFilesRead, ["src/service.ts"]);
 });
 
 test("agent runtime emits a visible budget warning step before exhausting tool budget", async () => {

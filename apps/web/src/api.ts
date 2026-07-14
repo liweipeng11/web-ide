@@ -53,7 +53,41 @@ export type PatchGenerationDiagnostics = {
   filteredCount: number;
   noEffectCount: number;
   records: PatchFilterRecord[];
+  safeEditReport?: SafeEditReport;
   generatedAt: number;
+};
+
+export type SafeEditFileRole = "required" | "supporting" | "validation_only" | "expansion";
+
+export type SafeEditRisk = {
+  kind: "scope_expansion" | "missing_impact_analysis" | "incomplete_impact_analysis" | "opportunistic_refactor" | "formatting_only" | "broad_rewrite" | "bulk_rename";
+  level: "low" | "medium" | "high";
+  filePath: string;
+  message: string;
+};
+
+export type SafeEditReport = {
+  status: "clean" | "warning" | "high_risk";
+  recommendation: {
+    requiredFiles: string[];
+    conditionalFiles: string[];
+    validationFiles: string[];
+    editableScopeFiles: string[];
+    impactAnalysisComplete: boolean | null;
+    evidenceSource: "impact_analysis" | "explicit_target" | "none";
+    diagnostics: string[];
+  };
+  files: Array<{
+    filePath: string;
+    role: SafeEditFileRole;
+    reasons: string[];
+    addedLines: number;
+    removedLines: number;
+    risks: SafeEditRisk[];
+  }>;
+  necessaryFiles: string[];
+  expansionFiles: string[];
+  risks: SafeEditRisk[];
 };
 
 export type PatchLifecycleEventType =
@@ -798,10 +832,10 @@ export function branchFileChatMessage(chatId: string, messageId: string) {
   });
 }
 
-export function applyPatch(patchId: string, filePath?: string) {
+export function applyPatch(patchId: string, filePath?: string, acknowledgeSafeEditRisk = false) {
   return request<{ success: boolean; checkpoint: Checkpoint }>("/api/patch/apply", {
     method: "POST",
-    body: JSON.stringify({ patchId, filePath })
+    body: JSON.stringify({ patchId, filePath, acknowledgeSafeEditRisk })
   });
 }
 

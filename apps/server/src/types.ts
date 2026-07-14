@@ -281,6 +281,21 @@ export type PendingAgentToolCall = {
   riskLevel: "low" | "medium" | "high";
   status: "pending";
   createdAt: number;
+  // 审批恢复必须保留编辑门禁依赖的上下文，避免恢复后退回空白 Agent 状态。
+  agentContext?: AgentContextSnapshot;
+};
+
+export type AgentContextSnapshot = {
+  userGoal: string;
+  filesRead: string[];
+  searchQueries: string[];
+  searchResultFiles: string[];
+  relevantFiles: string[];
+  patternSearchPerformed?: boolean;
+  patternCandidateFiles?: string[];
+  existenceCheckPerformed?: boolean;
+  unresolvedExistenceChecks?: string[];
+  impactAnalyses?: import("./impactAnalyzer/index.js").ImpactAnalysisResult[];
 };
 
 export type AgentMode = "plan" | "act";
@@ -415,6 +430,7 @@ export type UpdateAgentModeRequest = {
 export type ApplyPatchRequest = {
   patchId: string;
   filePath?: string;
+  acknowledgeSafeEditRisk?: boolean;
 };
 
 export type ApplyPatchResponse = {
@@ -471,6 +487,8 @@ export type PatchGenerationDiagnostics = {
   records: PatchFilterRecord[];
   contextSelection?: import("./contextSelection/types.js").ContextSelectionSnapshot;
   patchCompleteness?: import("./contextSelection/types.js").PatchCompletenessReport;
+  // Safe Editor 报告用于在历史记录中区分必要改动和扩散改动。
+  safeEditReport?: import("./safeEditor/types.js").SafeEditReport;
   generatedAt: number;
 };
 
@@ -524,6 +542,7 @@ export type EditScope = {
   allowedExistingFiles: string[];
   allowNewFiles: boolean;
   createdFileDirectories: string[];
+  safeEditRecommendation?: import("./safeEditor/types.js").SafeEditRecommendation;
 };
 
 export type Checkpoint = {

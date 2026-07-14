@@ -21,6 +21,17 @@ function countExactMatches(content: string, search: string) {
   return content.split(search).length - 1;
 }
 
+/** 计算精确替换结果但不写入文件，供 Safe Editor 在落盘前检查真实 diff。 */
+export function resolveSearchReplaceContent(content: string, search: string, replace: string, replaceAll = false) {
+  if (!search) throw new HttpError(422, "search must not be empty");
+  const matches = countExactMatches(content, search);
+  if (matches === 0) return null;
+  return {
+    content: replaceAll ? content.split(search).join(replace) : content.replace(search, replace),
+    replacements: replaceAll ? matches : 1
+  };
+}
+
 /**
  * 在工作区文件中执行精确 SEARCH/REPLACE，并返回写入后的完整文件内容。
  */
@@ -30,15 +41,13 @@ export async function replaceInFile(input: ReplaceInFileInput): Promise<FileEdit
   }
 
   const oldContent = await readWorkspaceFile(input.filePath);
-  const replacements = countExactMatches(oldContent, input.search);
+  const resolved = resolveSearchReplaceContent(oldContent, input.search, input.replace, input.replaceAll);
 
-  if (replacements === 0) {
+  if (!resolved) {
     throw new SearchReplaceMismatchError(input.filePath);
   }
 
-  // 默认只替换第一处命中；需要批量替换时由调用方显式传入 replaceAll。
-  const nextContent = input.replaceAll ? oldContent.split(input.search).join(input.replace) : oldContent.replace(input.search, input.replace);
-  await writeWorkspaceFile(input.filePath, nextContent);
+  await writeWorkspaceFile(input.filePath, resolved.content);
   const finalContent = await readWorkspaceFile(input.filePath);
 
   return {
@@ -46,7 +55,7 @@ export async function replaceInFile(input: ReplaceInFileInput): Promise<FileEdit
     oldContent,
     finalContent,
     changed: oldContent !== finalContent,
-    replacements: input.replaceAll ? replacements : 1,
+    replacements: resolved.replacements,
     beforeExists: true,
     afterExists: true
   };

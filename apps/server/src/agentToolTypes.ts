@@ -1,6 +1,7 @@
 import type { AgentStep } from "./types.js";
 import type { FileEditResult } from "./types.js";
 import type { ContextCache } from "./codeDiscovery/index.js";
+import type { ImpactAnalysisResult } from "./impactAnalyzer/index.js";
 
 export type AgentRole = "system" | "user" | "assistant" | "tool";
 
@@ -18,6 +19,8 @@ export type AgentContext = {
   existenceCheckPerformed?: boolean;
   /** 最近一次检查中仍缺失或歧义的引用，用于阻止不可靠的代码生成。 */
   unresolvedExistenceChecks?: string[];
+  /** 保存本轮影响分析证据，Safe Editor 据此生成最小修改集合。 */
+  impactAnalyses?: ImpactAnalysisResult[];
 };
 
 export type AgentToolCall = {

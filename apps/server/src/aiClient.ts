@@ -14,6 +14,7 @@ import { discoverProjectCommands } from "./commandDiscovery.js";
 import { formatCommandFailureForPrompt, getLastFailedCommandResultForChat } from "./commandResults.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
 import { buildEditScope } from "./editScope.js";
+import { buildSafeEditRecommendation } from "./safeEditor/index.js";
 import { readWorkspaceFile } from "./fileTools.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { discoverProjectRules } from "./projectRules.js";
@@ -764,15 +765,23 @@ function createNullPatchRecoveryMessage(options: { summary: string; status: AiEd
 function attachEditScope(result: AiEditResult, agentContext: AgentContext, selectedFilePath: string | null, pathRetryContext?: EditPathRetryContext): AiEditResult {
   const retryCandidateFiles =
     pathRetryContext?.reason === "invalid_paths" || pathRetryContext?.reason === "scope_violation" ? pathRetryContext.validFilePaths : [];
+  const editScope = buildEditScope({
+    selectedFilePath,
+    filesRead: agentContext.filesRead,
+    retryCandidateFiles,
+    allowNewFiles: true
+  });
 
   return {
     ...result,
-    editScope: buildEditScope({
-      selectedFilePath,
-      filesRead: agentContext.filesRead,
-      retryCandidateFiles,
-      allowNewFiles: true
-    })
+    editScope: {
+      ...editScope,
+      safeEditRecommendation: buildSafeEditRecommendation({
+        impactAnalysis: agentContext.impactAnalyses?.at(-1),
+        fallbackTargetFiles: selectedFilePath ? [selectedFilePath] : [],
+        editableScopeFiles: editScope.allowedExistingFiles
+      })
+    }
   };
 }
 
@@ -1537,13 +1546,20 @@ export async function generateAiEdit(filePath: string | null, content: string, u
 
   const result = await normalizeAiEditResultWithRepair(rawContent, filePath, runId);
   logAi(runId, "done", { elapsedMs: Date.now() - startedAt, patches: result.patches?.map((file) => file.filePath) || null, summary: result.summary });
+  const editScope = buildEditScope({
+    selectedFilePath: filePath,
+    filesRead: filePath ? [filePath] : [],
+    allowNewFiles: false
+  });
   return {
     ...result,
-    editScope: buildEditScope({
-      selectedFilePath: filePath,
-      filesRead: filePath ? [filePath] : [],
-      allowNewFiles: false
-    })
+    editScope: {
+      ...editScope,
+      safeEditRecommendation: buildSafeEditRecommendation({
+        fallbackTargetFiles: filePath ? [filePath] : [],
+        editableScopeFiles: editScope.allowedExistingFiles
+      })
+    }
   };
 }
 

@@ -86,6 +86,14 @@ function renderPatchDiagnostics(diagnostics: PatchGenerationDiagnostics[]) {
             ) : (
               <p>没有候选变更被过滤。</p>
             )}
+            {item.safeEditReport ? (
+              <div className={`task-safe-edit ${item.safeEditReport.status}`}>
+                <strong>Safe Editor：{item.safeEditReport.status === "clean" ? "最小范围正常" : item.safeEditReport.status === "warning" ? "存在风险提示" : "高风险改动"}</strong>
+                {item.safeEditReport.risks.length ? (
+                  <ul>{item.safeEditReport.risks.map((risk, index) => <li key={`${risk.filePath}:${risk.kind}:${index}`}><code>{risk.filePath}</code><small>{risk.message}</small></li>)}</ul>
+                ) : null}
+              </div>
+            ) : null}
           </article>
         ))}
       </div>

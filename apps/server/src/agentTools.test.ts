@@ -333,6 +333,8 @@ test("analyzeImpact returns upstream consumers and records the impact scope", as
   assert.deepEqual(agentContext.searchResultFiles, ["src/routes/userRoute.ts"]);
   assert.deepEqual(agentContext.relevantFiles.sort(), ["src/routes/userRoute.ts", "src/service.ts"]);
   assert.equal(agentContext.searchQueries[0], "impact:src/service.ts#loadUser");
+  assert.equal(agentContext.impactAnalyses?.length, 1);
+  assert.equal(agentContext.impactAnalyses?.[0].changes[0].filePath, "src/service.ts");
   await fs.rm(workspaceRoot, { recursive: true, force: true });
 });
 

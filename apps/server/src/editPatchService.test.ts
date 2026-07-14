@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildPatchCompletenessReport, createContextSelectionSnapshot } from "./contextSelection/index.js";
 import { buildFinalPatchSummary, buildPatchGenerationDiagnostics } from "./editPatchService.js";
+import { buildSafeEditRecommendation, evaluateSafeEdit } from "./safeEditor/index.js";
 
 test("final patch summary uses cleaned file count instead of model candidate count", () => {
   const summary = buildFinalPatchSummary({
@@ -81,6 +82,27 @@ test("patch diagnostics can carry context selection and completeness report", ()
 
   assert.equal(diagnostics.contextSelection?.readyForPatch, true);
   assert.equal(diagnostics.patchCompleteness?.risks.length, 0);
+});
+
+test("patch diagnostics carries Safe Editor minimal-change assessment", () => {
+  const recommendation = buildSafeEditRecommendation({ fallbackTargetFiles: ["src/app.ts"] });
+  const safeEditReport = evaluateSafeEdit({
+    taskDescription: "修改应用入口",
+    recommendation,
+    candidates: [{ filePath: "src/app.ts", status: "modify", oldContent: "old", newContent: "new" }]
+  });
+  const diagnostics = buildPatchGenerationDiagnostics({
+    rawPatchCount: 1,
+    normalizedFilePaths: ["src/app.ts"],
+    preDedupeCount: 1,
+    postDedupeCount: 1,
+    finalPatchCount: 1,
+    records: [],
+    safeEditReport
+  });
+
+  assert.equal(diagnostics.safeEditReport?.status, "clean");
+  assert.deepEqual(diagnostics.safeEditReport?.necessaryFiles, ["src/app.ts"]);
 });
 
 test("patch completeness reports missed selected target file", () => {

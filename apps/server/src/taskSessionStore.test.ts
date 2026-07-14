@@ -555,11 +555,13 @@ test("stores and clears pending tool calls for approval resume", async () => {
     toolCallId: "tool-call-1",
     toolName: "runCommand",
     arguments: { command: "pnpm test" },
-    riskLevel: "medium"
+    riskLevel: "medium",
+    agentContext: { userGoal: "运行测试", filesRead: ["src/service.ts"], searchQueries: ["impact:src/service.ts"], searchResultFiles: [], relevantFiles: ["src/service.ts"] }
   });
 
   assert.equal(pending?.status, "awaiting_approval");
   assert.equal(pending?.pendingToolCall?.toolName, "runCommand");
+  assert.deepEqual(pending?.pendingToolCall?.agentContext?.filesRead, ["src/service.ts"]);
   assert.deepEqual(await getPendingAgentToolCall(session.id), pending?.pendingToolCall);
 
   const approved = await decideTaskSessionApproval(session.id, "run_command:test-action", "approved");

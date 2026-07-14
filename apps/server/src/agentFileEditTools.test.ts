@@ -12,6 +12,7 @@ import { createTaskSession, getTaskSession } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import type { AgentFileEditToolResult, AgentToolRuntime } from "./agentToolTypes.js";
 import type { AgentStep } from "./types.js";
+import type { ImpactAnalysisResult } from "./impactAnalyzer/index.js";
 
 function createToolRuntime(options: Partial<AgentToolRuntime> = {}): AgentToolRuntime & { registry: typeof runtimeAgentToolRegistry } {
   return {
@@ -68,6 +69,55 @@ test("replaceInFile 工具会写入文件并返回 finalContent", async () => {
     assert.equal(result.replacements, 1);
     assert.equal(result.oldContentPreview, "export const value = 1;\n");
     assert.equal(result.finalContent, "export const value = 2;\n");
+  });
+});
+
+test("replaceInFile 会阻止修改影响分析最小范围之外的文件", async () => {
+  await withTempWorkspace(async (workspaceRoot) => {
+    await fs.writeFile(path.join(workspaceRoot, "target.ts"), "export const value = 1;\n", "utf8");
+    const tool = fileEditToolDefinitions.find((definition) => definition.name === "replaceInFile");
+    const impactAnalysis: ImpactAnalysisResult = {
+      changes: [{ filePath: "service.ts", changeKind: "modify", status: "resolved", definitions: [] }],
+      impactedFiles: [], relatedTests: [], boundaryFiles: [], risk: { level: "low", score: 0, factors: [] }, diagnostics: [], complete: true, truncated: false,
+      indexedFileCount: 2, indexedSymbolCount: 1, unresolvedReferenceCount: 0, indexedUnresolvedReferenceCount: 0
+    };
+
+    assert.ok(tool);
+    await assert.rejects(
+      () => tool.execute({ filePath: "target.ts", search: "value = 1", replace: "value = 2" }, createToolRuntime({ agentContext: { userGoal: "修改服务", filesRead: ["service.ts", "target.ts"], searchQueries: [], searchResultFiles: [], relevantFiles: [], impactAnalyses: [impactAnalysis] } })),
+      /Safe Editor blocked risky direct edit/
+    );
+    assert.equal(await fs.readFile(path.join(workspaceRoot, "target.ts"), "utf8"), "export const value = 1;\n");
+  });
+});
+
+test("writeFile 不会把已存在文件因 createIfMissing=true 误判为新增文件", async () => {
+  await withTempWorkspace(async (workspaceRoot) => {
+    await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+    await fs.writeFile(path.join(workspaceRoot, "src", "other.ts"), "export const other = 1;\n", "utf8");
+    const tool = fileEditToolDefinitions.find((definition) => definition.name === "writeFile");
+    const impactAnalysis: ImpactAnalysisResult = {
+      changes: [{ filePath: "src/service.ts", changeKind: "modify", status: "resolved", definitions: [] }], impactedFiles: [], relatedTests: [], boundaryFiles: [],
+      risk: { level: "low", score: 0, factors: [] }, diagnostics: [], complete: true, truncated: false, indexedFileCount: 2, indexedSymbolCount: 1, unresolvedReferenceCount: 0, indexedUnresolvedReferenceCount: 0
+    };
+
+    assert.ok(tool);
+    await assert.rejects(
+      () => tool.execute({ filePath: "src/other.ts", content: "export const other = 2;\n", createIfMissing: true }, createToolRuntime({ agentContext: { userGoal: "修改服务", filesRead: ["src/service.ts", "src/other.ts"], searchQueries: [], searchResultFiles: [], relevantFiles: [], impactAnalyses: [impactAnalysis] } })),
+      /Safe Editor blocked risky direct edit/
+    );
+    assert.equal(await fs.readFile(path.join(workspaceRoot, "src", "other.ts"), "utf8"), "export const other = 1;\n");
+  });
+});
+
+test("replaceInFile 在无影响分析时仍会检查真实格式化 diff", async () => {
+  await withTempWorkspace(async (workspaceRoot) => {
+    await fs.writeFile(path.join(workspaceRoot, "target.ts"), "const value=1;\n", "utf8");
+    const tool = fileEditToolDefinitions.find((definition) => definition.name === "replaceInFile");
+
+    assert.ok(tool);
+    await assert.rejects(() => tool.execute({ filePath: "target.ts", search: "value=1", replace: "value = 1" }, createToolRuntime()), /Safe Editor blocked risky direct edit/);
+    assert.equal(await fs.readFile(path.join(workspaceRoot, "target.ts"), "utf8"), "const value=1;\n");
   });
 });
 

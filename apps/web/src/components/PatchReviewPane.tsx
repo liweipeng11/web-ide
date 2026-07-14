@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { DiffEditor } from "@monaco-editor/react";
-import type { GenerateEditResponse, PatchFileChange } from "../api";
+import type { GenerateEditResponse, PatchFileChange, SafeEditFileRole } from "../api";
 import type { AutoFixState } from "../appState";
 import Icon from "./Icon";
 
@@ -49,6 +49,10 @@ function getFilteredSummary(patch: GenerateEditResponse) {
   return `模型候选 ${diagnostics.rawPatchCount} 项，最终有效 ${diagnostics.finalPatchCount} 项，已过滤 ${diagnostics.filteredCount} 项。`;
 }
 
+function getSafeEditRoleLabel(role: SafeEditFileRole) {
+  return { required: "必要改动", supporting: "配套改动", validation_only: "仅建议验证", expansion: "扩散改动" }[role];
+}
+
 export default function PatchReviewPane({ patch, loading, autoFix, onApply, onReject, onRunCommand }: Props) {
   const [selectedPath, setSelectedPath] = useState(() => patch.files[0]?.path || "");
 
@@ -61,6 +65,8 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
   // 兼容旧响应：新接口统一返回 finalSummary，旧数据回退到 summary。
   const displaySummary = patch.finalSummary || patch.summary;
   const filteredSummary = getFilteredSummary(patch);
+  const safeEditReport = patch.diagnostics?.safeEditReport;
+  const selectedAssessment = safeEditReport?.files.find((file) => file.filePath === selectedFile?.path);
 
   return (
     <section className="diff-review-pane" aria-label="Diff review in editor">
@@ -104,11 +110,22 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
 
       {filteredSummary ? <div className="diff-diagnostics">{filteredSummary}</div> : null}
 
+      {safeEditReport && safeEditReport.status !== "clean" ? (
+        <section className={`diff-safe-edit ${safeEditReport.status}`}>
+          <strong>Safe Editor：{safeEditReport.status === "high_risk" ? "检测到高风险扩散" : "存在需要确认的改动"}</strong>
+          <span>
+            证据来源：{safeEditReport.recommendation.evidenceSource === "impact_analysis" ? "影响分析" : safeEditReport.recommendation.evidenceSource === "explicit_target" ? "明确目标文件" : "缺少影响分析"}
+          </span>
+          {safeEditReport.risks.length ? <ul>{safeEditReport.risks.map((risk, index) => <li key={`${risk.filePath}:${risk.kind}:${index}`}><code>{risk.filePath}</code> {risk.message}</li>)}</ul> : null}
+        </section>
+      ) : null}
+
       {selectedFile ? (
         <>
           <div className="diff-file-toolbar diff-review-toolbar">
             <div>
               <strong>{getPatchFileLabel(selectedFile)}</strong>
+              {selectedAssessment ? <span className={`safe-edit-role ${selectedAssessment.role}`}>{getSafeEditRoleLabel(selectedAssessment.role)}</span> : null}
               <span>{selectedFile.summary}</span>
             </div>
             <div className="diff-file-actions">

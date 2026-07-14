@@ -1023,13 +1023,13 @@ app.delete(
 app.post(
   "/api/patch/apply",
   asyncRoute(async (request, response) => {
-    const { patchId, filePath } = request.body as Partial<ApplyPatchRequest>;
+    const { patchId, filePath, acknowledgeSafeEditRisk } = request.body as Partial<ApplyPatchRequest>;
 
     if (!patchId) {
       throw new HttpError(400, "patchId is required");
     }
 
-    const result = await applyPendingPatch({ patchId, filePath });
+    const result = await applyPendingPatch({ patchId, filePath, acknowledgeSafeEditRisk });
     response.json({ success: true, checkpoint: result.checkpoint });
   })
 );

@@ -53,6 +53,20 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
   };
 }
 
+function snapshotAgentContext(agentContext: AgentContext): AgentContext {
+  // 只复制可序列化字段，避免审批等待期间后续内存修改污染持久化快照。
+  return {
+    ...agentContext,
+    filesRead: [...agentContext.filesRead],
+    searchQueries: [...agentContext.searchQueries],
+    searchResultFiles: [...agentContext.searchResultFiles],
+    relevantFiles: [...agentContext.relevantFiles],
+    patternCandidateFiles: agentContext.patternCandidateFiles ? [...agentContext.patternCandidateFiles] : undefined,
+    unresolvedExistenceChecks: agentContext.unresolvedExistenceChecks ? [...agentContext.unresolvedExistenceChecks] : undefined,
+    impactAnalyses: agentContext.impactAnalyses ? structuredClone(agentContext.impactAnalyses) : undefined
+  };
+}
+
 function getPatternFinderBlockReason(toolName: string, agentContext: AgentContext, registry: AgentToolRegistry) {
   const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile"]);
   if (!editingTools.has(toolName) || !registry.get("findSimilarPatterns")) return null;
@@ -212,7 +226,7 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
   const runId = options.runId || createAiRunId("agent-resume");
   const persistedMessages = options.persistedMessages || (options.taskSessionId ? await listAgentMessages(options.taskSessionId) : []);
   const messages = restoreRuntimeMessages(options.userRequest, mode, persistedMessages);
-  const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);
+  const agentContext = options.agentContext || options.pendingToolCall.agentContext || createDefaultAgentContext(options.userRequest);
   const generatedPatchIds: string[] = [];
   const toolRuntime = createAgentToolRuntime({
     agentContext,
@@ -371,7 +385,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           arguments: parseToolArguments(toolCall),
           riskLevel: approval.riskLevel,
           status: "pending",
-          createdAt: Date.now()
+          createdAt: Date.now(),
+          agentContext: snapshotAgentContext(agentContext)
         };
 
         await setPendingAgentToolCall(options.taskSessionId, pendingToolCall);

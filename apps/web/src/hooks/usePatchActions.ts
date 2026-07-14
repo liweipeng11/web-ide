@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from "react";
-import { applyPatch, fetchCheckpoint, fetchFiles, rejectPatch, rollbackCheckpoint, type FileTreeNode } from "../api";
+import { applyPatch, fetchCheckpoint, fetchFiles, rejectPatch, rollbackCheckpoint, type FileTreeNode, type SafeEditReport } from "../api";
 import type { AppState } from "../appState";
 
 type UsePatchActionsOptions = {
@@ -8,6 +8,22 @@ type UsePatchActionsOptions = {
   setFiles: Dispatch<SetStateAction<FileTreeNode[]>>;
   refreshTaskSessions: (selectedTaskSessionId?: string | null) => Promise<void>;
 };
+
+function filterSafeEditReport(report: SafeEditReport | undefined, filePaths: string[]) {
+  if (!report) return undefined;
+  const remaining = new Set(filePaths.map((filePath) => filePath.toLowerCase()));
+  const files = report.files.filter((file) => remaining.has(file.filePath.toLowerCase()));
+  const risks = report.risks.filter((risk) => remaining.has(risk.filePath.toLowerCase()));
+
+  return {
+    ...report,
+    status: risks.some((risk) => risk.level === "high") ? "high_risk" as const : risks.length ? "warning" as const : "clean" as const,
+    files,
+    risks,
+    necessaryFiles: report.necessaryFiles.filter((filePath) => remaining.has(filePath.toLowerCase())),
+    expansionFiles: report.expansionFiles.filter((filePath) => remaining.has(filePath.toLowerCase()))
+  };
+}
 
 // 统一处理 patch 应用和 checkpoint 回滚，避免文件状态同步分散在多个地方。
 export function usePatchActions({ state, setState, setFiles, refreshTaskSessions }: UsePatchActionsOptions) {
@@ -20,10 +36,18 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
 
     if (!targetFiles.length) return;
 
+    const targetPaths = new Set(targetFiles.map((file) => file.path.toLowerCase()));
+    const highRisks = patchToApply.diagnostics?.safeEditReport?.risks.filter((risk) => risk.level === "high" && targetPaths.has(risk.filePath.toLowerCase())) || [];
+    const acknowledgeSafeEditRisk = highRisks.length
+      ? window.confirm(`Safe Editor 检测到高风险改动：\n\n${highRisks.map((risk) => `- ${risk.filePath}：${risk.message}`).join("\n")}\n\n确认仍要应用这些改动？`)
+      : false;
+
+    if (highRisks.length && !acknowledgeSafeEditRisk) return;
+
     setState((current) => ({ ...current, loading: true, error: null }));
 
     try {
-      const result = await applyPatch(patchToApply.patchId, filePath);
+      const result = await applyPatch(patchToApply.patchId, filePath, acknowledgeSafeEditRisk);
       const nodes = targetFiles.some((file) => file.status === "create" || file.status === "delete") ? await fetchFiles("", state.showIgnoredFiles) : null;
       if (nodes) {
         setFiles(nodes);
@@ -53,8 +77,11 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
           dismissedCheckpointId: null,
           patch: remainingFiles.length
             ? {
-                ...patchToApply,
-                files: remainingFiles,
+              ...patchToApply,
+              files: remainingFiles,
+              diagnostics: patchToApply.diagnostics
+                ? { ...patchToApply.diagnostics, safeEditReport: filterSafeEditReport(patchToApply.diagnostics.safeEditReport, remainingFiles.map((file) => file.path)) }
+                : undefined,
                 oldContent: remainingFiles[0].oldContent,
                 newContent: remainingFiles[0].newContent,
                 diffHtml: remainingFiles.map((file) => '<div class="diff-file-header">' + (file.status === "delete" ? file.path + " (deleted file)" : file.status === "create" ? file.path + " (new file)" : file.path) + "</div>" + file.diffHtml).join("")
@@ -147,6 +174,9 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
           ? {
               ...patchToReject,
               files: remainingFiles,
+              diagnostics: patchToReject.diagnostics
+                ? { ...patchToReject.diagnostics, safeEditReport: filterSafeEditReport(patchToReject.diagnostics.safeEditReport, remainingFiles.map((file) => file.path)) }
+                : undefined,
               oldContent: remainingFiles[0].oldContent,
               newContent: remainingFiles[0].newContent,
               diffHtml: remainingFiles.map((file) => '<div class="diff-file-header">' + (file.status === "delete" ? file.path + " (deleted file)" : file.status === "create" ? file.path + " (new file)" : file.path) + "</div>" + file.diffHtml).join("")

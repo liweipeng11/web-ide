@@ -226,6 +226,40 @@
   padding: 9px 18px;
 }
 
+/* Safe Editor 风险提示与普通过滤信息分开展示，避免用户忽略高风险扩散。 */
+.diff-safe-edit {
+  display: grid;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #614f24;
+  background: #2d291d;
+  color: #e8d9a3;
+}
+
+.diff-safe-edit.high_risk {
+  border-color: #7f3535;
+  background: #321f22;
+  color: #f2b8b8;
+}
+
+.diff-safe-edit ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.safe-edit-role {
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: #30343b;
+  font-size: 11px;
+}
+
+.safe-edit-role.validation_only,
+.safe-edit-role.expansion {
+  background: #61383a;
+  color: #ffd0d0;
+}
+
 .diff-commands {
   display: flex;
   flex-direction: column;

@@ -146,6 +146,8 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         maxDepth: optionalPositiveInteger(args, "maxDepth", 4),
         maxFiles: optionalPositiveInteger(args, "maxFiles", 300)
       });
+      runtime.agentContext.impactAnalyses ||= [];
+      runtime.agentContext.impactAnalyses.push(result);
       for (const change of result.changes) uniquePush(runtime.agentContext.relevantFiles, change.filePath);
       for (const impacted of result.impactedFiles) {
         uniquePush(runtime.agentContext.searchResultFiles, impacted.filePath);

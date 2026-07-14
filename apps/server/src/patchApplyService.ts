@@ -11,6 +11,7 @@ export type ApplyPendingPatchOptions = {
   filePath?: string | null;
   source?: CheckpointSource;
   onAgentStep?: (step: AgentStep) => void;
+  acknowledgeSafeEditRisk?: boolean;
 };
 
 /**
@@ -28,6 +29,14 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
 
   if (!targetFiles.length) {
     throw new HttpError(404, "Patch file not found");
+  }
+
+  const targetPathSet = new Set(targetFiles.map((file) => normalizePatchPath(file.path)));
+  const highRisks = patch.diagnostics?.safeEditReport?.risks.filter(
+    (risk) => risk.level === "high" && targetPathSet.has(normalizePatchPath(risk.filePath))
+  ) || [];
+  if (highRisks.length && !options.acknowledgeSafeEditRisk) {
+    throw new HttpError(409, `Safe Editor detected high-risk changes that require explicit confirmation: ${highRisks.map((risk) => `${risk.filePath}: ${risk.message}`).join("; ")}`);
   }
 
   const deleteFiles = targetFiles.filter((file) => file.status === "delete");

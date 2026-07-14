@@ -48,5 +48,7 @@ test("agent, edit, and chat prompts all include the shared discovery strategy", 
 
   assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "Before implementing or editing code, call findSimilarPatterns");
   assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "Before implementing or editing code, call checkExistence");
+  assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "Treat its target files as the minimal edit set");
+  assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "Do not edit an impacted file merely because analyzeImpact returned it");
   assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "Before changing a shared symbol");
 });
