@@ -1,6 +1,7 @@
 import { analyzeProject } from "../projectAnalyzer.js";
 import type { ValidationCommandCandidate } from "../projectAnalyzerTypes.js";
-import type { VerificationCommand, VerificationStage } from "./types.js";
+import { planIncrementalVerification } from "./incrementalPlanner.js";
+import type { IncrementalVerificationInput, VerificationCommand, VerificationStage } from "./types.js";
 
 const stagePriority: Record<VerificationStage, number> = {
   format_syntax: 0,
@@ -38,12 +39,18 @@ export function orderVerificationCommands(candidates: ValidationCommandCandidate
 }
 
 /** 使用项目扫描结果生成完整验证计划，并将调用方建议命令合并到对应阶段。 */
-export async function planVerificationCommands(workspaceRoot: string, preferredCommand?: string | null) {
+export async function planVerification(workspaceRoot: string, preferredCommand?: string | null, input: IncrementalVerificationInput = {}) {
   const analysis = await analyzeProject(workspaceRoot);
   const command = preferredCommand?.trim();
   const requestedCandidates: ValidationCommandCandidate[] = command
     ? [{ name: command, command, source: "request", reason: "调用方指定的验证命令" }]
     : [];
 
-  return orderVerificationCommands([...analysis.validationCommands, ...requestedCandidates]);
+  const commands = orderVerificationCommands([...analysis.validationCommands, ...requestedCandidates]);
+  return planIncrementalVerification(workspaceRoot, analysis, commands, input);
+}
+
+/** 保留命令数组接口，供只关心全量命令发现的调用方继续使用。 */
+export async function planVerificationCommands(workspaceRoot: string, preferredCommand?: string | null, input: IncrementalVerificationInput = {}) {
+  return (await planVerification(workspaceRoot, preferredCommand, input)).commands;
 }

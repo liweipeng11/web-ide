@@ -307,7 +307,7 @@ app.post(
 app.post(
   "/api/ai/validate-and-fix",
   asyncRoute(async (request, response) => {
-    const { command, selectedPath, taskSessionId, attempts, maxAttempts, confirmed } = request.body as Partial<AutoValidationRequest>;
+    const { command, selectedPath, taskSessionId, attempts, maxAttempts, changedFiles, failureCategories, confirmed } = request.body as Partial<AutoValidationRequest>;
 
     response.json(
       await runAutoValidation({
@@ -316,6 +316,8 @@ app.post(
         taskSessionId,
         attempts,
         maxAttempts,
+        changedFiles,
+        failureCategories,
         confirmed
       })
     );

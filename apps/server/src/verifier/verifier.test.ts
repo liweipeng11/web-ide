@@ -21,11 +21,15 @@ function command(name: string, stage: VerificationCommand["stage"]): Verificatio
   return { name, command: `pnpm ${name}`, source: "package.json", reason: `${name} 脚本`, stage };
 }
 
+function plan(commands: VerificationCommand[]) {
+  return { mode: "full" as const, commands, changedFiles: [], affectedPackages: [], relatedTests: [], buildRequired: true, reasons: [], diagnostics: [] };
+}
+
 test("验证流水线在首个失败命令处停止并返回结构化问题", async () => {
   const called: string[] = [];
   const planned = [command("typecheck", "typecheck"), command("test", "test"), command("build", "build")];
   const verifier = createVerifier({
-    planVerificationCommands: async () => planned,
+    planVerification: async () => plan(planned),
     evaluateCommandPolicy: () => ({ level: "safe", reason: "测试白名单" }),
     runProjectCommand: async (value) => {
       called.push(value);
@@ -43,7 +47,7 @@ test("验证流水线在首个失败命令处停止并返回结构化问题", as
 test("未确认的命令不会执行", async () => {
   let called = false;
   const verifier = createVerifier({
-    planVerificationCommands: async () => [command("custom-check", "format_syntax")],
+    planVerification: async () => plan([command("custom-check", "format_syntax")]),
     evaluateCommandPolicy: () => ({ level: "confirm", reason: "需要确认" }),
     runProjectCommand: async () => {
       called = true;
@@ -60,7 +64,7 @@ test("未确认的命令不会执行", async () => {
 test("所有验证阶段成功后返回完整执行记录", async () => {
   const planned = [command("typecheck", "typecheck"), command("lint", "lint"), command("test", "test"), command("build", "build")];
   const verifier = createVerifier({
-    planVerificationCommands: async () => planned,
+    planVerification: async () => plan(planned),
     evaluateCommandPolicy: () => ({ level: "safe", reason: "测试白名单" }),
     runProjectCommand: async (value) => result(value, "success")
   } as VerifierDependencies);
@@ -73,7 +77,7 @@ test("所有验证阶段成功后返回完整执行记录", async () => {
 
 test("没有可用验证命令时返回明确状态", async () => {
   const verifier = createVerifier({
-    planVerificationCommands: async () => [],
+    planVerification: async () => plan([]),
     evaluateCommandPolicy: () => ({ level: "safe", reason: "测试白名单" }),
     runProjectCommand: async (value) => result(value, "success")
   } as VerifierDependencies);

@@ -1,5 +1,5 @@
 import { useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { fetchCommandPolicy, recordTaskSessionCommand, streamGenerateEdit, validateAndFix, type AutoValidationResponse, type CommandResult } from "../api";
+import { fetchCommandPolicy, recordTaskSessionCommand, streamGenerateEdit, validateAndFix, type AutoValidationResponse, type CommandResult, type VerificationIssueCategory } from "../api";
 import { createClientErrorStep, createCommandAgentStep, type AppState, type CommandSuggestion } from "../appState";
 import type { TerminalCommandCompletion, TerminalCommandRequest } from "../components/TerminalPanel";
 
@@ -77,7 +77,8 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
           attempts: MAX_FIX_ATTEMPTS,
           maxAttempts: MAX_FIX_ATTEMPTS,
           awaitingPatchId: null,
-          lastFailureSummary: failureSummary
+          lastFailureSummary: failureSummary,
+          failureCategories: []
         },
         error: message,
         agentSteps: [...current.agentSteps, createClientErrorStep(message)]
@@ -95,7 +96,8 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
         attempts: nextAttempt,
         maxAttempts: MAX_FIX_ATTEMPTS,
         awaitingPatchId: null,
-        lastFailureSummary: failureSummary
+        lastFailureSummary: failureSummary,
+        failureCategories: []
       },
       agentSteps: [
         ...current.agentSteps,
@@ -155,7 +157,8 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
                 attempts: nextAttempt,
                 maxAttempts: MAX_FIX_ATTEMPTS,
                 awaitingPatchId: streamEvent.data.patch.patchId,
-                lastFailureSummary: failureSummary
+                lastFailureSummary: failureSummary,
+                failureCategories: []
               },
               agentSteps: streamEvent.data.patch.agentSteps || current.agentSteps
             }));
@@ -184,7 +187,11 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
     }
   }
 
-  async function handleValidateAndFix(command: string | null = null, options: { confirmed?: boolean } = {}): Promise<AutoValidationResponse | null> {
+  async function handleValidateAndFix(command: string | null = null, options: {
+    confirmed?: boolean;
+    changedFiles?: string[];
+    failureCategories?: VerificationIssueCategory[];
+  } = {}): Promise<AutoValidationResponse | null> {
     if (!state.workspaceRoot || state.loading || state.streaming) return null;
 
     // 自动流水线没有固定命令，回修次数需要跨不同失败阶段连续累计。
@@ -200,17 +207,20 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
         taskSessionId: state.currentTaskSessionId,
         attempts,
         maxAttempts,
+        changedFiles: options.changedFiles,
+        failureCategories: options.failureCategories,
         confirmed: options.confirmed
       });
 
       if (validation.status === "needs_confirmation") {
         const confirmed = window.confirm(`该验证命令需要确认后执行：\n\n${validation.command}\n\n原因：${validation.policy.reason}\n\n确认执行？`);
         setState((current) => ({ ...current, loading: false }));
-        return confirmed ? handleValidateAndFix(command, { confirmed: true }) : null;
+        return confirmed ? handleValidateAndFix(command, { ...options, confirmed: true }) : null;
       }
 
       const nextAgentSteps = (currentSteps: AppState["agentSteps"]) => [...currentSteps, ...validation.agentSteps.filter((step) => !currentSteps.some((item) => item.id === step.id))];
       const failureSummary = validation.failureSummary || validation.result?.summary || "";
+      const failureCategories = [...new Set(validation.verification?.failedExecution?.issues.map((issue) => issue.category) || [])];
 
       if (validation.status === "fix_generated" && validation.patch) {
         const fixPatch = validation.patch;
@@ -225,7 +235,8 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
             attempts: validation.attempts,
             maxAttempts: validation.maxAttempts,
             awaitingPatchId: fixPatch.patchId,
-            lastFailureSummary: failureSummary
+            lastFailureSummary: failureSummary,
+            failureCategories
           },
           agentSteps: nextAgentSteps(fixPatch.agentSteps || current.agentSteps)
         }));
@@ -266,7 +277,8 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
           attempts: validation.attempts,
           maxAttempts: validation.maxAttempts,
           awaitingPatchId: null,
-          lastFailureSummary: failureSummary
+          lastFailureSummary: failureSummary,
+          failureCategories
         },
         agentSteps: nextAgentSteps(current.agentSteps)
       }));

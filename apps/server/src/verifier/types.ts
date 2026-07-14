@@ -29,12 +29,31 @@ export type VerificationExecution = {
 export type VerificationReport = {
   status: "success" | "failed" | "needs_confirmation" | "blocked" | "no_commands";
   plannedCommands: VerificationCommand[];
+  plan: VerificationPlan;
   executions: VerificationExecution[];
   failedExecution?: VerificationExecution;
+};
+
+export type VerificationPlan = {
+  mode: "full" | "incremental" | "package_fallback";
+  commands: VerificationCommand[];
+  changedFiles: string[];
+  affectedPackages: string[];
+  relatedTests: string[];
+  buildRequired: boolean;
+  reasons: string[];
+  diagnostics: string[];
+};
+
+export type IncrementalVerificationInput = {
+  changedFiles?: string[];
+  failureCategories?: VerificationIssueCategory[];
 };
 
 export type RunVerificationOptions = {
   workspaceRoot: string;
   preferredCommand?: string | null;
+  changedFiles?: string[];
+  failureCategories?: VerificationIssueCategory[];
   confirmed?: boolean;
 };

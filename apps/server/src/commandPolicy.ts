@@ -66,6 +66,20 @@ function isSafeWorkspaceValidationCommand(command: string) {
   return Boolean(matched && isValidationScriptName(matched[2]));
 }
 
+function isSafeRelativePath(value: string) {
+  return /^[a-z0-9_./\\-]+$/i.test(value) && !value.replace(/\\/g, "/").split("/").includes("..");
+}
+
+// focused test 仅允许固定测试运行器和测试文件路径，禁止附带任意 runner 参数或 shell 控制符。
+function isSafeFocusedTestCommand(command: string) {
+  const matched = command.match(/^(pnpm(?:\s+--dir\s+([^\s]+))?\s+exec|npm(?:\s+--prefix\s+([^\s]+))?\s+exec\s+--)\s+(tsx\s+--test|node\s+--test|vitest\s+run|jest)\s+(.+)$/i);
+  if (!matched) return false;
+  const packageDirectory = matched[2] || matched[3];
+  if (packageDirectory && !isSafeRelativePath(packageDirectory)) return false;
+  const testFiles = matched[5].trim().split(/\s+/);
+  return testFiles.length > 0 && testFiles.every((filePath) => isSafeRelativePath(filePath) && /(?:^|\/)(?:tests?|__tests__)(?:\/|$)|\.(?:test|spec)\.[^/]+$/i.test(filePath.replace(/\\/g, "/")));
+}
+
 export function evaluateCommandPolicy(command: string): CommandPolicyResult {
   const normalizedCommand = normalizeCommand(command);
 
@@ -96,7 +110,7 @@ export function evaluateCommandPolicy(command: string): CommandPolicyResult {
 
   const safeCommand = safeCommands.find((policyCommand) => normalizedCommand === policyCommand.toLowerCase());
 
-  if (safeCommand || isSafeRootValidationCommand(normalizedCommand) || isSafeWorkspaceValidationCommand(normalizedCommand)) {
+  if (safeCommand || isSafeRootValidationCommand(normalizedCommand) || isSafeWorkspaceValidationCommand(normalizedCommand) || isSafeFocusedTestCommand(normalizedCommand)) {
     return {
       level: "safe",
       reason: `Command is allowlisted: ${safeCommand || "validation script"}`

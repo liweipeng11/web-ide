@@ -3,7 +3,7 @@ import { createAgentStep } from "./routeAgentSteps.js";
 import { advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, updateTaskSessionStatus } from "./taskSessionStore.js";
 import type { AgentStep, AutoValidationResponse, CommandResult } from "./types.js";
 import { runVerification } from "./verifier/index.js";
-import type { VerificationReport } from "./verifier/types.js";
+import type { VerificationIssueCategory, VerificationReport } from "./verifier/types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
 const defaultMaxAttempts = 3;
@@ -87,6 +87,8 @@ export type AutoValidationOptions = {
   taskSessionId?: string | null;
   attempts?: number;
   maxAttempts?: number;
+  changedFiles?: string[];
+  failureCategories?: VerificationIssueCategory[];
   confirmed?: boolean;
 };
 
@@ -129,7 +131,13 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
     const workspaceRoot = dependencies.getWorkspaceRoot();
     if (!workspaceRoot) throw new Error("Open a workspace before running validation");
 
-    const verification = await dependencies.runVerification({ workspaceRoot, preferredCommand: requestedCommand, confirmed: options.confirmed });
+    const verification = await dependencies.runVerification({
+      workspaceRoot,
+      preferredCommand: requestedCommand,
+      changedFiles: options.changedFiles,
+      failureCategories: options.failureCategories,
+      confirmed: options.confirmed
+    });
     const activeExecution = verification.failedExecution || verification.executions.at(-1);
     const command = activeExecution?.command.command || requestedCommand || "";
     const policy = activeExecution?.policy || { level: "blocked" as const, reason: "未发现可执行的验证命令" };

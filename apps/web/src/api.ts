@@ -129,8 +129,10 @@ export type AutoValidationResponse = {
 
 export type VerificationStage = "format_syntax" | "typecheck" | "lint" | "test" | "build";
 
+export type VerificationIssueCategory = "syntax" | "type" | "lint" | "test" | "build" | "timeout" | "command" | "unknown";
+
 export type VerificationIssue = {
-  category: "syntax" | "type" | "lint" | "test" | "build" | "timeout" | "command" | "unknown";
+  category: VerificationIssueCategory;
   message: string;
   file?: string;
   line?: number;
@@ -141,6 +143,15 @@ export type VerificationIssue = {
 export type VerificationReport = {
   status: "success" | "failed" | "needs_confirmation" | "blocked" | "no_commands";
   plannedCommands: Array<{ name: string; command: string; source: string; reason: string; stage: VerificationStage }>;
+  plan: {
+    mode: "full" | "incremental" | "package_fallback";
+    changedFiles: string[];
+    affectedPackages: string[];
+    relatedTests: string[];
+    buildRequired: boolean;
+    reasons: string[];
+    diagnostics: string[];
+  };
   executions: VerificationExecution[];
   failedExecution?: VerificationExecution;
 };
@@ -606,7 +617,15 @@ export function runProjectCommand(command: string, cwd?: string, chatId?: string
   });
 }
 
-export function validateAndFix(command?: string | null, options: { selectedPath?: string | null; taskSessionId?: string | null; attempts?: number; maxAttempts?: number; confirmed?: boolean } = {}) {
+export function validateAndFix(command?: string | null, options: {
+  selectedPath?: string | null;
+  taskSessionId?: string | null;
+  attempts?: number;
+  maxAttempts?: number;
+  changedFiles?: string[];
+  failureCategories?: VerificationIssueCategory[];
+  confirmed?: boolean;
+} = {}) {
   return request<AutoValidationResponse>("/api/ai/validate-and-fix", {
     method: "POST",
     body: JSON.stringify({

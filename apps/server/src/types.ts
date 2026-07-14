@@ -132,6 +132,9 @@ export type AutoValidationRequest = {
   taskSessionId?: string | null;
   attempts?: number;
   maxAttempts?: number;
+  // 完整应用 patch 后传入实际变更文件，供增量验证器收敛包和测试范围。
+  changedFiles?: string[];
+  failureCategories?: import("./verifier/types.js").VerificationIssueCategory[];
   confirmed?: boolean;
 };
 

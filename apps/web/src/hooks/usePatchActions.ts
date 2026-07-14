@@ -1,5 +1,5 @@
-import type { Dispatch, SetStateAction } from "react";
-import { applyPatch, fetchCheckpoint, fetchFiles, rejectPatch, rollbackCheckpoint, type FileTreeNode, type SafeEditReport } from "../api";
+import { useRef, type Dispatch, type SetStateAction } from "react";
+import { applyPatch, fetchCheckpoint, fetchFiles, rejectPatch, rollbackCheckpoint, type FileTreeNode, type SafeEditReport, type VerificationIssueCategory } from "../api";
 import type { AppState } from "../appState";
 
 type UsePatchActionsOptions = {
@@ -27,7 +27,12 @@ function filterSafeEditReport(report: SafeEditReport | undefined, filePaths: str
 
 // 统一处理 patch 应用和 checkpoint 回滚，避免文件状态同步分散在多个地方。
 export function usePatchActions({ state, setState, setFiles, refreshTaskSessions }: UsePatchActionsOptions) {
-  async function handleApply(filePath: string | undefined, onValidateAndFix: (command?: string | null) => Promise<unknown>) {
+  const appliedFilesByPatch = useRef(new Map<string, Set<string>>());
+
+  async function handleApply(
+    filePath: string | undefined,
+    onValidateAndFix: (command?: string | null, options?: { changedFiles?: string[]; failureCategories?: VerificationIssueCategory[] }) => Promise<unknown>
+  ) {
     if (!state.patch) return;
 
     const patchToApply = state.patch;
@@ -55,6 +60,9 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
       void refreshTaskSessions(patchToApply.taskSessionId || state.currentTaskSessionId);
       const remainingFiles = filePath ? patchToApply.files.filter((file) => file.path !== filePath) : [];
       const shouldRunFullValidation = !remainingFiles.length;
+      const appliedFiles = appliedFilesByPatch.current.get(patchToApply.patchId) || new Set<string>();
+      targetFiles.forEach((file) => appliedFiles.add(file.path));
+      appliedFilesByPatch.current.set(patchToApply.patchId, appliedFiles);
       setState((current) => {
         const selectedFileChange = targetFiles.find((file) => file.path === current.selectedPath);
         const fallbackSelectedChange = current.selectedPath === selectedPathToApply && !filePath ? patchToApply : null;
@@ -91,8 +99,12 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
       });
 
       if (shouldRunFullValidation) {
-        // 每次完整应用 patch 后都重新发现并执行全量验证，回修后也不会遗漏后续阶段。
-        await onValidateAndFix(null);
+        // 将本次实际写入的文件交给增量验证器；自动回修时同时保留上轮错误类别用于决定是否升级 build。
+        appliedFilesByPatch.current.delete(patchToApply.patchId);
+        await onValidateAndFix(null, {
+          changedFiles: [...appliedFiles],
+          failureCategories: state.autoFix?.failureCategories
+        });
       }
     } catch (error) {
       setState((current) => ({
@@ -166,6 +178,7 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
       await rejectPatch(patchToReject.patchId, filePath);
       void refreshTaskSessions(patchToReject.taskSessionId || state.currentTaskSessionId);
       const remainingFiles = filePath ? patchToReject.files.filter((file) => file.path !== filePath) : [];
+      if (!remainingFiles.length) appliedFilesByPatch.current.delete(patchToReject.patchId);
       setState((current) => ({
         ...current,
         loading: false,

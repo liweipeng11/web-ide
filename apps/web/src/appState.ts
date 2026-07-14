@@ -1,4 +1,4 @@
-import type { AgentMode, AgentStep, Checkpoint, CommandPolicyResult, CommandResult, FileChatHistoryItem, FileChatMessage, FileTreeNode, GenerateEditResponse, ProjectRulesResponse, TaskSession } from "./api";
+import type { AgentMode, AgentStep, Checkpoint, CommandPolicyResult, CommandResult, FileChatHistoryItem, FileChatMessage, FileTreeNode, GenerateEditResponse, ProjectRulesResponse, TaskSession, VerificationIssueCategory } from "./api";
 
 export type OpenFileTab = {
   path: string;
@@ -40,6 +40,7 @@ export type AutoFixState = {
   maxAttempts: number;
   awaitingPatchId: string | null;
   lastFailureSummary: string;
+  failureCategories: VerificationIssueCategory[];
 };
 
 export type CommandSuggestion = {

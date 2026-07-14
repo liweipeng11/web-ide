@@ -44,22 +44,23 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
   const policy = options.policy || { level: "safe", reason: "test allowlist" };
   const command = options.result?.command || "pnpm test";
   const plannedCommand = { name: "test", command, source: "package.json", reason: "测试脚本", stage: "test" as const };
+  const plan = { mode: "full" as const, commands: [plannedCommand], changedFiles: [], affectedPackages: [], relatedTests: [], buildRequired: true, reasons: [], diagnostics: [] };
   const dependencies = {
     getWorkspaceRoot: () => "C:/workspace",
     runVerification: async (verificationOptions): Promise<VerificationReport> => {
       verificationCalls.push(verificationOptions);
       if (policy.level === "confirm") {
-        return { status: "needs_confirmation", plannedCommands: [plannedCommand], executions: [{ command: plannedCommand, policy, issues: [] }], failedExecution: { command: plannedCommand, policy, issues: [] } };
+        return { status: "needs_confirmation", plannedCommands: [plannedCommand], plan, executions: [{ command: plannedCommand, policy, issues: [] }], failedExecution: { command: plannedCommand, policy, issues: [] } };
       }
       if (policy.level === "blocked") {
-        return { status: "blocked", plannedCommands: [plannedCommand], executions: [{ command: plannedCommand, policy, issues: [] }], failedExecution: { command: plannedCommand, policy, issues: [] } };
+        return { status: "blocked", plannedCommands: [plannedCommand], plan, executions: [{ command: plannedCommand, policy, issues: [] }], failedExecution: { command: plannedCommand, policy, issues: [] } };
       }
       commandCalls += 1;
       const result = options.result || commandResult("success");
       const execution = { command: plannedCommand, policy, result, issues: result.status === "success" ? [] : [{ category: "test" as const, file: "src/app.test.ts", line: 12, message: "1 test failed" }] };
       return result.status === "success"
-        ? { status: "success", plannedCommands: [plannedCommand], executions: [execution] }
-        : { status: "failed", plannedCommands: [plannedCommand], executions: [execution], failedExecution: execution };
+        ? { status: "success", plannedCommands: [plannedCommand], plan, executions: [execution] }
+        : { status: "failed", plannedCommands: [plannedCommand], plan, executions: [execution], failedExecution: execution };
     },
     createEditPatchResponse: async (selectedPath, prompt, onAgentStep, taskSessionId) => {
       patchCalls.push({ selectedPath, prompt, taskSessionId });
@@ -113,6 +114,14 @@ test("未指定命令时请求 Verifier 自动发现完整流水线", async () =
   assert.equal(result.status, "success");
   assert.equal(harness.verificationCalls[0].preferredCommand, null);
   assert.equal(harness.verificationCalls[0].workspaceRoot, "C:/workspace");
+});
+
+test("将 changed-files 和上轮失败类别传给增量验证器", async () => {
+  const harness = createHarness();
+  await harness.run({ changedFiles: ["src/app.ts"], failureCategories: ["build"] });
+
+  assert.deepEqual(harness.verificationCalls[0].changedFiles, ["src/app.ts"]);
+  assert.deepEqual(harness.verificationCalls[0].failureCategories, ["build"]);
 });
 
 test("requires confirmation before running an unknown command", async () => {
