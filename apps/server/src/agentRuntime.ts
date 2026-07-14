@@ -9,6 +9,7 @@ import { config } from "./config.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { AgentMessage as PersistedAgentMessage, AgentStep, PendingAgentToolCall } from "./types.js";
 import { buildTaskWorkflowRuntimePrompt, type TaskWorkflowSnapshot } from "./taskWorkflow/index.js";
+import { getCurrentProjectMemoryPrompt } from "./projectMemory/index.js";
 
 export type AgentRuntimeResult = {
   status: "completed" | "awaiting_approval" | "step_limit_reached";
@@ -31,6 +32,7 @@ export type AgentRuntimeOptions = {
   taskSessionId?: string | null;
   mode?: AgentMode;
   workflow?: TaskWorkflowSnapshot;
+  projectMemoryPrompt?: string | null;
   onAgentStep?: (step: AgentStep) => void;
   requestCompletion?: (body: Record<string, unknown>) => Promise<AgentCompletionResponse>;
 };
@@ -119,9 +121,13 @@ function getWorkflowToolBlockReason(toolName: string, agentContext: AgentContext
   return null;
 }
 
-function createInitialMessages(userRequest: string, mode: AgentMode, workflow?: TaskWorkflowSnapshot) {
+async function loadProjectMemoryPrompt() {
+  return getCurrentProjectMemoryPrompt();
+}
+
+function createInitialMessages(userRequest: string, mode: AgentMode, workflow?: TaskWorkflowSnapshot, projectMemoryPrompt = "") {
   const modeConfig = getAgentModeConfig(workflow?.type === "analysis-only" ? "plan" : mode);
-  const systemPrompt = workflow ? `${modeConfig.systemPrompt}\n\n${buildTaskWorkflowRuntimePrompt(workflow)}` : modeConfig.systemPrompt;
+  const systemPrompt = [modeConfig.systemPrompt, workflow ? buildTaskWorkflowRuntimePrompt(workflow) : "", projectMemoryPrompt].filter(Boolean).join("\n\n");
 
   return [
     { role: "system" as const, content: systemPrompt },
@@ -233,11 +239,11 @@ function restoreRuntimeMessage(message: PersistedAgentMessage): AgentMessage {
   };
 }
 
-function restoreRuntimeMessages(userRequest: string, mode: AgentMode, persistedMessages: PersistedAgentMessage[] = [], workflow?: TaskWorkflowSnapshot) {
+function restoreRuntimeMessages(userRequest: string, mode: AgentMode, persistedMessages: PersistedAgentMessage[] = [], workflow?: TaskWorkflowSnapshot, projectMemoryPrompt = "") {
   const restoredMessages = persistedMessages.map(restoreRuntimeMessage);
 
   // 旧会话可能只持久化 assistant/tool 消息，恢复时补齐当前模式对应的系统提示词和用户目标。
-  return restoredMessages.some((message) => message.role === "system") ? restoredMessages : [...createInitialMessages(userRequest, mode, workflow), ...restoredMessages];
+  return restoredMessages.some((message) => message.role === "system") ? restoredMessages : [...createInitialMessages(userRequest, mode, workflow, projectMemoryPrompt), ...restoredMessages];
 }
 
 export type ResumeAgentRuntimeAfterApprovalOptions = Omit<AgentRuntimeOptions, "messages"> & {
@@ -254,7 +260,8 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
   const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
   const runId = options.runId || createAiRunId("agent-resume");
   const persistedMessages = options.persistedMessages || (options.taskSessionId ? await listAgentMessages(options.taskSessionId) : []);
-  const messages = restoreRuntimeMessages(options.userRequest, mode, persistedMessages, options.workflow);
+  const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt());
+  const messages = restoreRuntimeMessages(options.userRequest, mode, persistedMessages, options.workflow, projectMemoryPrompt);
   const agentContext = options.agentContext || options.pendingToolCall.agentContext || createDefaultAgentContext(options.userRequest);
   const generatedPatchIds: string[] = [];
   const toolRuntime = createAgentToolRuntime({
@@ -280,6 +287,7 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     mode,
     runId,
     registry,
+    projectMemoryPrompt,
     messages,
     agentContext,
     generatedPatchIds
@@ -296,7 +304,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_AGENT_STEPS;
   const requestCompletion = options.requestCompletion || ((body) => requestChatCompletion(body) as Promise<AgentCompletionResponse>);
   const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);
-  const messages: AgentMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow);
+  const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt());
+  const messages: AgentMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
   const generatedPatchIds = options.generatedPatchIds || [];
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, generatedPatchIds, taskSessionId: options.taskSessionId, onAgentStep: options.onAgentStep, registry, emitToolApprovalSteps: false });
   const toolCallCounts = new Map<string, number>();

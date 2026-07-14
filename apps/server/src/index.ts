@@ -29,6 +29,7 @@ import { resolvePlanModeTaskStatus } from "./taskWorkflow/index.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
+import { createProjectMemoryRouter } from "./projectMemory/index.js";
 
 const app = express();
 const server = createServer(app);
@@ -44,6 +45,7 @@ app.use(express.json({ limit: "5mb" }));
 app.use("/api", createSearchRouter());
 app.use("/api/git-workflow", createGitWorkflowRouter());
 app.use("/api/vue2-template", createVue2TemplateRouter());
+app.use("/api/project-memory", createProjectMemoryRouter());
 
 function createStreamRunId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;

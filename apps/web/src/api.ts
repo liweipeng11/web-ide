@@ -462,6 +462,34 @@ export type ProjectRulesResponse = {
   supportedFiles: string[];
 };
 
+export type ProjectMemoryTechStack = {
+  packageManager: string | null;
+  languages: string[];
+  frameworks: string[];
+  buildTools: string[];
+  lintTools: string[];
+  typeSystems: string[];
+  testTools: string[];
+  workspacePackages: string[];
+  scannedAt: number;
+};
+
+export type ProjectMemory = {
+  schemaVersion: number;
+  projectSummary: string;
+  projectSummarySource: "generated" | "manual";
+  techStack: ProjectMemoryTechStack;
+  conventions: string[];
+  currentGoals: string[];
+  recentChanges: Array<{ taskSessionId: string; summary: string; files: string[]; changedAt: number }>;
+  pendingItems: Array<{ taskSessionId: string; summary: string; status: TaskSessionStatus; updatedAt: number }>;
+  confirmedRisks: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type UpdateProjectMemoryInput = Partial<Pick<ProjectMemory, "projectSummary" | "conventions" | "currentGoals" | "confirmedRisks">>;
+
 export type CommandResult = {
   command: string;
   chatId?: string;
@@ -616,6 +644,21 @@ export function fetchProjectCommands() {
 export function fetchProjectRules(paths: string[] = []) {
   const query = paths.map((path) => `path=${encodeURIComponent(path)}`).join("&");
   return request<ProjectRulesResponse>(`/api/project-rules${query ? `?${query}` : ""}`);
+}
+
+export function fetchProjectMemory() {
+  return request<{ memory: ProjectMemory }>("/api/project-memory");
+}
+
+export function updateProjectMemory(input: UpdateProjectMemoryInput) {
+  return request<{ memory: ProjectMemory }>("/api/project-memory", {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
+export function refreshProjectMemory() {
+  return request<{ memory: ProjectMemory }>("/api/project-memory/refresh", { method: "POST", body: JSON.stringify({}) });
 }
 
 export function fetchCommandPolicy(command: string) {

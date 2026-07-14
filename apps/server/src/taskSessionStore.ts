@@ -976,13 +976,15 @@ export async function getTaskSession(taskSessionId: string) {
   return readTaskSession(taskSessionId);
 }
 
-export async function listTaskSessions() {
+export async function listTaskSessions(options: { includeDiffView?: boolean } = {}) {
   const files = await listJsonFilesWithLegacyFallback(taskSessionDirectory(), legacyTaskSessionDirectory());
 
   const sessions = await Promise.all(
     files.map(async (filePath) => {
       const content = await fs.readFile(filePath, "utf8");
-      return attachTaskSessionDiffView(normalizeTaskSession(JSON.parse(content) as TaskSession));
+      const session = normalizeTaskSession(JSON.parse(content) as TaskSession);
+      // Project Memory 等摘要消费者不需要逐个读取 checkpoint，可跳过较重的历史 diff 组装。
+      return options.includeDiffView === false ? session : attachTaskSessionDiffView(session);
     })
   );
 

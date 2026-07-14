@@ -21,6 +21,7 @@ Mini AI Web Editor 是一个本地优先的浏览器端 AI 编码工作台。它
 - 支持运行构建/测试验证，并在验证失败后生成后续修复补丁。
 - 自动发现常见项目命令和包管理器元数据。
 - 支持全局级别和项目级别 Project Rules，让 Agent 在聊天、编辑和验证修复时遵守长期规则。
+- 支持 Project Memory，在不同聊天和服务重启之间保留项目画像、约定、阶段目标、最近改动、未完成事项和已确认风险。
 - 提供 Git 工作流面板，支持查看状态、创建任务分支、生成提交信息，并只提交当前任务相关文件。
 
 ## Agent 工作流
@@ -134,6 +135,14 @@ alwaysApply: false
 
 在界面中可通过左侧活动栏的 **Project Rules** 面板查看当前发现的规则、生效状态、来源级别和内容预览。
 
+## Project Memory
+
+Project Memory 用于给 Agent 提供跨会话的稳定项目背景，数据写入当前工作区的 `.mini-ai/state/runtime/project-memory.json`。首次读取时会复用 Project Analyzer 生成项目简介和技术栈；后续读取会从任务会话自动汇总真实变更文件和未完成任务。
+
+可长期维护的字段包括项目简介、当前约定、当前阶段目标和已确认风险。最近改动与未完成事项由服务端从任务事实生成，不接受 API 直接覆盖；清理任务历史不会删除已经同步的最近改动。Project Memory 会注入任务计划、连续 Agent、普通问答、直接补丁和自动验证回修链路。注入模型前会按字段限制条目数量和字符预算，并保持 JSON 结构完整；历史任务文本只作为非指令数据，当前用户请求与最新读取的工作区代码始终优先。
+
+在界面中可通过左侧活动栏的 **Project Memory** 面板编辑长期内容、重新扫描技术栈，并查看最近改动与未完成事项。自动生成的简介会随重新扫描更新，手工维护的简介不会被覆盖。
+
 ## 界面功能说明
 
 主界面由左侧活动栏、资源面板、编辑器、聊天面板、终端和 Diff 审阅弹窗组成。
@@ -143,6 +152,7 @@ alwaysApply: false
 - 文件：浏览当前工作区文件树。
 - 搜索：在工作区内搜索代码。
 - Project Rules：查看全局规则、项目规则和路径级规则的生效状态。
+- Project Memory：维护跨会话项目简介、约定、阶段目标和风险，并查看自动同步的任务事实。
 - Git：打开 Git 工作流面板，查看状态、创建任务分支和提交任务文件。
 
 ### 文件面板
@@ -337,6 +347,16 @@ GET /api/project-rules
 GET /api/project-rules?path=apps/web/src/App.tsx
 ```
 
+### Project Memory
+
+```text
+GET   /api/project-memory
+PATCH /api/project-memory
+POST  /api/project-memory/refresh
+```
+
+`PATCH` 可更新 `projectSummary`、`conventions`、`currentGoals` 和 `confirmedRisks`；`refresh` 会重新扫描技术栈，同时保留手工维护的长期内容。
+
 ### AI Edit
 
 ```text
@@ -443,6 +463,7 @@ apps/
       chat-store.json        聊天历史
       command-results.json   命令执行结果
     runtime/
+      project-memory.json    跨会话项目画像和长期上下文
       checkpoints/           patch 应用前后的回滚快照
       task-sessions/         Agent 任务历史
 ```

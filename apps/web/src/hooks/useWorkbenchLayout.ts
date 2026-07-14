@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
-export type WorkbenchLeftPanel = "files" | "search" | "rules" | "git";
+export type WorkbenchLeftPanel = "files" | "search" | "rules" | "memory" | "git";
 
 type UseWorkbenchLayoutOptions = {
   onSaveFile: () => Promise<void> | void;

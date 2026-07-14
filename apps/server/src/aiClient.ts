@@ -22,6 +22,7 @@ import type { AgentStep, AiEditResult, ChatContextFile, FileChatMessage, FilePat
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { agentToolSchemas, createAgentToolRuntime, executeAgentToolCall, type AgentContext, type AgentToolCall } from "./agentTools.js";
 import { createAgentStep } from "./routeAgentSteps.js";
+import { getCurrentProjectMemoryPrompt } from "./projectMemory/index.js";
 
 type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
@@ -1270,11 +1271,12 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
   const runId = createAiRunId("edit");
   const startedAt = Date.now();
   const contextPaths = filePath ? [filePath] : [];
-  const [availableCommands, recentFailedCommand, projectFacts, projectRules] = await Promise.all([
+  const [availableCommands, recentFailedCommand, projectFacts, projectRules, projectMemoryPrompt] = await Promise.all([
     getAvailableCommandsForPrompt(),
     Promise.resolve(null).then(formatCommandFailureForPrompt),
     getProjectFactsForPrompt(),
-    getProjectRulesForPrompt(contextPaths)
+    getProjectRulesForPrompt(contextPaths),
+    getCurrentProjectMemoryPrompt()
   ]);
   const agentContext: AgentContext = {
     userGoal: userRequest,
@@ -1285,7 +1287,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
   };
   logAi(runId, "start", { userGoal: userRequest, selectedFile: filePath, selectedFileChars: content.length, pathRetryContext });
   const toolMessages: ChatMessage[] = [
-    { role: "system", content: AI_MULTI_FILE_EDIT_SYSTEM_PROMPT },
+    { role: "system", content: [AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, projectMemoryPrompt].filter(Boolean).join("\n\n") },
     {
       role: "user",
       content: JSON.stringify(
@@ -1519,11 +1521,12 @@ export async function generateAiEdit(filePath: string | null, content: string, u
     return generateAiEditWithTools(null, content, userRequest, undefined, pathRetryContext);
   }
 
-  const [availableCommands, recentFailedCommand, projectFacts, projectRules] = await Promise.all([
+  const [availableCommands, recentFailedCommand, projectFacts, projectRules, projectMemoryPrompt] = await Promise.all([
     getAvailableCommandsForPrompt(),
     Promise.resolve(null).then(formatCommandFailureForPrompt),
     getProjectFactsForPrompt(),
-    getProjectRulesForPrompt([filePath])
+    getProjectRulesForPrompt([filePath]),
+    getCurrentProjectMemoryPrompt()
   ]);
   logAi(runId, "start", { userGoal: userRequest, selectedFile: filePath, selectedFileChars: content.length });
 
@@ -1532,7 +1535,7 @@ export async function generateAiEdit(filePath: string | null, content: string, u
     model: config.aiModel,
     temperature: config.aiEditTemperature,
     messages: [
-      { role: "system", content: AI_SYSTEM_PROMPT },
+      { role: "system", content: [AI_SYSTEM_PROMPT, projectMemoryPrompt].filter(Boolean).join("\n\n") },
       {
         role: "user",
         content: JSON.stringify(
@@ -1588,11 +1591,12 @@ export async function generateFileChatReply(contextFiles: ChatContextFile[], his
     content: message.content
   }));
   const contextPaths = contextFiles.map((file) => file.path);
-  const [availableCommands, recentFailedCommand, projectFacts, projectRules] = await Promise.all([
+  const [availableCommands, recentFailedCommand, projectFacts, projectRules, projectMemory] = await Promise.all([
     getAvailableCommandsForPrompt(),
     getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt),
     getProjectFactsForPrompt(),
-    getProjectRulesForPrompt(contextPaths)
+    getProjectRulesForPrompt(contextPaths),
+    getCurrentProjectMemoryPrompt()
   ]);
 
   const agentContext: AgentContext = {
@@ -1604,7 +1608,7 @@ export async function generateFileChatReply(contextFiles: ChatContextFile[], his
   };
 
   return generateFileChatAssistantContent([
-    { role: "system", content: AI_FILE_CHAT_SYSTEM_PROMPT },
+    { role: "system", content: [AI_FILE_CHAT_SYSTEM_PROMPT, projectMemory].filter(Boolean).join("\n\n") },
     {
       role: "user",
       content: JSON.stringify(
@@ -1630,15 +1634,16 @@ async function buildFileChatMessages(contextFiles: ChatContextFile[], history: F
     content: message.content
   }));
   const contextPaths = contextFiles.map((file) => file.path);
-  const [availableCommands, recentFailedCommand, projectFacts, projectRules] = await Promise.all([
+  const [availableCommands, recentFailedCommand, projectFacts, projectRules, projectMemory] = await Promise.all([
     getAvailableCommandsForPrompt(),
     getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt),
     getProjectFactsForPrompt(),
-    getProjectRulesForPrompt(contextPaths)
+    getProjectRulesForPrompt(contextPaths),
+    getCurrentProjectMemoryPrompt()
   ]);
 
   return [
-    { role: "system", content: AI_FILE_CHAT_SYSTEM_PROMPT },
+    { role: "system", content: [AI_FILE_CHAT_SYSTEM_PROMPT, projectMemory].filter(Boolean).join("\n\n") },
     {
       role: "user",
       content: JSON.stringify(

@@ -2,6 +2,7 @@ import type { Dispatch, PointerEvent, SetStateAction } from "react";
 import type { AgentMode, AgentStep, CommandResult, FileTreeNode, TaskPlanItemStatus } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
+import type { WorkbenchLeftPanel } from "../hooks/useWorkbenchLayout";
 import GitWorkflowPanel from "../gitWorkflow/GitWorkflowPanel";
 import ChatPanel from "./ChatPanel";
 import CodeSearchPanel from "./CodeSearchPanel";
@@ -10,6 +11,7 @@ import FileTree from "./FileTree";
 import Icon from "./Icon";
 import PatchReviewPane from "./PatchReviewPane";
 import ProjectRulesPanel from "./ProjectRulesPanel";
+import ProjectMemoryPanel from "./ProjectMemoryPanel";
 import TerminalPanel, { type TerminalCommandCompletion, type TerminalCommandRequest } from "./TerminalPanel";
 
 type Props = {
@@ -19,11 +21,11 @@ type Props = {
   terminalHeight: number;
   terminalOpen: boolean;
   terminalCommandRequest: TerminalCommandRequest | null;
-  leftPanel: "files" | "search" | "rules" | "git";
+  leftPanel: WorkbenchLeftPanel;
   savingFile: boolean;
   setState: Dispatch<SetStateAction<AppState>>;
   setTerminalOpen: Dispatch<SetStateAction<boolean>>;
-  setLeftPanel: Dispatch<SetStateAction<"files" | "search" | "rules" | "git">>;
+  setLeftPanel: Dispatch<SetStateAction<WorkbenchLeftPanel>>;
   onOpenWorkspace: () => void;
   onPickWorkspace: () => void;
   onOpenFile: (path: string) => Promise<void>;
@@ -191,6 +193,9 @@ export default function AppLayout({
             <button type="button" className={leftPanel === "rules" ? "active" : ""} title="Project Rules" aria-label="Project Rules" aria-pressed={leftPanel === "rules"} onClick={() => setLeftPanel("rules")}>
               <Icon name="rules" />
             </button>
+            <button type="button" className={leftPanel === "memory" ? "active" : ""} title="Project Memory" aria-label="Project Memory" aria-pressed={leftPanel === "memory"} onClick={() => setLeftPanel("memory")}>
+              <Icon name="memory" />
+            </button>
             <button type="button" className={leftPanel === "search" ? "active" : ""} title="代码搜索 (Ctrl+Shift+F)" aria-label="代码搜索" aria-pressed={leftPanel === "search"} onClick={() => setLeftPanel("search")}>
               <Icon name="search" />
             </button>
@@ -212,6 +217,8 @@ export default function AppLayout({
               <CodeSearchPanel disabled={!state.workspaceRoot} onOpenFile={onOpenFile} />
             ) : leftPanel === "rules" ? (
               <ProjectRulesPanel disabled={!state.workspaceRoot} rules={state.projectRules} onRefresh={() => void onRefreshProjectRules()} />
+            ) : leftPanel === "memory" ? (
+              <ProjectMemoryPanel key={state.workspaceRoot} disabled={!state.workspaceRoot} workspaceRoot={state.workspaceRoot} />
             ) : (
               <GitWorkflowPanel
                 disabled={!state.workspaceRoot}
