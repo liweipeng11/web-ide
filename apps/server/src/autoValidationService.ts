@@ -161,6 +161,7 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
 
     if (verification.status === "no_commands") {
       await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
+      await dependencies.updateTaskSessionStatus(taskSessionId, "awaiting_user");
       return finish({ status: "no_commands", command, attempts, maxAttempts, policy, verification, agentSteps });
     }
 

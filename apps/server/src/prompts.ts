@@ -315,6 +315,8 @@ Rules:
 - Generate 3 to 6 steps.
 - Write titles in Chinese.
 - Make each step actionable and easy to track.
+- When workflow.requiredSteps is provided, preserve its order and semantic phases; only make wording more specific to the task.
+- The analysis-only workflow must not include editing, patch generation, or command execution steps.
 - Prefer agent workflow steps: understand context, inspect relevant files, implement focused changes, review diff, run validation.
 - For edit tasks, include an explicit step for confirming the editable file scope before implementation.
 - For edit tasks, prefer wording that makes the file plan visible, such as "确认可修改文件范围" or "列出本次修改文件".
@@ -325,11 +327,12 @@ Rules:
 export const AI_TASK_PLAN_REWRITE_SYSTEM_PROMPT = `You update an existing Todo plan for an agentic AI code editor.
 
 Return ONLY valid JSON in this shape:
-{"items":[{"title":"short actionable step","status":"pending|in_progress|completed|blocked","note":"optional short note"}]}
+{"items":[{"workflowStepId":"optional stable workflow step id","title":"short actionable step","status":"pending|in_progress|completed|blocked","note":"optional short note"}]}
 
 Rules:
 - Follow the user's instruction to add, delete, reorder, rename, or change statuses.
 - Preserve useful existing steps unless the instruction asks to remove them.
+- Preserve workflowStepId when retaining or moving an existing workflow phase.
 - Write titles and notes in Chinese.
 - Keep 1 to 8 steps.
 - Keep at most one step in "in_progress".

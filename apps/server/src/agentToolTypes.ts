@@ -21,6 +21,8 @@ export type AgentContext = {
   unresolvedExistenceChecks?: string[];
   /** 保存本轮影响分析证据，Safe Editor 据此生成最小修改集合。 */
   impactAnalyses?: ImpactAnalysisResult[];
+  /** 记录 Runtime 实际执行过的命令，bugfix 工作流据此确认已尝试复现或验证。 */
+  commandsRun?: Array<{ command: string; status: "success" | "failed"; exitCode: number | null }>;
 };
 
 export type AgentToolCall = {

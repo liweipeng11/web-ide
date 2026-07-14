@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createCommandAgentToolDefinitions, parsePackageScript } from "./agentCommandTools.js";
 import { createContextCache } from "./codeDiscovery/index.js";
+import type { AgentToolRuntime } from "./agentToolTypes.js";
 import type { AgentStep, CommandPolicyResult, CommandResult } from "./types.js";
 
 function commandResult(status: CommandResult["status"], command = "pnpm test"): CommandResult {
@@ -18,7 +19,7 @@ function commandResult(status: CommandResult["status"], command = "pnpm test"): 
   };
 }
 
-function createRuntime(onAgentStep?: (step: AgentStep) => void) {
+function createRuntime(onAgentStep?: (step: AgentStep) => void): AgentToolRuntime {
   return {
     agentContext: {
       userGoal: "Run validation",
@@ -51,12 +52,14 @@ function commandStatuses(steps: AgentStep[]) {
 test("runCommand emits running and success command steps", async () => {
   const steps: AgentStep[] = [];
   const tool = createTool();
-  const result = await tool.execute({ command: "pnpm test" }, createRuntime((step) => steps.push(step)));
+  const runtime = createRuntime((step) => steps.push(step));
+  const result = await tool.execute({ command: "pnpm test" }, runtime);
   const summary = tool.summarize(result, false, {}) as { cached?: boolean; result?: { status?: string } };
 
   assert.equal(summary.cached, false);
   assert.equal(summary.result?.status, "success");
   assert.deepEqual(commandStatuses(steps), ["running", "success"]);
+  assert.deepEqual(runtime.agentContext.commandsRun, [{ command: "pnpm test", status: "success", exitCode: 0 }]);
 });
 
 test("runCommand returns failed status details for model repair loop", async () => {

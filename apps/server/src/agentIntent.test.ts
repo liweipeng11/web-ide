@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildContextualEditRequest, inferAgentRequestClassification, shouldGeneratePatchForIntent } from "./aiClient.js";
+import { buildContextualEditRequest, ensureEditableAgentRequestClassification, inferAgentRequestClassification, shouldGeneratePatchForIntent } from "./aiClient.js";
 import type { FileChatMessage } from "./types.js";
 
 test("routes warning plus repair requests to diagnose_then_edit in local fallback routing", () => {
@@ -10,6 +10,15 @@ test("routes warning plus repair requests to diagnose_then_edit in local fallbac
 
   assert.equal(classification.intent, "diagnose_then_edit");
   assert.equal(shouldGeneratePatchForIntent(classification.intent), true);
+});
+
+test("direct edit classification preserves bugfix intent and upgrades read-only intent", () => {
+  const bugfix = ensureEditableAgentRequestClassification({ intent: "diagnose_then_edit", confidence: 0.9, normalizedGoal: "修复构建失败", reason: "test" });
+  const inspect = ensureEditableAgentRequestClassification({ intent: "inspect", confidence: 0.7, normalizedGoal: "分析并处理模块", reason: "test" });
+
+  assert.equal(bugfix.intent, "diagnose_then_edit");
+  assert.equal(inspect.intent, "edit");
+  assert.match(inspect.reason, /direct edit endpoint/);
 });
 
 test("uses recent editable context for natural continuation requests", () => {

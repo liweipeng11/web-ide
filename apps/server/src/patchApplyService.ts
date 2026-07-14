@@ -3,7 +3,7 @@ import { HttpError } from "./errors.js";
 import { createWorkspaceFile, deleteWorkspaceFile, readWorkspaceFile, readWorkspaceFileBuffer, workspacePathExists, writeWorkspaceFile } from "./fileTools.js";
 import { deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import { addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionPatchEvent, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionPatchEvent } from "./taskSessionStore.js";
 import type { AgentStep, CheckpointSource } from "./types.js";
 
 export type ApplyPendingPatchOptions = {
@@ -131,11 +131,6 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
   if (options.filePath) {
     const remainingPatch = removePendingPatchFile(patch.patchId, options.filePath);
 
-    if (!remainingPatch && !patch.commandsToRun?.length) {
-      await advanceTaskPlanProgress(patch.taskSessionId, "validation_success");
-      await updateTaskSessionStatus(patch.taskSessionId, "success");
-    }
-
     if (!remainingPatch) {
       await appendTaskSessionPatchEvent(patch.taskSessionId, {
         type: "patch_completed",
@@ -160,11 +155,6 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
         checkpointId: checkpoint.id
       }
     });
-
-    if (!patch.commandsToRun?.length) {
-      await advanceTaskPlanProgress(patch.taskSessionId, "validation_success");
-      await updateTaskSessionStatus(patch.taskSessionId, "success");
-    }
   }
 
   return {

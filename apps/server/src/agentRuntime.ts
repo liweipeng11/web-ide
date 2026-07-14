@@ -8,6 +8,7 @@ import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { AgentMessage as PersistedAgentMessage, AgentStep, PendingAgentToolCall } from "./types.js";
+import { buildTaskWorkflowRuntimePrompt, type TaskWorkflowSnapshot } from "./taskWorkflow/index.js";
 
 export type AgentRuntimeResult = {
   status: "completed" | "awaiting_approval" | "step_limit_reached";
@@ -29,6 +30,7 @@ export type AgentRuntimeOptions = {
   generatedPatchIds?: string[];
   taskSessionId?: string | null;
   mode?: AgentMode;
+  workflow?: TaskWorkflowSnapshot;
   onAgentStep?: (step: AgentStep) => void;
   requestCompletion?: (body: Record<string, unknown>) => Promise<AgentCompletionResponse>;
 };
@@ -49,7 +51,8 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
     patternSearchPerformed: false,
     patternCandidateFiles: [],
     existenceCheckPerformed: false,
-    unresolvedExistenceChecks: []
+    unresolvedExistenceChecks: [],
+    commandsRun: []
   };
 }
 
@@ -63,7 +66,8 @@ function snapshotAgentContext(agentContext: AgentContext): AgentContext {
     relevantFiles: [...agentContext.relevantFiles],
     patternCandidateFiles: agentContext.patternCandidateFiles ? [...agentContext.patternCandidateFiles] : undefined,
     unresolvedExistenceChecks: agentContext.unresolvedExistenceChecks ? [...agentContext.unresolvedExistenceChecks] : undefined,
-    impactAnalyses: agentContext.impactAnalyses ? structuredClone(agentContext.impactAnalyses) : undefined
+    impactAnalyses: agentContext.impactAnalyses ? structuredClone(agentContext.impactAnalyses) : undefined,
+    commandsRun: agentContext.commandsRun ? agentContext.commandsRun.map((command) => ({ ...command })) : undefined
   };
 }
 
@@ -91,11 +95,36 @@ function getExistenceCheckBlockReason(toolName: string, agentContext: AgentConte
   return null;
 }
 
-function createInitialMessages(userRequest: string, mode: AgentMode) {
-  const modeConfig = getAgentModeConfig(mode);
+function getWorkflowToolBlockReason(toolName: string, agentContext: AgentContext, workflow?: TaskWorkflowSnapshot) {
+  if (!workflow) return null;
+  const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile", "applyPatch"]);
+  const sideEffectTools = new Set([...editingTools, "runCommand"]);
+
+  if (workflow.type === "analysis-only" && sideEffectTools.has(toolName)) {
+    return `Task workflow ${workflow.type} only allows read-only inspection tools.`;
+  }
+
+  if (workflow.type === "refactor" && editingTools.has(toolName) && !(agentContext.impactAnalyses?.length)) {
+    return "Refactor workflow requires analyzeImpact evidence before editing.";
+  }
+
+  if (workflow.type === "bugfix" && editingTools.has(toolName) && !agentContext.filesRead.length) {
+    return "Bugfix workflow requires reading failure-related code or evidence before editing.";
+  }
+
+  if (workflow.type === "bugfix" && editingTools.has(toolName) && !(agentContext.commandsRun?.length)) {
+    return "Bugfix workflow requires a reproduction or validation command attempt before editing.";
+  }
+
+  return null;
+}
+
+function createInitialMessages(userRequest: string, mode: AgentMode, workflow?: TaskWorkflowSnapshot) {
+  const modeConfig = getAgentModeConfig(workflow?.type === "analysis-only" ? "plan" : mode);
+  const systemPrompt = workflow ? `${modeConfig.systemPrompt}\n\n${buildTaskWorkflowRuntimePrompt(workflow)}` : modeConfig.systemPrompt;
 
   return [
-    { role: "system" as const, content: modeConfig.systemPrompt },
+    { role: "system" as const, content: systemPrompt },
     { role: "user" as const, content: userRequest }
   ];
 }
@@ -204,11 +233,11 @@ function restoreRuntimeMessage(message: PersistedAgentMessage): AgentMessage {
   };
 }
 
-function restoreRuntimeMessages(userRequest: string, mode: AgentMode, persistedMessages: PersistedAgentMessage[] = []) {
+function restoreRuntimeMessages(userRequest: string, mode: AgentMode, persistedMessages: PersistedAgentMessage[] = [], workflow?: TaskWorkflowSnapshot) {
   const restoredMessages = persistedMessages.map(restoreRuntimeMessage);
 
   // 旧会话可能只持久化 assistant/tool 消息，恢复时补齐当前模式对应的系统提示词和用户目标。
-  return restoredMessages.some((message) => message.role === "system") ? restoredMessages : [...createInitialMessages(userRequest, mode), ...restoredMessages];
+  return restoredMessages.some((message) => message.role === "system") ? restoredMessages : [...createInitialMessages(userRequest, mode, workflow), ...restoredMessages];
 }
 
 export type ResumeAgentRuntimeAfterApprovalOptions = Omit<AgentRuntimeOptions, "messages"> & {
@@ -222,10 +251,10 @@ export type ResumeAgentRuntimeAfterApprovalOptions = Omit<AgentRuntimeOptions, "
  */
 export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntimeAfterApprovalOptions): Promise<AgentRuntimeResult> {
   const mode = normalizeAgentMode(options.mode);
-  const registry = options.registry || getAgentModeConfig(mode).registry;
+  const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
   const runId = options.runId || createAiRunId("agent-resume");
   const persistedMessages = options.persistedMessages || (options.taskSessionId ? await listAgentMessages(options.taskSessionId) : []);
-  const messages = restoreRuntimeMessages(options.userRequest, mode, persistedMessages);
+  const messages = restoreRuntimeMessages(options.userRequest, mode, persistedMessages, options.workflow);
   const agentContext = options.agentContext || options.pendingToolCall.agentContext || createDefaultAgentContext(options.userRequest);
   const generatedPatchIds: string[] = [];
   const toolRuntime = createAgentToolRuntime({
@@ -263,12 +292,11 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
 export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<AgentRuntimeResult> {
   const runId = options.runId || createAiRunId("agent-runtime");
   const mode = normalizeAgentMode(options.mode);
-  const modeConfig = getAgentModeConfig(mode);
-  const registry = options.registry || modeConfig.registry;
+  const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_AGENT_STEPS;
   const requestCompletion = options.requestCompletion || ((body) => requestChatCompletion(body) as Promise<AgentCompletionResponse>);
   const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);
-  const messages: AgentMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode);
+  const messages: AgentMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow);
   const generatedPatchIds = options.generatedPatchIds || [];
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, generatedPatchIds, taskSessionId: options.taskSessionId, onAgentStep: options.onAgentStep, registry, emitToolApprovalSteps: false });
   const toolCallCounts = new Map<string, number>();
@@ -346,9 +374,18 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
     for (const toolCall of message.tool_calls) {
       const definition = registry.get(toolCall.function.name);
+      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.function.name, agentContext, options.workflow);
       const patternFinderBlockReason = getPatternFinderBlockReason(toolCall.function.name, agentContext, registry);
       const existenceCheckBlockReason = getExistenceCheckBlockReason(toolCall.function.name, agentContext, registry);
 
+      if (workflowBlockReason) {
+        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: workflowBlockReason, workflow: options.workflow?.type });
+        options.onAgentStep?.(createAgentStep({ type: "error", message: workflowBlockReason }));
+        const blockedMessage = createBlockedToolMessage(toolCall, workflowBlockReason);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        continue;
+      }
       if (patternFinderBlockReason) {
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: patternFinderBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: patternFinderBlockReason }));

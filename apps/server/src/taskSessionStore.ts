@@ -7,6 +7,7 @@ import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, project
 import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
 import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
+import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
 
 function taskSessionDirectory() {
   return projectRuntimeDirectory("task-sessions");
@@ -103,6 +104,7 @@ function normalizeTaskPlanItems(items: unknown): TaskPlanItem[] {
 
       return {
         id: typeof item.id === "string" && item.id.trim() ? item.id : `plan-${crypto.randomUUID()}`,
+        workflowStepId: typeof item.workflowStepId === "string" && item.workflowStepId.trim() ? item.workflowStepId.trim() : undefined,
         title: typeof item.title === "string" ? item.title : "",
         status: isTaskPlanItemStatus(item.status) ? item.status : "pending",
       note: typeof item.note === "string" ? item.note : undefined,
@@ -156,6 +158,42 @@ function isAgentMessageRole(value: unknown): value is AgentMessageRole {
 
 function isAgentMode(value: unknown): value is AgentMode {
   return value === "plan" || value === "act";
+}
+
+function isTaskWorkflowType(value: unknown): value is TaskWorkflowType {
+  return value === "bugfix" || value === "feature" || value === "refactor" || value === "analysis-only";
+}
+
+function isTaskWorkflowSource(value: unknown): value is TaskWorkflowSource {
+  return value === "intent" || value === "keyword" || value === "fallback";
+}
+
+function normalizeTaskWorkflow(value: unknown): TaskWorkflowSnapshot | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+
+  if (!isTaskWorkflowType(record.type) || !isTaskWorkflowSource(record.source) || !Array.isArray(record.steps)) return undefined;
+
+  const steps = record.steps
+    .filter((step): step is Record<string, unknown> => Boolean(step && typeof step === "object" && !Array.isArray(step)))
+    .map((step) => ({
+      id: typeof step.id === "string" ? step.id : "",
+      title: typeof step.title === "string" ? step.title : "",
+      description: typeof step.description === "string" ? step.description : ""
+    }))
+    .filter((step) => step.id && step.title);
+
+  if (!steps.length) return undefined;
+
+  return {
+    type: record.type,
+    source: record.source,
+    confidence: typeof record.confidence === "number" && Number.isFinite(record.confidence) ? Math.max(0, Math.min(1, record.confidence)) : 0.5,
+    reason: typeof record.reason === "string" ? record.reason : "",
+    steps,
+    version: typeof record.version === "number" ? record.version : 1,
+    selectedAt: typeof record.selectedAt === "number" ? record.selectedAt : Date.now()
+  };
 }
 
 function isPatchFilterReason(value: unknown): value is PatchFilterReason {
@@ -444,6 +482,7 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
   return {
     ...session,
     agentMode: isAgentMode(session.agentMode) ? session.agentMode : "act",
+    workflow: normalizeTaskWorkflow(session.workflow),
     // 旧任务记录没有 Agent 消息字段，读取时补齐，后续 runtime 可以直接追加和恢复。
     agentMessages: normalizeAgentMessages(session.agentMessages),
     pendingToolCall: normalizePendingToolCall(session.pendingToolCall),
@@ -561,6 +600,20 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
   return session;
 }
 
+export async function setTaskSessionWorkflow(taskSessionId: string | null | undefined, workflow: TaskWorkflowSnapshot) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    // 写入快照副本，避免调用方后续修改模板对象污染已保存的任务历史。
+    workflow: {
+      ...workflow,
+      steps: workflow.steps.map((step) => ({ ...step }))
+    },
+    updatedAt: Date.now()
+  }));
+}
+
 export async function addTaskPlanItem(taskSessionId: string | null | undefined, input: { title: string; status?: TaskPlanItemStatus; note?: string }) {
   if (!taskSessionId) return null;
 
@@ -590,7 +643,7 @@ export async function addTaskPlanItem(taskSessionId: string | null | undefined, 
   });
 }
 
-export async function setTaskPlanItems(taskSessionId: string | null | undefined, items: { title: string; status?: TaskPlanItemStatus; note?: string }[], options: { requireApproval?: boolean; revision?: { trigger: TaskPlanRevisionTrigger; reason: string } } = {}) {
+export async function setTaskPlanItems(taskSessionId: string | null | undefined, items: { workflowStepId?: string; title: string; status?: TaskPlanItemStatus; note?: string }[], options: { requireApproval?: boolean; revision?: { trigger: TaskPlanRevisionTrigger; reason: string } } = {}) {
   if (!taskSessionId) return null;
 
   const now = Date.now();
@@ -602,6 +655,7 @@ export async function setTaskPlanItems(taskSessionId: string | null | undefined,
 
       return {
         id: `plan-${now.toString(36)}-${index}-${crypto.randomUUID()}`,
+        workflowStepId: item.workflowStepId?.trim() || undefined,
         title,
       status: item.status || (index === 0 ? "in_progress" : "pending"),
       note: item.note?.trim() || undefined,
@@ -712,6 +766,10 @@ function findActivePlanItemIndex(items: TaskPlanItem[]) {
   return items.findIndex((item) => item.status === "in_progress");
 }
 
+function findWorkflowPlanItemIndex(items: TaskPlanItem[], workflowStepIds: string[]) {
+  return items.findIndex((item) => Boolean(item.workflowStepId && workflowStepIds.includes(item.workflowStepId)));
+}
+
 function completeThroughPlanIndex(items: TaskPlanItem[], targetIndex: number, now: number) {
   for (let index = 0; index <= targetIndex && index < items.length; index += 1) {
     if (items[index].status !== "blocked") {
@@ -737,6 +795,11 @@ function advancePlanToIndex(items: TaskPlanItem[], targetIndex: number, now: num
 }
 
 function getPatchGeneratedTargetIndex(items: TaskPlanItem[]) {
+  const implementationIndex = findWorkflowPlanItemIndex(items, ["implement", "minimal-fix", "refactor"]);
+
+  // patch 生成时实现仍待用户应用，只完成实现阶段之前的准备工作。
+  if (implementationIndex !== -1) return implementationIndex - 1;
+
   const generatedIndex = findPlanItemIndex(items, [/生成|修改|审查|审阅|补丁|patch|edit/i]);
 
   if (generatedIndex !== -1) return generatedIndex;
@@ -746,6 +809,10 @@ function getPatchGeneratedTargetIndex(items: TaskPlanItem[]) {
 }
 
 function getPatchAppliedTargetIndex(items: TaskPlanItem[]) {
+  const implementationIndex = findWorkflowPlanItemIndex(items, ["implement", "minimal-fix", "refactor"]);
+
+  if (implementationIndex !== -1) return implementationIndex;
+
   const appliedIndex = findPlanItemIndex(items, [/应用|检查结果|检查|apply/i]);
 
   if (appliedIndex !== -1) return appliedIndex;
@@ -760,9 +827,8 @@ function getPatchAppliedTargetIndex(items: TaskPlanItem[]) {
 }
 
 function getValidationSuccessTargetIndex(items: TaskPlanItem[]) {
-  const validationIndex = findPlanItemIndex(items, [/验证|命令|validation|verify|test|build|lint|check/i]);
-
-  return validationIndex === -1 ? items.length - 1 : validationIndex;
+  // 成功结果已经包含最终说明，工作流中的收尾阶段应和任务状态一起完成。
+  return items.length - 1;
 }
 
 export async function advanceTaskPlanProgress(taskSessionId: string | null | undefined, phase: TaskPlanProgressPhase) {

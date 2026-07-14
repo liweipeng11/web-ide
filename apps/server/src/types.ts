@@ -169,6 +169,8 @@ export type FileChatRequest = {
 
 export type FileChatResponse = {
   messages: FileChatMessage[];
+  taskSessionId?: string;
+  planPending?: boolean;
 };
 
 export type GenerateEditResponse = {
@@ -299,6 +301,7 @@ export type AgentContextSnapshot = {
   existenceCheckPerformed?: boolean;
   unresolvedExistenceChecks?: string[];
   impactAnalyses?: import("./impactAnalyzer/index.js").ImpactAnalysisResult[];
+  commandsRun?: Array<{ command: string; status: "success" | "failed"; exitCode: number | null }>;
 };
 
 export type AgentMode = "plan" | "act";
@@ -307,6 +310,8 @@ export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "bloc
 
 export type TaskPlanItem = {
   id: string;
+  // 关联工作流模板中的稳定步骤，状态推进不再依赖可编辑的展示标题。
+  workflowStepId?: string;
   title: string;
   status: TaskPlanItemStatus;
   note?: string;
@@ -350,6 +355,8 @@ export type TaskSession = {
   id: string;
   userGoal: string;
   agentMode?: AgentMode;
+  // 保存任务开始时选中的流程，供计划生成、历史回放和界面解释共同使用。
+  workflow?: import("./taskWorkflow/index.js").TaskWorkflowSnapshot;
   chatId?: string;
   messageIds?: string[];
   status: TaskSessionStatus;

@@ -149,6 +149,17 @@ export function shouldGeneratePatchForIntent(intent: AgentIntent) {
   return intent === "edit" || intent === "diagnose_then_edit";
 }
 
+// 专用编辑入口已经获得修改授权；当通用分类器过于保守时，只提升为普通编辑，不覆盖诊断修复意图。
+export function ensureEditableAgentRequestClassification(classification: AgentRequestClassification): AgentRequestClassification {
+  if (shouldGeneratePatchForIntent(classification.intent)) return classification;
+
+  return {
+    ...classification,
+    intent: "edit",
+    reason: `${classification.reason || "Request classification"}; direct edit endpoint requires an editable workflow`
+  };
+}
+
 export async function classifyAgentRequest(history: FileChatMessage[], userRequest: string): Promise<AgentRequestClassification> {
   const inferred = inferAgentRequestClassification(userRequest);
 

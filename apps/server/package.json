@@ -4,12 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "pretest": "pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor",
+    "pretest": "pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow",
     "test:symbol-graph": "tsx --test src/symbolGraph/symbolGraph.test.ts",
     "test:impact-analyzer": "tsx --test src/impactAnalyzer/impactAnalyzer.test.ts",
     "test:safe-editor": "tsx --test src/safeEditor/safeEditor.test.ts",
+    "test:task-workflow": "tsx --test src/taskWorkflow/taskWorkflowEngine.test.ts",
     "dev": "tsx watch src/index.ts",
-    "test": "tsx --test src/codeDiscovery/codeDiscovery.test.ts src/contextSelection/contextSelectionService.test.ts src/patternFinder/patternFinder.test.ts src/existenceChecker/existenceChecker.test.ts src/verifier/commandPlanner.test.ts src/verifier/incrementalPlanner.test.ts src/verifier/failureParser.test.ts src/verifier/verifier.test.ts src/commandPolicy.test.ts src/searchRoutes.test.ts src/agentRuntime.test.ts src/agentCommandTools.test.ts src/agentFileEditTools.test.ts src/agentPatchTools.test.ts src/checkpointStore.test.ts src/agentTools.test.ts src/prompts.test.ts src/validationCommand.test.ts src/autoValidationService.test.ts src/editPatchService.test.ts src/fileEditService.test.ts src/gitWorkflow/gitService.test.ts src/agentIntent.test.ts src/aiClient.test.ts src/aiEditParser.test.ts src/aiHttp.test.ts src/diffTools.test.ts src/editScope.test.ts src/fileTools.test.ts src/patchStore.test.ts src/projectAnalyzer.test.ts src/projectInspector.test.ts src/projectRules.test.ts src/searchReplacePatch.test.ts src/taskSessionStore.test.ts src/vue2Template/vue2TemplateService.test.ts src/workspaceStore.test.ts",
+    "test": "tsx --test src/codeDiscovery/codeDiscovery.test.ts src/contextSelection/contextSelectionService.test.ts src/patternFinder/patternFinder.test.ts src/existenceChecker/existenceChecker.test.ts src/verifier/commandPlanner.test.ts src/verifier/incrementalPlanner.test.ts src/verifier/failureParser.test.ts src/verifier/verifier.test.ts src/commandPolicy.test.ts src/searchRoutes.test.ts src/agentRuntime.test.ts src/agentCommandTools.test.ts src/agentFileEditTools.test.ts src/agentPatchTools.test.ts src/checkpointStore.test.ts src/agentTools.test.ts src/prompts.test.ts src/validationCommand.test.ts src/autoValidationService.test.ts src/editPatchService.test.ts src/fileEditService.test.ts src/gitWorkflow/gitService.test.ts src/agentIntent.test.ts src/aiClient.test.ts src/aiEditParser.test.ts src/aiHttp.test.ts src/diffTools.test.ts src/editScope.test.ts src/fileTools.test.ts src/patchApplyService.test.ts src/patchStore.test.ts src/projectAnalyzer.test.ts src/projectInspector.test.ts src/projectRules.test.ts src/searchReplacePatch.test.ts src/taskSessionStore.test.ts src/vue2Template/vue2TemplateService.test.ts src/workspaceStore.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

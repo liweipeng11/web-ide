@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from "react";
-import type { AgentMode, TaskPlanItem, TaskPlanItemStatus, TaskSession } from "../api";
+import type { AgentMode, TaskPlanItem, TaskPlanItemStatus, TaskSession, TaskWorkflowType } from "../api";
 import Icon from "./Icon";
 
 type Props = {
@@ -26,6 +26,13 @@ const statusText: Record<TaskPlanItemStatus, string> = {
 
 // 统一维护计划步骤状态，避免界面分散写死状态值。
 const statusOptions: TaskPlanItemStatus[] = ["pending", "in_progress", "completed", "blocked"];
+
+const workflowText: Record<TaskWorkflowType, string> = {
+  bugfix: "缺陷修复",
+  feature: "功能开发",
+  refactor: "代码重构",
+  "analysis-only": "只读分析"
+};
 
 function getRevisionTriggerText(trigger: string) {
   const triggerText: Record<string, string> = {
@@ -72,6 +79,7 @@ export default function TaskPlanPanel({
   const [editingNote, setEditingNote] = useState("");
   const planItems = session?.planItems || [];
   const planRevisions = session?.planRevisions || [];
+  const workflow = session?.workflow;
   const isAwaitingReplan = session?.status === "awaiting_replan";
   const effectiveAgentMode = session?.agentMode || agentMode || "act";
   const canEdit = Boolean(session) && !disabled && !loading;
@@ -145,6 +153,14 @@ export default function TaskPlanPanel({
         </div>
         <span className={`task-plan-mode ${effectiveAgentMode}`}>{effectiveAgentMode === "plan" ? "Plan" : "Act"}</span>
       </div>
+
+      {workflow && (
+        <div className={`task-workflow-summary ${workflow.type}`} title={workflow.reason}>
+          <strong>{workflowText[workflow.type]}</strong>
+          <span>{workflow.reason}</span>
+          <small>{Math.round(workflow.confidence * 100)}% 置信度 · {workflow.steps.length} 个阶段</small>
+        </div>
+      )}
 
       {session?.planApproval?.status === "pending" && (
         <div className="task-plan-approval">

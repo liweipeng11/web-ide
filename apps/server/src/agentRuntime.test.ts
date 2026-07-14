@@ -5,6 +5,7 @@ import { createAgentToolRegistry } from "./agentToolRegistry.js";
 import { AI_AGENT_ACT_SYSTEM_PROMPT } from "./prompts.js";
 import type { AgentCompletionResponse, AgentToolDefinition, AgentToolRuntime } from "./agentToolTypes.js";
 import type { AgentStep } from "./types.js";
+import { createTaskWorkflow } from "./taskWorkflow/index.js";
 
 function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runtime: AgentToolRuntime) => void): AgentToolDefinition {
   return {
@@ -893,4 +894,138 @@ test("agent runtime repeated-tool warning asks the model to move to patch review
   assert.equal(result.status, "completed");
   assert.equal(warningMessages.some((message) => message.content?.includes("move to proposePatch")), true);
   assert.equal(warningMessages.some((message) => message.content?.includes("direct-edit fallback")), true);
+});
+
+test("analysis-only workflow injects its prompt and exposes only read-only tools", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const workflow = createTaskWorkflow("分析模块依赖", {
+    intent: "inspect",
+    confidence: 0.9,
+    normalizedGoal: "分析模块依赖",
+    reason: "test"
+  });
+
+  await runAgentRuntime({
+    userRequest: "分析模块依赖",
+    mode: "act",
+    workflow,
+    runId: "test-analysis-workflow-tools",
+    requestCompletion: async (body) => {
+      requests.push(body);
+      return { choices: [{ message: { role: "assistant", content: "分析完成" } }] };
+    }
+  });
+
+  const tools = (requests[0]?.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name);
+  const messages = requests[0]?.messages as Array<{ role: string; content?: string }>;
+  assert.equal(tools.includes("proposePatch"), false);
+  assert.equal(tools.includes("replaceInFile"), false);
+  assert.equal(tools.includes("runCommand"), false);
+  assert.match(messages[0]?.content || "", /Task workflow: analysis-only/);
+});
+
+test("analysis-only workflow blocks side-effect tools even in a custom registry", async () => {
+  let executed = false;
+  let callCount = 0;
+  const registry = createAgentToolRegistry([createRuntimeTestTool("replaceInFile", { changed: true }, () => { executed = true; })]);
+  const workflow = createTaskWorkflow("分析模块依赖", {
+    intent: "inspect",
+    confidence: 0.9,
+    normalizedGoal: "分析模块依赖",
+    reason: "test"
+  });
+  const result = await runAgentRuntime({
+    userRequest: "分析模块依赖",
+    mode: "act",
+    workflow,
+    registry,
+    runId: "test-analysis-workflow-block",
+    requestCompletion: async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "edit-1", type: "function", function: { name: "replaceInFile", arguments: "{}" } }] } }]
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "保持只读" } }] };
+    }
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("only allows read-only")), true);
+});
+
+test("refactor workflow requires impact evidence before editing", async () => {
+  let executed = false;
+  let callCount = 0;
+  const registry = createAgentToolRegistry([createRuntimeTestTool("proposePatch", { patchId: "patch-1" }, () => { executed = true; })]);
+  const workflow = createTaskWorkflow("重构任务存储", {
+    intent: "edit",
+    confidence: 0.9,
+    normalizedGoal: "重构任务存储",
+    reason: "test"
+  });
+  const result = await runAgentRuntime({
+    userRequest: "重构任务存储",
+    workflow,
+    registry,
+    agentContext: {
+      userGoal: "重构任务存储",
+      filesRead: ["src/store.ts"],
+      searchQueries: [],
+      searchResultFiles: [],
+      relevantFiles: ["src/store.ts"]
+    },
+    runId: "test-refactor-workflow-impact",
+    requestCompletion: async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "patch-1", type: "function", function: { name: "proposePatch", arguments: "{}" } }] } }]
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "先补影响分析" } }] };
+    }
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("requires analyzeImpact")), true);
+});
+
+test("bugfix workflow requires a reproduction command attempt before editing", async () => {
+  let executed = false;
+  let callCount = 0;
+  const registry = createAgentToolRegistry([createRuntimeTestTool("proposePatch", { patchId: "patch-1" }, () => { executed = true; })]);
+  const workflow = createTaskWorkflow("修复登录失败", {
+    intent: "diagnose_then_edit",
+    confidence: 0.9,
+    normalizedGoal: "修复登录失败",
+    reason: "test"
+  });
+  const result = await runAgentRuntime({
+    userRequest: "修复登录失败",
+    workflow,
+    registry,
+    agentContext: {
+      userGoal: "修复登录失败",
+      filesRead: ["src/login.ts"],
+      searchQueries: [],
+      searchResultFiles: [],
+      relevantFiles: ["src/login.ts"],
+      commandsRun: []
+    },
+    runId: "test-bugfix-workflow-reproduction",
+    requestCompletion: async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "patch-1", type: "function", function: { name: "proposePatch", arguments: "{}" } }] } }]
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "先复现问题" } }] };
+    }
+  });
+
+  assert.equal(executed, false);
+  assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("command attempt")), true);
 });

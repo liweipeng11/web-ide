@@ -1,11 +1,13 @@
 import { config } from "./config.js";
 import { createAiRunId, logAi, requestJsonChatCompletion } from "./aiHttp.js";
 import { AI_TASK_PLAN_REWRITE_SYSTEM_PROMPT, AI_TASK_PLAN_SYSTEM_PROMPT } from "./prompts.js";
-import { setTaskPlanItems } from "./taskSessionStore.js";
+import { setTaskPlanItems, setTaskSessionWorkflow } from "./taskSessionStore.js";
+import { createTaskWorkflow, getTaskWorkflowSteps, type TaskWorkflowSnapshot, type TaskWorkflowType } from "./taskWorkflow/index.js";
 import type { AgentIntent, AgentRequestClassification } from "./aiClient.js";
 import type { TaskPlanItem, TaskPlanItemStatus, TaskSession } from "./types.js";
 
 type GeneratedPlanItem = {
+  workflowStepId?: string;
   title: string;
   status?: TaskPlanItemStatus;
   note?: string;
@@ -38,6 +40,7 @@ function normalizePlanItems(items: unknown): GeneratedPlanItem[] {
   return items
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
     .map((item) => ({
+      workflowStepId: typeof item.workflowStepId === "string" ? item.workflowStepId.trim().slice(0, 80) : undefined,
       title: typeof item.title === "string" ? item.title.trim().slice(0, 80) : "",
       status: isPlanStatus(item.status) ? item.status : undefined,
       note: typeof item.note === "string" ? item.note.trim().slice(0, 180) : undefined
@@ -85,15 +88,22 @@ function shouldRequirePlanApproval(classification?: AgentRequestClassification, 
   return isComplexTaskGoal(normalizedGoal, intent, options);
 }
 
-export function createFallbackTaskPlan(userGoal: string, intent: AgentIntent = "edit"): GeneratedPlanItem[] {
+function getDefaultWorkflowType(intent: AgentIntent): TaskWorkflowType | null {
+  if (intent === "diagnose_then_edit") return "bugfix";
+  if (intent === "edit") return "feature";
+  if (intent === "chat" || intent === "inspect") return "analysis-only";
+  return null;
+}
+
+export function createFallbackTaskPlan(userGoal: string, intent: AgentIntent = "edit", workflowType: TaskWorkflowType | null = getDefaultWorkflowType(intent)): GeneratedPlanItem[] {
   const normalizedGoal = userGoal.trim();
 
-  if (intent === "chat" || intent === "inspect") {
-    return [
-      { title: "理解问题和上下文" },
-      { title: "检索相关代码和资料" },
-      { title: "整理结论和建议" }
-    ];
+  if (workflowType) {
+    return getTaskWorkflowSteps(workflowType).map((step, index) => ({
+      workflowStepId: step.id,
+      title: step.title,
+      note: index === 0 && normalizedGoal ? `目标：${normalizedGoal.slice(0, 80)}；${step.description}` : step.description
+    }));
   }
 
   if (intent === "command") {
@@ -113,6 +123,47 @@ export function createFallbackTaskPlan(userGoal: string, intent: AgentIntent = "
   ];
 }
 
+// AI 只能补充各阶段说明，阶段 ID、标题和顺序始终以工作流模板为准。
+export function alignTaskPlanToWorkflow(items: GeneratedPlanItem[], workflow: TaskWorkflowSnapshot, userGoal = ""): GeneratedPlanItem[] {
+  const normalizedGoal = userGoal.trim();
+
+  return workflow.steps.map((step, index) => {
+    const candidate = items[index];
+    const fallbackNote = index === 0 && normalizedGoal ? `目标：${normalizedGoal.slice(0, 80)}；${step.description}` : step.description;
+
+    return {
+      workflowStepId: step.id,
+      title: step.title,
+      note: candidate?.note?.trim() || fallbackNote
+    };
+  });
+}
+
+// 只接受当前计划已有的步骤 ID，并通过标题或剩余一一对应关系恢复模型遗漏的 ID。
+export function reconcileRewrittenTaskPlanWorkflowIds(currentItems: TaskPlanItem[], rewrittenItems: GeneratedPlanItem[]): GeneratedPlanItem[] {
+  const validIds = new Set(currentItems.map((item) => item.workflowStepId).filter((value): value is string => Boolean(value)));
+  const usedIds = new Set<string>();
+  const reconciled = rewrittenItems.map((item) => {
+    const requestedId = item.workflowStepId && validIds.has(item.workflowStepId) && !usedIds.has(item.workflowStepId) ? item.workflowStepId : undefined;
+    const titleMatchedId = currentItems.find((current) => current.title === item.title && current.workflowStepId && !usedIds.has(current.workflowStepId))?.workflowStepId;
+    const workflowStepId = requestedId || titleMatchedId;
+
+    if (workflowStepId) usedIds.add(workflowStepId);
+    return { ...item, workflowStepId };
+  });
+  const unresolvedIndexes = reconciled.flatMap((item, index) => item.workflowStepId ? [] : [index]);
+  const remainingIds = currentItems.map((item) => item.workflowStepId).filter((value): value is string => typeof value === "string" && !usedIds.has(value));
+
+  // 数量一一对应时可安全恢复重命名步骤；删除或新增导致数量变化时不猜测语义。
+  if (unresolvedIndexes.length === remainingIds.length) {
+    unresolvedIndexes.forEach((itemIndex, index) => {
+      reconciled[itemIndex] = { ...reconciled[itemIndex], workflowStepId: remainingIds[index] };
+    });
+  }
+
+  return reconciled;
+}
+
 export function shouldInitializeTaskPlan(userGoal: string, classification?: AgentRequestClassification, options: { force?: boolean; selectedPath?: string | null; contextFileCount?: number } = {}) {
   const normalizedGoal = userGoal.trim();
   const intent = classification?.intent || "edit";
@@ -129,11 +180,12 @@ export function shouldInitializeTaskPlan(userGoal: string, classification?: Agen
     return false;
   }
 
-  return intent === "inspect" ? isComplexTaskGoal(normalizedGoal, intent, options) : false;
+  // inspect 任务也需要显式进入 analysis-only 流程，确保计划中不会混入编辑步骤。
+  return intent === "inspect";
 }
 
-export async function generateTaskPlan(userGoal: string, classification?: AgentRequestClassification): Promise<GeneratedPlanItem[]> {
-  const fallback = createFallbackTaskPlan(userGoal, classification?.intent || "edit");
+export async function generateTaskPlan(userGoal: string, classification?: AgentRequestClassification, workflow?: TaskWorkflowSnapshot): Promise<GeneratedPlanItem[]> {
+  const fallback = createFallbackTaskPlan(userGoal, classification?.intent || "edit", workflow?.type);
 
   if (!config.aiApiKey) {
     return fallback;
@@ -154,7 +206,14 @@ export async function generateTaskPlan(userGoal: string, classification?: AgentR
               userGoal,
               intent: classification?.intent || "edit",
               normalizedGoal: classification?.normalizedGoal || userGoal,
-              reason: classification?.reason || ""
+              reason: classification?.reason || "",
+              workflow: workflow
+                ? {
+                    type: workflow.type,
+                    reason: workflow.reason,
+                    requiredSteps: workflow.steps.map((step) => ({ title: step.title, description: step.description }))
+                  }
+                : undefined
             },
             null,
             2
@@ -167,8 +226,9 @@ export async function generateTaskPlan(userGoal: string, classification?: AgentR
     const items = normalizePlanItems(parsed?.items);
 
     if (items.length) {
-      logAi(runId, "done", { count: items.length });
-      return items;
+      const alignedItems = workflow ? alignTaskPlanToWorkflow(items, workflow, userGoal) : items;
+      logAi(runId, "done", { count: alignedItems.length, workflow: workflow?.type || null });
+      return alignedItems;
     }
   } catch (error) {
     logAi(runId, "fallback", { error: error instanceof Error ? error.message : String(error) });
@@ -178,11 +238,19 @@ export async function generateTaskPlan(userGoal: string, classification?: AgentR
 }
 
 export async function initializeTaskPlan(session: TaskSession, classification?: AgentRequestClassification, options: { force?: boolean; forceApproval?: boolean; selectedPath?: string | null; contextFileCount?: number } = {}) {
-  if (!shouldInitializeTaskPlan(classification?.normalizedGoal || session.userGoal, classification, options)) {
-    return null;
+  // 纯命令请求不属于四类代码任务工作流，保持原有命令执行链路。
+  if (classification?.intent === "command") {
+    return session;
   }
 
-  const items = await generateTaskPlan(classification?.normalizedGoal || session.userGoal, classification);
+  const workflow = createTaskWorkflow(classification?.normalizedGoal || session.userGoal, classification);
+  const workflowSession = (await setTaskSessionWorkflow(session.id, workflow)) || session;
+
+  if (!shouldInitializeTaskPlan(classification?.normalizedGoal || session.userGoal, classification, options)) {
+    return workflowSession;
+  }
+
+  const items = await generateTaskPlan(classification?.normalizedGoal || session.userGoal, classification, workflow);
 
   // 新任务创建后立即写入计划，第一步默认进入“进行中”。
   return setTaskPlanItems(session.id, items, { requireApproval: shouldRequirePlanApproval(classification, options) });
@@ -191,6 +259,7 @@ export async function initializeTaskPlan(session: TaskSession, classification?: 
 function rewritePlanFallback(items: TaskPlanItem[], instruction: string): GeneratedPlanItem[] {
   const normalized = instruction.trim();
   const nextItems = items.map((item) => ({
+    workflowStepId: item.workflowStepId,
     title: item.title,
     status: item.status,
     note: item.note
@@ -238,6 +307,7 @@ export async function rewriteTaskPlanWithInstruction(session: TaskSession, instr
               userGoal: session.userGoal,
               instruction,
               currentItems: currentItems.map((item) => ({
+                workflowStepId: item.workflowStepId,
                 title: item.title,
                 status: item.status,
                 note: item.note
@@ -254,8 +324,9 @@ export async function rewriteTaskPlanWithInstruction(session: TaskSession, instr
     const items = normalizePlanItems(parsed?.items);
 
     if (items.length) {
-      logAi(runId, "done", { count: items.length });
-      return setTaskPlanItems(session.id, items, { requireApproval: session.planApproval?.status === "pending", revision: { trigger: "user", reason: instruction.trim() } });
+      const reconciledItems = reconcileRewrittenTaskPlanWorkflowIds(currentItems, items);
+      logAi(runId, "done", { count: reconciledItems.length });
+      return setTaskPlanItems(session.id, reconciledItems, { requireApproval: session.planApproval?.status === "pending", revision: { trigger: "user", reason: instruction.trim() } });
     }
   } catch (error) {
     logAi(runId, "fallback", { error: error instanceof Error ? error.message : String(error) });

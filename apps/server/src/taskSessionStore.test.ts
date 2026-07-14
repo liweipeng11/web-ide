@@ -352,6 +352,7 @@ test("initializes fallback task plans for edit tasks", async () => {
     });
 
     assert.ok((planned?.planItems?.length || 0) >= 3);
+    assert.equal(planned?.workflow?.type, "feature");
     assert.equal(planned?.planItems?.[0]?.status, "in_progress");
     assert.equal(planned?.planItems?.[1]?.status, "pending");
     assert.equal(planned?.planApproval?.status, "pending");
@@ -397,8 +398,9 @@ test("skips task plans for simple chat and command tasks", async () => {
   };
 
   assert.equal(shouldInitializeTaskPlan(session.userGoal, chatClassification), false);
-  assert.equal(await initializeTaskPlan(session, chatClassification), null);
-  assert.deepEqual((await getTaskSession(session.id)).planItems, []);
+  const chatSession = await initializeTaskPlan(session, chatClassification);
+  assert.equal(chatSession?.workflow?.type, "analysis-only");
+  assert.deepEqual(chatSession?.planItems, []);
 
   assert.equal(
     shouldInitializeTaskPlan("运行测试", {
@@ -409,6 +411,16 @@ test("skips task plans for simple chat and command tasks", async () => {
     }),
     false
   );
+
+  const { session: commandSession } = await createIsolatedTaskSession("运行测试");
+  const initializedCommandSession = await initializeTaskPlan(commandSession, {
+    intent: "command",
+    confidence: 0.9,
+    normalizedGoal: "运行测试",
+    reason: "test"
+  });
+  assert.equal(initializedCommandSession?.workflow, undefined);
+  assert.deepEqual(initializedCommandSession?.planItems, []);
 });
 
 test("requires task plans for edit tasks before code changes", async () => {
@@ -471,13 +483,94 @@ test("initializes task plans for explicit planning requests", async () => {
   }
 });
 
-test("creates shorter fallback plans for inspect tasks", () => {
+test("creates analysis-only fallback plans for inspect tasks", () => {
   const items = createFallbackTaskPlan("分析为什么构建失败", "inspect");
 
   assert.deepEqual(
     items.map((item) => item.title),
-    ["理解问题和上下文", "检索相关代码和资料", "整理结论和建议"]
+    ["明确分析问题", "收集相关证据", "分析原因与影响", "输出结论与建议"]
   );
+});
+
+test("persists bugfix workflow selection with its required phases", async () => {
+  const { session } = await createIsolatedTaskSession("修复构建失败");
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+
+  try {
+    const planned = await initializeTaskPlan(session, {
+      intent: "diagnose_then_edit",
+      confidence: 0.95,
+      normalizedGoal: "修复构建失败",
+      reason: "test"
+    });
+
+    assert.equal(planned?.workflow?.type, "bugfix");
+    assert.deepEqual(
+      planned?.planItems?.map((item) => item.title),
+      ["收集问题现象", "尝试复现问题", "定位问题根因", "实施最小修复", "补充回归测试", "执行回归验证"]
+    );
+    assert.equal((await getTaskSession(session.id)).workflow?.steps[0]?.id, "collect-symptoms");
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+  }
+});
+
+test("advances feature workflow by stable step ids and completes summary", async () => {
+  const { session } = await createIsolatedTaskSession("新增导出功能");
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+
+  try {
+    const planned = await initializeTaskPlan(session, {
+      intent: "edit",
+      confidence: 0.9,
+      normalizedGoal: "新增导出功能",
+      reason: "test"
+    });
+    assert.deepEqual(planned?.planItems?.map((item) => item.workflowStepId), ["analyze-project", "find-patterns", "plan-files", "implement", "validate", "summarize"]);
+
+    const generated = await advanceTaskPlanProgress(session.id, "patch_generated");
+    assert.deepEqual(generated?.planItems?.map((item) => item.status), ["completed", "completed", "completed", "in_progress", "pending", "pending"]);
+
+    const applied = await advanceTaskPlanProgress(session.id, "patch_applied");
+    assert.deepEqual(applied?.planItems?.map((item) => item.status), ["completed", "completed", "completed", "completed", "in_progress", "pending"]);
+
+    const validated = await advanceTaskPlanProgress(session.id, "validation_success");
+    assert.deepEqual(validated?.planItems?.map((item) => item.status), ["completed", "completed", "completed", "completed", "completed", "completed"]);
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+  }
+});
+
+test("advances bugfix and refactor workflows through their complete lifecycles", async () => {
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+
+  try {
+    for (const scenario of [
+      { goal: "修复登录失败", intent: "diagnose_then_edit" as const, workflow: "bugfix" },
+      { goal: "重构任务存储", intent: "edit" as const, workflow: "refactor" }
+    ]) {
+      const { session } = await createIsolatedTaskSession(scenario.goal);
+      const planned = await initializeTaskPlan(session, {
+        intent: scenario.intent,
+        confidence: 0.9,
+        normalizedGoal: scenario.goal,
+        reason: "test"
+      });
+
+      assert.equal(planned?.workflow?.type, scenario.workflow);
+      const generated = await advanceTaskPlanProgress(session.id, "patch_generated");
+      assert.equal(generated?.planItems?.[3]?.status, "in_progress");
+      const applied = await advanceTaskPlanProgress(session.id, "patch_applied");
+      assert.equal(applied?.planItems?.[4]?.status, "in_progress");
+      const validated = await advanceTaskPlanProgress(session.id, "validation_success");
+      assert.equal(validated?.planItems?.every((item) => item.status === "completed"), true);
+    }
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+  }
 });
 
 test("advances edit task plan by semantic agent phases", async () => {

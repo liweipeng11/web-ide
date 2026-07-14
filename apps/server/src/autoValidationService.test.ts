@@ -34,7 +34,7 @@ function patchResponse(taskSessionId = "task-1"): GenerateEditResponse {
   };
 }
 
-function createHarness(options: { policy?: CommandPolicyResult; result?: CommandResult } = {}) {
+function createHarness(options: { policy?: CommandPolicyResult; result?: CommandResult; noCommands?: boolean } = {}) {
   const statuses: TaskSession["status"][] = [];
   const progressPhases: string[] = [];
   const storedSteps: AgentStep[] = [];
@@ -49,6 +49,9 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
     getWorkspaceRoot: () => "C:/workspace",
     runVerification: async (verificationOptions): Promise<VerificationReport> => {
       verificationCalls.push(verificationOptions);
+      if (options.noCommands) {
+        return { status: "no_commands", plannedCommands: [], plan: { ...plan, commands: [] }, executions: [] };
+      }
       if (policy.level === "confirm") {
         return { status: "needs_confirmation", plannedCommands: [plannedCommand], plan, executions: [{ command: plannedCommand, policy, issues: [] }], failedExecution: { command: plannedCommand, policy, issues: [] } };
       }
@@ -114,6 +117,15 @@ test("未指定命令时请求 Verifier 自动发现完整流水线", async () =
   assert.equal(result.status, "success");
   assert.equal(harness.verificationCalls[0].preferredCommand, null);
   assert.equal(harness.verificationCalls[0].workspaceRoot, "C:/workspace");
+});
+
+test("没有可用验证命令时等待用户处理而不是标记成功", async () => {
+  const harness = createHarness({ noCommands: true });
+  const result = await harness.run({ taskSessionId: "task-1" });
+
+  assert.equal(result.status, "no_commands");
+  assert.deepEqual(harness.progressPhases, ["validation_failed"]);
+  assert.deepEqual(harness.statuses, ["awaiting_user"]);
 });
 
 test("将 changed-files 和上轮失败类别传给增量验证器", async () => {

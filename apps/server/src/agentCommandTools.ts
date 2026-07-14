@@ -132,6 +132,10 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
         runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status: "running", result: null }));
         const result = await dependencies.runProjectCommand(command, cwd, chatId, true);
         const status = result.status === "success" || result.status === "running" ? "success" : "failed";
+        runtime.agentContext.commandsRun = [
+          ...(runtime.agentContext.commandsRun || []),
+          { command, status, exitCode: result.exitCode }
+        ];
         runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status, result }));
 
         return {

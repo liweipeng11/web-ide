@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { createServer } from "node:http";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
-import { buildContextualEditRequest, classifyAgentRequest, generateFileChatReply, shouldGeneratePatchForIntent, streamFileChatReply, type AgentStep } from "./aiClient.js";
+import { buildContextualEditRequest, classifyAgentRequest, ensureEditableAgentRequestClassification, generateFileChatReply, shouldGeneratePatchForIntent, streamFileChatReply, type AgentStep } from "./aiClient.js";
 import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime.js";
 import { normalizeAgentMode } from "./agentModes.js";
 import { appendFileChatMessage, appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, ensureFileChatMessages, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
@@ -25,6 +25,7 @@ import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
 import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
+import { resolvePlanModeTaskStatus } from "./taskWorkflow/index.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
@@ -34,6 +35,10 @@ const server = createServer(app);
 const workspaceChatKey = "__workspace_chat__";
 const maxChatContextFiles = 8;
 const maxChatContextCharsPerFile = 20_000;
+
+async function classifyDirectEditRequest(userRequest: string) {
+  return ensureEditableAgentRequestClassification(await classifyAgentRequest([], userRequest));
+}
 
 app.use(express.json({ limit: "5mb" }));
 app.use("/api", createSearchRouter());
@@ -348,12 +353,8 @@ app.post(
     }
 
     const taskSession = await createTaskSession(userRequest.trim());
-    const plannedTaskSession = await initializeTaskPlan(taskSession, {
-      intent: "edit",
-      confidence: 1,
-      normalizedGoal: userRequest.trim(),
-      reason: "Direct edit endpoint"
-    }, { forceApproval: true });
+    const classification = await classifyDirectEditRequest(userRequest.trim());
+    const plannedTaskSession = await initializeTaskPlan(taskSession, classification, { forceApproval: true });
 
     if (plannedTaskSession?.planApproval?.status === "pending") {
       response.status(202).json({
@@ -418,12 +419,8 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
 
     const taskSession = await createTaskSession(userRequest.trim());
     taskSessionId = taskSession.id;
-    const plannedTaskSession = await initializeTaskPlan(taskSession, {
-      intent: "edit",
-      confidence: 1,
-      normalizedGoal: userRequest.trim(),
-      reason: "Direct edit stream endpoint"
-    }, { forceApproval: true });
+    const classification = await classifyDirectEditRequest(userRequest.trim());
+    const plannedTaskSession = await initializeTaskPlan(taskSession, classification, { forceApproval: true });
 
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -657,6 +654,7 @@ app.post(
       taskSessionId,
       userRequest: sessionBeforeDecision.userGoal,
       mode: sessionBeforeDecision.agentMode || "act",
+      workflow: sessionBeforeDecision.workflow,
       persistedMessages: sessionBeforeDecision.agentMessages || [],
       pendingToolCall,
       decision,
@@ -763,7 +761,14 @@ app.post(
       await addTaskSessionFilesRead(taskSession.id, contextFiles.map((file) => file.path));
       const history = await getFileChatMessages(chatKey);
       const classification = await classifyAgentRequest(history, userRequest.trim());
-      await initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length });
+      const plannedTaskSession = await initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length });
+
+      if (plannedTaskSession?.planApproval?.status === "pending") {
+        const answer = "已根据你的需求生成执行计划，请批准后再开始修改代码。";
+        const messages = await appendFileChatTurn(chatKey, userRequest.trim(), answer);
+        response.status(202).json({ messages, taskSessionId: taskSession.id, planPending: true });
+        return;
+      }
       const taskStepWrites: Promise<unknown>[] = [];
       const answer = await generateFileChatReply(contextFiles, history, userRequest.trim(), chatKey, (step) => {
         taskStepWrites.push(appendTaskSessionStep(taskSession.id, step));
@@ -849,7 +854,13 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     };
 
     const classification = await classifyAgentRequest(turn.history, userRequest.trim());
-    const plannedTaskSession = approvedTaskSessionId || requestedAgentMode === "plan" ? taskSession : await initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length, selectedPath });
+    const plannedTaskSession = approvedTaskSessionId
+      ? taskSession
+      : await initializeTaskPlan(taskSession, classification, {
+          contextFileCount: contextPaths.length,
+          selectedPath,
+          forceApproval: requestedAgentMode === "plan" ? false : undefined
+        });
     sendEvent("task_session", { session: plannedTaskSession || taskSession });
     pushAgentStep(
       createAgentStep({
@@ -884,6 +895,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         taskSessionId: taskSession.id,
         userRequest: userRequest.trim(),
         mode: "plan",
+        workflow: plannedTaskSession?.workflow || taskSession.workflow,
         onAgentStep: pushAgentStep
       });
       const answer = buildDeferredRuntimeAnswer(runtimeResult, null) || "";
@@ -891,7 +903,13 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
       }
       const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
-      const completedTaskSession = await updateTaskSessionStatus(taskSession.id, runtimeResult.status === "completed" ? "success" : runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : "failed");
+      const workflowType = plannedTaskSession?.workflow?.type || taskSession.workflow?.type;
+      const nextStatus = resolvePlanModeTaskStatus(workflowType, runtimeResult.status);
+
+      if (nextStatus === "success" && workflowType === "analysis-only") {
+        await advanceTaskPlanProgress(taskSession.id, "validation_success");
+      }
+      const completedTaskSession = await updateTaskSessionStatus(taskSession.id, nextStatus);
 
       completed = true;
       await Promise.all(taskStepWrites);
@@ -920,6 +938,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         taskSessionId: taskSession.id,
         userRequest: editRequest,
         mode: "act",
+        workflow: plannedTaskSession?.workflow || taskSession.workflow,
         onAgentStep: pushAgentStep
       });
       const runtimePatch = createPatchStreamResponse(runtimeResult.generatedPatchIds.at(-1), taskSession.id, runtimeResult.content || "已生成待审核补丁。", agentSteps);

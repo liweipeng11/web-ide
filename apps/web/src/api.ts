@@ -280,6 +280,7 @@ export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "bloc
 
 export type TaskPlanItem = {
   id: string;
+  workflowStepId?: string;
   title: string;
   status: TaskPlanItemStatus;
   note?: string;
@@ -318,6 +319,18 @@ export type TaskPlanApproval = {
 
 export type AgentMode = "plan" | "act";
 
+export type TaskWorkflowType = "bugfix" | "feature" | "refactor" | "analysis-only";
+
+export type TaskWorkflowSnapshot = {
+  type: TaskWorkflowType;
+  source: "intent" | "keyword" | "fallback";
+  confidence: number;
+  reason: string;
+  steps: Array<{ id: string; title: string; description: string }>;
+  version: number;
+  selectedAt: number;
+};
+
 // 任务状态会被连续 Agent 的审批、暂停和重规划流程复用。
 export type TaskSessionStatus = "running" | "awaiting_approval" | "awaiting_user" | "paused" | "success" | "failed" | "cancelled" | "awaiting_replan";
 
@@ -325,6 +338,7 @@ export type TaskSession = {
   id: string;
   userGoal: string;
   agentMode?: AgentMode;
+  workflow?: TaskWorkflowSnapshot;
   chatId?: string;
   messageIds?: string[];
   status: TaskSessionStatus;
@@ -374,6 +388,7 @@ export type FileChatHistoryItem = {
 export type FileChatResponse = {
   messages: FileChatMessage[];
   taskSessionId?: string;
+  planPending?: boolean;
 };
 
 export type FileChatHistoriesResponse = {
