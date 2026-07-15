@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
-import { requestChatCompletion, requestChatCompletionStream } from "./aiHttp.js";
+import { logAi, requestChatCompletion, requestChatCompletionStream } from "./aiHttp.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 
@@ -18,6 +18,20 @@ async function setupAiLogTestWorkspace() {
 
   return { workspaceRoot, logDirectory };
 }
+
+test("默认结构化日志裁剪内容预览和命令中的密钥", () => {
+  const originalLog = console.log;
+  let line = "";
+  console.log = (...values: unknown[]) => { line = values.map(String).join(" "); };
+  try {
+    logAi("test", "sanitize", { oldContentPreview: "const secret = 'value'", command: "API_KEY=top-secret pnpm test", nested: { snippet: "private code" } });
+  } finally {
+    console.log = originalLog;
+  }
+  assert.equal(line.includes("top-secret"), false);
+  assert.equal(line.includes("private code"), false);
+  assert.equal(line.includes("const secret"), false);
+});
 
 async function readOnlyLogFile(logDirectory: string) {
   const fileNames = (await fs.readdir(logDirectory)).filter((fileName) => fileName.endsWith(".json"));

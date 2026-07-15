@@ -796,7 +796,7 @@ test("act mode blocks edits until Pattern Finder has been called", async () => {
     }
   });
 
-  const blockedToolMessage = result.messages.find((message) => message.role === "tool" && message.tool_call_id === "patch-before-pattern");
+  const blockedToolMessage = result.messages.find((message) => message.role === "tool" && message.toolCallId === "patch-before-pattern");
   assert.match(blockedToolMessage?.content || "", /findSimilarPatterns/);
 });
 

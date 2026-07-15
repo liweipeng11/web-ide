@@ -8,6 +8,7 @@ import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLife
 import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
+import { scheduleTaskMetricsFinalization } from "./observability/index.js";
 
 function taskSessionDirectory() {
   return projectRuntimeDirectory("task-sessions");
@@ -1334,7 +1335,7 @@ export async function updateTaskSessionAgentMode(taskSessionId: string | null | 
 export async function updateTaskSessionStatus(taskSessionId: string | null | undefined, status: TaskSession["status"]) {
   if (!taskSessionId) return null;
 
-  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+  const updated = await enqueueTaskSessionUpdate(taskSessionId, (session) => {
     if (!["running", "awaiting_approval", "awaiting_user", "paused"].includes(session.status) && status === "cancelled") {
       return session;
     }
@@ -1345,4 +1346,9 @@ export async function updateTaskSessionStatus(taskSessionId: string | null | und
       updatedAt: Date.now()
     };
   });
+
+  if (updated.status === "success" || updated.status === "failed" || updated.status === "cancelled") {
+    scheduleTaskMetricsFinalization(taskSessionId, updated.status === "success" ? "completed" : updated.status);
+  }
+  return updated;
 }

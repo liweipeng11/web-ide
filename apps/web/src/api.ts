@@ -564,6 +564,12 @@ export type PickWorkspaceResponse = WorkspaceResponse & {
   cancelled: boolean;
 };
 
+export type ServerCapabilities = {
+  version: 1;
+  features: Record<"contextBudgetV2" | "modelProviderGateway" | "lsp" | "inlineEdit", { enabled: boolean; available: boolean; active: boolean; path: "legacy" | "next" }>;
+  models: { selection: boolean; configured: boolean; defaultModel: string };
+};
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     headers: {
@@ -588,6 +594,11 @@ export function fetchFiles(dir = "", includeIgnored = false) {
 
 export function fetchWorkspace() {
   return request<WorkspaceResponse>("/api/workspace");
+}
+
+// 前端只消费服务端裁决后的实际能力，不直接读取构建环境变量。
+export function fetchServerCapabilities() {
+  return request<ServerCapabilities>("/api/capabilities");
 }
 
 export function openWorkspace(workspaceRoot: string) {

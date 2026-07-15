@@ -5,6 +5,7 @@ import { deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingP
 import { createAgentStep } from "./routeAgentSteps.js";
 import { addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionPatchEvent } from "./taskSessionStore.js";
 import type { AgentStep, CheckpointSource } from "./types.js";
+import { recordTaskPatchMetrics } from "./observability/index.js";
 
 export type ApplyPendingPatchOptions = {
   patchId: string;
@@ -127,6 +128,7 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
     })
   );
   await advanceTaskPlanProgress(patch.taskSessionId, "patch_applied");
+  await recordTaskPatchMetrics(patch.taskSessionId, targetFiles.length);
 
   if (options.filePath) {
     const remainingPatch = removePendingPatchFile(patch.patchId, options.filePath);

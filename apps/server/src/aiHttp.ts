@@ -41,6 +41,8 @@ type AiExchangeLog = {
 
 const AI_LOG_PREVIEW_CHARS = 500;
 const AI_FETCH_ATTEMPTS_PER_URL = 2;
+const sensitiveLogFieldPattern = /(authorization|header|api[_-]?key|token|secret|password|userGoal|content|replacement|selectedText|prefix|suffix|snippet|output|requestBody|responseBody)/i;
+const sensitiveLogValuePattern = /(Bearer\s+)[^\s,;]+|((?:API[_-]?KEY|TOKEN|SECRET|PASSWORD)\s*=\s*)[^\s,;]+/gi;
 
 function getChatCompletionUrls() {
   const normalizedBaseUrl = config.aiBaseUrl.replace(/\/$/, "");
@@ -68,8 +70,18 @@ function previewForLog(value: unknown, maxLength = AI_LOG_PREVIEW_CHARS) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...<truncated ${text.length - maxLength} chars>` : text;
 }
 
+function sanitizeForLog(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeForLog);
+  if (typeof value === "string") return value.replace(sensitiveLogValuePattern, (_match, bearerPrefix, assignmentPrefix) => `${bearerPrefix || assignmentPrefix}<redacted>`);
+  if (!value || typeof value !== "object") return value;
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, sensitiveLogFieldPattern.test(key) ? "<redacted>" : sanitizeForLog(entry)])
+  );
+}
+
 export function logAi(runId: string, event: string, detail?: unknown) {
-  const suffix = detail === undefined ? "" : ` ${previewForLog(detail)}`;
+  const suffix = detail === undefined ? "" : ` ${previewForLog(sanitizeForLog(detail))}`;
   console.log(`[ai:${runId}] ${event}${suffix}`);
 }
 
@@ -137,6 +149,7 @@ function serializeForFullLog(value: unknown) {
   }
 
   try {
+    // 完整 IO 仅在显式开启 AI_FULL_IO_LOGGING 时写入；请求 Header 始终不进入该结构。
     return JSON.parse(JSON.stringify(value)) as unknown;
   } catch {
     return previewForLog(value, 4000);

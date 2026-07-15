@@ -3,6 +3,7 @@ import test from "node:test";
 import { createAutoValidationRunner, type AutoValidationDependencies } from "./autoValidationService.js";
 import type { AgentStep, CommandPolicyResult, CommandResult, GenerateEditResponse, TaskSession } from "./types.js";
 import type { RunVerificationOptions, VerificationReport } from "./verifier/types.js";
+import { RunMetricsTracker, type RunMetrics } from "./observability/index.js";
 
 function commandResult(status: CommandResult["status"], command = "pnpm test"): CommandResult {
   return {
@@ -40,6 +41,7 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
   const storedSteps: AgentStep[] = [];
   const patchCalls: Array<{ selectedPath: string | null | undefined; prompt: string; taskSessionId?: string }> = [];
   const verificationCalls: RunVerificationOptions[] = [];
+  const recordedMetrics: RunMetrics[] = [];
   let commandCalls = 0;
   const policy = options.policy || { level: "safe", reason: "test allowlist" };
   const command = options.result?.command || "pnpm test";
@@ -81,7 +83,8 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
     updateTaskSessionStatus: async (_taskSessionId, status) => {
       statuses.push(status);
       return null;
-    }
+    },
+    createMetricsTracker: (taskSessionId) => new RunMetricsTracker({ runId: "validation-test", taskSessionId, provider: "local", model: "none", mode: "validation", scope: "validation_run" }, async (metrics) => { recordedMetrics.push(metrics); }, false)
   } as AutoValidationDependencies;
 
   return {
@@ -91,6 +94,7 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
     progressPhases,
     patchCalls,
     verificationCalls,
+    recordedMetrics,
     commandCalls: () => commandCalls
   };
 }
@@ -104,6 +108,9 @@ test("stops successfully when validation passes", async () => {
   assert.deepEqual(harness.progressPhases, ["validation_success"]);
   assert.deepEqual(harness.statuses, ["success"]);
   assert.equal(harness.patchCalls.length, 0);
+  assert.equal(harness.recordedMetrics[0].scope, "validation_run");
+  assert.equal(harness.recordedMetrics[0].result.validationCommandCount, 1);
+  assert.equal(harness.recordedMetrics[0].result.validationStatus, "passed");
   assert.deepEqual(
     result.agentSteps.filter((step) => step.type === "command").map((step) => step.status),
     ["running", "success"]

@@ -30,6 +30,7 @@ import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
 import { createProjectMemoryRouter } from "./projectMemory/index.js";
+import { createCapabilityRouter } from "./capabilityRoutes.js";
 
 const app = express();
 const server = createServer(app);
@@ -42,6 +43,7 @@ async function classifyDirectEditRequest(userRequest: string) {
 }
 
 app.use(express.json({ limit: "5mb" }));
+app.use("/api", createCapabilityRouter({ flags: config.featureFlags }));
 app.use("/api", createSearchRouter());
 app.use("/api/git-workflow", createGitWorkflowRouter());
 app.use("/api/vue2-template", createVue2TemplateRouter());

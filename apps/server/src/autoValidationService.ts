@@ -5,6 +5,9 @@ import type { AgentStep, AutoValidationResponse, CommandResult } from "./types.j
 import { runVerification } from "./verifier/index.js";
 import type { VerificationIssueCategory, VerificationReport } from "./verifier/types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
+import { RunMetricsTracker } from "./observability/index.js";
+import { createAiRunId } from "./aiHttp.js";
+import { config } from "./config.js";
 
 const defaultMaxAttempts = 3;
 const maxFailurePromptChars = 6_000;
@@ -100,6 +103,7 @@ export type AutoValidationDependencies = {
   appendTaskSessionPatchEvent?: typeof appendTaskSessionPatchEvent;
   advanceTaskPlanProgress: typeof advanceTaskPlanProgress;
   updateTaskSessionStatus: typeof updateTaskSessionStatus;
+  createMetricsTracker?: (taskSessionId: string | null) => RunMetricsTracker;
 };
 
 const defaultDependencies: AutoValidationDependencies = {
@@ -109,7 +113,15 @@ const defaultDependencies: AutoValidationDependencies = {
   appendTaskSessionStep,
   appendTaskSessionPatchEvent,
   advanceTaskPlanProgress,
-  updateTaskSessionStatus
+  updateTaskSessionStatus,
+  createMetricsTracker: (taskSessionId) => new RunMetricsTracker({
+    runId: createAiRunId("validation"),
+    taskSessionId,
+    provider: "local",
+    model: config.aiModel,
+    mode: "validation",
+    scope: "validation_run"
+  })
 };
 
 export function createAutoValidationRunner(dependencies: AutoValidationDependencies = defaultDependencies) {
@@ -118,6 +130,7 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
     const attempts = clampAttemptCount(options.attempts);
     const maxAttempts = clampMaxAttempts(options.maxAttempts);
     const taskSessionId = options.taskSessionId || undefined;
+    const metrics = dependencies.createMetricsTracker?.(taskSessionId ?? null);
     const agentSteps: AgentStep[] = [];
     const taskStepWrites: Promise<unknown>[] = [];
     const pushAgentStep = (step: AgentStep) => {
@@ -126,6 +139,15 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
     };
     const finish = async (response: AutoValidationResponse) => {
       await Promise.all(taskStepWrites);
+      const commandCount = response.verification?.executions.length ?? 0;
+      const validationStatus = response.status === "success" ? "passed" : ["blocked", "max_attempts_reached", "fix_generated"].includes(response.status) ? "failed" : "not_run";
+      await metrics?.finish({
+        status: ["blocked", "max_attempts_reached"].includes(response.status) ? "failed" : "completed",
+        failureCategory: validationStatus === "failed" ? "validation_failure" : "none",
+        patchFileCount: response.patch?.files.length ?? 0,
+        validationCommandCount: commandCount,
+        validationStatus
+      });
       return response;
     };
     const workspaceRoot = dependencies.getWorkspaceRoot();

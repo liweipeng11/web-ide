@@ -2,7 +2,7 @@ import { appendAgentMessage, listAgentMessages, setPendingAgentToolCall } from "
 import { getAgentModeConfig, normalizeAgentMode, type AgentMode } from "./agentModes.js";
 import { evaluateAgentToolApproval } from "./agentPermissions.js";
 import type { AgentToolRegistry } from "./agentToolRegistry.js";
-import type { AgentCompletionResponse, AgentContext, AgentMessage, AgentToolCall, AgentToolMessage } from "./agentToolTypes.js";
+import type { AgentCompletionResponse, AgentContext, AgentToolCall } from "./agentToolTypes.js";
 import { createAgentToolRuntime, executeAgentToolCall } from "./agentTools.js";
 import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
@@ -10,12 +10,15 @@ import { createAgentStep } from "./routeAgentSteps.js";
 import type { AgentMessage as PersistedAgentMessage, AgentStep, PendingAgentToolCall } from "./types.js";
 import { buildTaskWorkflowRuntimePrompt, type TaskWorkflowSnapshot } from "./taskWorkflow/index.js";
 import { getCurrentProjectMemoryPrompt } from "./projectMemory/index.js";
+import { adaptOpenAiCompletionResponse, toOpenAiChatCompletionBody, type ModelMessage, type ModelRequest, type ModelResponse, type ModelToolCall } from "./contracts/index.js";
+import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "./observability/index.js";
+import { getPendingPatch } from "./patchStore.js";
 
 export type AgentRuntimeResult = {
   status: "completed" | "awaiting_approval" | "step_limit_reached";
   runId: string;
   content: string;
-  messages: AgentMessage[];
+  messages: ModelMessage[];
   agentContext: AgentContext;
   generatedPatchIds: string[];
   pendingToolCall?: PendingAgentToolCall | null;
@@ -23,7 +26,7 @@ export type AgentRuntimeResult = {
 
 export type AgentRuntimeOptions = {
   userRequest: string;
-  messages?: AgentMessage[];
+  messages?: ModelMessage[];
   agentContext?: AgentContext;
   registry?: AgentToolRegistry;
   maxSteps?: number;
@@ -34,7 +37,11 @@ export type AgentRuntimeOptions = {
   workflow?: TaskWorkflowSnapshot;
   projectMemoryPrompt?: string | null;
   onAgentStep?: (step: AgentStep) => void;
-  requestCompletion?: (body: Record<string, unknown>) => Promise<AgentCompletionResponse>;
+  requestCompletion?: (body: Record<string, unknown>) => Promise<AgentCompletionResponse | ModelResponse>;
+  completeModel?: (request: ModelRequest) => Promise<ModelResponse>;
+  metricsRecorder?: RunMetricsRecorder;
+  providerId?: string;
+  modelId?: string;
 };
 
 // 16 步在“搜索 -> 读取上下文 -> 发起补丁/命令审批”的链路里偏紧，
@@ -137,13 +144,28 @@ function createInitialMessages(userRequest: string, mode: AgentMode, workflow?: 
   ];
 }
 
-function parseToolArguments(toolCall: AgentToolCall) {
-  try {
-    const value = JSON.parse(toolCall.function.arguments);
-    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
+function toAgentToolCall(toolCall: ModelToolCall): AgentToolCall {
+  return {
+    id: toolCall.id,
+    type: "function",
+    function: {
+      name: toolCall.name,
+      arguments: toolCall.rawArguments ?? JSON.stringify(toolCall.arguments)
+    }
+  };
+}
+
+function toModelToolMessage(message: Awaited<ReturnType<typeof executeAgentToolCall>>): ModelMessage {
+  return { role: "tool", toolCallId: message.tool_call_id, content: message.content };
+}
+
+function countGeneratedPatchFiles(patchIds: string[]) {
+  return patchIds.reduce((count, patchId) => count + (getPendingPatch(patchId)?.files.length ?? 0), 0);
+}
+
+function estimateModelInputTokens(request: Pick<ModelRequest, "messages" | "tools">) {
+  // 阶段 0 使用明确标记的保守估算建立基线，后续可由 Provider tokenizer 替换。
+  return Math.ceil(JSON.stringify({ messages: request.messages, tools: request.tools }).length / 4);
 }
 
 function stableStringify(value: unknown): string {
@@ -156,11 +178,11 @@ function stableStringify(value: unknown): string {
     .join(",")}}`;
 }
 
-function getToolCallSignature(toolCall: AgentToolCall) {
-  return `${toolCall.function.name}:${stableStringify(parseToolArguments(toolCall))}`;
+function getToolCallSignature(toolCall: ModelToolCall) {
+  return `${toolCall.name}:${stableStringify(toolCall.arguments)}`;
 }
 
-function createToolBudgetWarningMessage(remainingSteps: number, hasGeneratedPatch: boolean): AgentMessage {
+function createToolBudgetWarningMessage(remainingSteps: number, hasGeneratedPatch: boolean): ModelMessage {
   const instruction = hasGeneratedPatch
     ? "A pending patch already exists. Stop calling tools unless approval is required, and provide the final concise Chinese summary now."
     : "If you have enough context, use proposePatch to create a reviewable pending patch before files are written. Use replaceInFile/writeFile only when the user explicitly requested direct editing or the patch path cannot safely complete the change. Avoid repeating search/read calls unless they are strictly necessary.";
@@ -171,41 +193,41 @@ function createToolBudgetWarningMessage(remainingSteps: number, hasGeneratedPatc
   };
 }
 
-function createRepeatedToolWarningMessage(toolNames: string[]): AgentMessage {
+function createRepeatedToolWarningMessage(toolNames: string[]): ModelMessage {
   return {
     role: "user",
     content: `You repeated these tool calls: ${toolNames.join(", ")}. Reuse the existing tool results instead of calling the same tool with the same arguments again. If enough context is available, move to proposePatch for a reviewable pending patch, use replaceInFile/writeFile only as the direct-edit fallback, or provide the final answer.`
   };
 }
 
-async function persistAgentMessage(taskSessionId: string | null | undefined, message: AgentMessage) {
+async function persistAgentMessage(taskSessionId: string | null | undefined, message: ModelMessage) {
   if (!taskSessionId) return;
 
-  // Runtime 内部使用 OpenAI tool_calls 结构，持久化时转换成任务会话的稳定结构，便于后续恢复执行。
+  // Runtime 和持久化层共享 Provider 无关结构，OpenAI 字段只存在于兼容适配器。
   await appendAgentMessage(taskSessionId, {
     role: message.role,
     content: message.content ?? null,
-    toolCallId: message.tool_call_id,
-    toolCalls: message.tool_calls?.map((toolCall) => ({
+    toolCallId: message.toolCallId,
+    toolCalls: message.toolCalls?.map((toolCall) => ({
       id: toolCall.id,
-      name: toolCall.function.name,
-      arguments: parseToolArguments(toolCall)
+      name: toolCall.name,
+      arguments: toolCall.arguments
     }))
   });
 }
 
-function createBlockedToolMessage(toolCall: AgentToolCall, reason: string): AgentMessage {
+function createBlockedToolMessage(toolCall: ModelToolCall, reason: string): ModelMessage {
   return {
     role: "tool",
-    tool_call_id: toolCall.id,
-    content: JSON.stringify({ error: reason, approval: "blocked", toolName: toolCall.function.name })
+    toolCallId: toolCall.id,
+    content: JSON.stringify({ error: reason, approval: "blocked", toolName: toolCall.name })
   };
 }
 
-function createRejectedToolMessage(pendingToolCall: PendingAgentToolCall): AgentToolMessage {
+function createRejectedToolMessage(pendingToolCall: PendingAgentToolCall): ModelMessage {
   return {
     role: "tool",
-    tool_call_id: pendingToolCall.toolCallId,
+    toolCallId: pendingToolCall.toolCallId,
     content: JSON.stringify({
       error: "User rejected this tool call.",
       approval: "rejected",
@@ -214,29 +236,23 @@ function createRejectedToolMessage(pendingToolCall: PendingAgentToolCall): Agent
   };
 }
 
-function createToolCallFromPending(pendingToolCall: PendingAgentToolCall): AgentToolCall {
+function createToolCallFromPending(pendingToolCall: PendingAgentToolCall): ModelToolCall {
   return {
     id: pendingToolCall.toolCallId,
-    type: "function",
-    function: {
-      name: pendingToolCall.toolName,
-      arguments: JSON.stringify(pendingToolCall.arguments ?? {})
-    }
+    name: pendingToolCall.toolName,
+    arguments: (pendingToolCall.arguments ?? {}) as Record<string, unknown>
   };
 }
 
-function restoreRuntimeMessage(message: PersistedAgentMessage): AgentMessage {
+function restoreRuntimeMessage(message: PersistedAgentMessage): ModelMessage {
   return {
     role: message.role,
     content: message.content,
-    tool_call_id: message.toolCallId,
-    tool_calls: message.toolCalls?.map((toolCall) => ({
+    toolCallId: message.toolCallId,
+    toolCalls: message.toolCalls?.map((toolCall) => ({
       id: toolCall.id,
-      type: "function",
-      function: {
-        name: toolCall.name,
-        arguments: JSON.stringify(toolCall.arguments ?? {})
-      }
+      name: toolCall.name,
+      arguments: (toolCall.arguments ?? {}) as Record<string, unknown>
     }))
   };
 }
@@ -279,7 +295,7 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
   const toolMessage =
     options.decision === "rejected"
       ? createRejectedToolMessage(options.pendingToolCall)
-      : await executeAgentToolCall(createToolCallFromPending(options.pendingToolCall), toolRuntime);
+      : toModelToolMessage(await executeAgentToolCall(toAgentToolCall(createToolCallFromPending(options.pendingToolCall)), toolRuntime));
 
   messages.push(toolMessage);
   await persistAgentMessage(options.taskSessionId, toolMessage);
@@ -304,20 +320,39 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const mode = normalizeAgentMode(options.mode);
   const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_AGENT_STEPS;
-  const requestCompletion = options.requestCompletion || ((body) => requestChatCompletion(body) as Promise<AgentCompletionResponse>);
+  const providerId = options.providerId || "openai-compatible";
+  const modelId = options.modelId || config.aiModel;
+  const completeModel = options.completeModel || (async (request: ModelRequest) => {
+    const providerBody = toOpenAiChatCompletionBody(request);
+    const response = options.requestCompletion
+      ? await options.requestCompletion(providerBody)
+      : await requestChatCompletion(providerBody) as AgentCompletionResponse;
+    return "message" in response ? response : adaptOpenAiCompletionResponse(response);
+  });
   const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);
   const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt());
-  const messages: AgentMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
+  const messages: ModelMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
   const generatedPatchIds = options.generatedPatchIds || [];
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, generatedPatchIds, taskSessionId: options.taskSessionId, onAgentStep: options.onAgentStep, registry, emitToolApprovalSteps: false });
   const toolCallCounts = new Map<string, number>();
   const repeatedToolWarnings = new Set<string>();
   let budgetWarningSent = false;
+  const metrics = new RunMetricsTracker(
+    {
+      runId,
+      taskSessionId: options.taskSessionId ?? null,
+      provider: providerId,
+      model: modelId,
+      mode
+    },
+    options.metricsRecorder
+  );
 
   logAi(runId, "runtime.start", { userGoal: agentContext.userGoal, mode, maxSteps, tools: registry.definitions.map((tool) => tool.name) });
 
-  for (let step = 0; step < maxSteps; step += 1) {
-    const remainingSteps = maxSteps - step;
+  try {
+    for (let step = 0; step < maxSteps; step += 1) {
+      const remainingSteps = maxSteps - step;
 
     if (!budgetWarningSent && step > 0 && remainingSteps <= TOOL_BUDGET_WARNING_REMAINING_STEPS) {
       const warningMessage = createToolBudgetWarningMessage(remainingSteps, generatedPatchIds.length > 0);
@@ -330,26 +365,32 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     }
 
     logAi(runId, "runtime.completion.request", { step, messageCount: messages.length });
-    const data = await requestCompletion({
-      model: config.aiModel,
+    const modelRequest: ModelRequest = {
+      model: modelId,
       temperature: config.aiChatTemperature,
       messages,
       tools: registry.schemas,
-      tool_choice: "auto"
-    });
-    const message = data.choices?.[0]?.message;
+      toolChoice: "auto"
+    };
+    metrics.recordContextEstimate(estimateModelInputTokens(modelRequest));
+    const completionStartedAt = Date.now();
+    const completion = await completeModel(modelRequest);
+    metrics.recordFirstTokenLatency(
+      completion.firstTokenLatencyMs ?? Date.now() - completionStartedAt,
+      completion.firstTokenLatencyMs === undefined ? "completion_upper_bound" : "provider"
+    );
+    metrics.addUsage(completion.usage);
+    const message = completion.message;
+    const toolCalls = message.toolCalls ?? [];
 
-    if (!message) {
-      throw new Error("AI response did not include a message");
-    }
-
-    if (!message.tool_calls?.length) {
+    if (!toolCalls.length) {
       const content = message.content || "";
-      const assistantMessage: AgentMessage = { role: "assistant", content };
+      const assistantMessage: ModelMessage = { role: "assistant", content };
       messages.push(assistantMessage);
       await persistAgentMessage(options.taskSessionId, assistantMessage);
       options.onAgentStep?.(createAgentStep({ type: "message", content: content || "Agent runtime completed without text output." }));
       logAi(runId, "runtime.done", { step, mode, contentLength: content.length });
+      await metrics.finish({ status: "completed", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
       return {
         status: "completed",
         runId,
@@ -361,36 +402,38 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       };
     }
 
-    const assistantMessage: AgentMessage = {
+    const assistantMessage: ModelMessage = {
       role: "assistant",
       content: message.content || null,
-      tool_calls: message.tool_calls
+      toolCalls
     };
     messages.push(assistantMessage);
     await persistAgentMessage(options.taskSessionId, assistantMessage);
 
-    logAi(runId, "runtime.toolCalls", message.tool_calls.map((toolCall) => toolCall.function.name));
+    logAi(runId, "runtime.toolCalls", toolCalls.map((toolCall) => toolCall.name));
     const repeatedToolNames: string[] = [];
 
-    for (const toolCall of message.tool_calls) {
+    for (const toolCall of toolCalls) {
       const signature = getToolCallSignature(toolCall);
       const nextCount = (toolCallCounts.get(signature) || 0) + 1;
       toolCallCounts.set(signature, nextCount);
+      metrics.recordToolCall({ repeated: nextCount > 1 });
 
       if (nextCount >= REPEATED_TOOL_CALL_WARNING_THRESHOLD && !repeatedToolWarnings.has(signature)) {
         repeatedToolWarnings.add(signature);
-        repeatedToolNames.push(toolCall.function.name);
+        repeatedToolNames.push(toolCall.name);
       }
     }
 
-    for (const toolCall of message.tool_calls) {
-      const definition = registry.get(toolCall.function.name);
-      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.function.name, agentContext, options.workflow);
-      const patternFinderBlockReason = getPatternFinderBlockReason(toolCall.function.name, agentContext, registry);
-      const existenceCheckBlockReason = getExistenceCheckBlockReason(toolCall.function.name, agentContext, registry);
+    for (const toolCall of toolCalls) {
+      const definition = registry.get(toolCall.name);
+      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, agentContext, options.workflow);
+      const patternFinderBlockReason = getPatternFinderBlockReason(toolCall.name, agentContext, registry);
+      const existenceCheckBlockReason = getExistenceCheckBlockReason(toolCall.name, agentContext, registry);
 
       if (workflowBlockReason) {
-        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: workflowBlockReason, workflow: options.workflow?.type });
+        metrics.recordToolFailure();
+        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: workflowBlockReason, workflow: options.workflow?.type });
         options.onAgentStep?.(createAgentStep({ type: "error", message: workflowBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, workflowBlockReason);
         messages.push(blockedMessage);
@@ -398,7 +441,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         continue;
       }
       if (patternFinderBlockReason) {
-        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: patternFinderBlockReason });
+        metrics.recordToolFailure();
+        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: patternFinderBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: patternFinderBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, patternFinderBlockReason);
         messages.push(blockedMessage);
@@ -406,17 +450,19 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         continue;
       }
       if (existenceCheckBlockReason) {
-        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: existenceCheckBlockReason });
+        metrics.recordToolFailure();
+        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: existenceCheckBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: existenceCheckBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, existenceCheckBlockReason);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
         continue;
       }
-      const approval = evaluateAgentToolApproval(toolCall, definition);
+      const approval = evaluateAgentToolApproval(toAgentToolCall(toolCall), definition);
 
       if (approval.status === "blocked") {
-        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.function.name, reason: approval.reason });
+        metrics.recordToolFailure();
+        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: approval.reason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: approval.reason }));
         const blockedMessage = createBlockedToolMessage(toolCall, approval.reason);
         messages.push(blockedMessage);
@@ -429,8 +475,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const pendingToolCall: PendingAgentToolCall = {
           actionId: approval.step.type === "approval_request" ? approval.step.actionId : `tool_call:${toolCall.id}`,
           toolCallId: toolCall.id,
-          toolName: toolCall.function.name,
-          arguments: parseToolArguments(toolCall),
+          toolName: toolCall.name,
+          arguments: toolCall.arguments,
           riskLevel: approval.riskLevel,
           status: "pending",
           createdAt: Date.now(),
@@ -439,6 +485,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
         await setPendingAgentToolCall(options.taskSessionId, pendingToolCall);
         logAi(runId, "runtime.awaitingApproval", { toolName: pendingToolCall.toolName, actionId: pendingToolCall.actionId });
+        await metrics.finish({ status: "awaiting_approval", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
 
         return {
           status: "awaiting_approval",
@@ -451,9 +498,15 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         };
       }
 
-      const result = await executeAgentToolCall(toolCall, toolRuntime);
-      messages.push(result);
-      await persistAgentMessage(options.taskSessionId, result);
+      try {
+        const result = toModelToolMessage(await executeAgentToolCall(toAgentToolCall(toolCall), toolRuntime));
+        if (typeof result.content === "string" && /\"error\"\s*:/.test(result.content)) metrics.recordToolFailure();
+        messages.push(result);
+        await persistAgentMessage(options.taskSessionId, result);
+      } catch (error) {
+        metrics.recordToolFailure();
+        throw error;
+      }
     }
 
     if (repeatedToolNames.length) {
@@ -467,6 +520,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const content = `Tool budget limit reached: Agent runtime stopped after ${maxSteps} step(s) because the tool-call limit was reached.`;
   options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
   logAi(runId, "runtime.stepLimitReached", { mode, maxSteps });
+  await metrics.finish({ status: "step_limit_reached", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
 
   return {
     status: "step_limit_reached",
@@ -477,4 +531,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     generatedPatchIds,
     pendingToolCall: null
   };
+  } catch (error) {
+    await metrics.finish({ status: error instanceof Error && error.name === "AbortError" ? "cancelled" : "failed", failureCategory: classifyRunFailure(error), patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+    throw error;
+  }
 }
