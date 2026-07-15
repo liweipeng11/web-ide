@@ -32,6 +32,7 @@ function getStringArg(args: Record<string, unknown>, name: string) {
 }
 
 function getActionType(toolName: string): ApprovalActionType {
+  if (["getExternalContextStatus", "searchOfficialDocs", "searchWeb", "browseWebPage", "automateBrowser", "fetchApiDocs", "sequenceReasoning"].includes(toolName)) return "inspect_project";
   if (toolName === "inspectProject") return "inspect_project";
   if (toolName === "searchCode" || toolName === "searchCodeRegex" || toolName === "listFiles" || toolName === "searchFilesByName" || toolName === "listCodeDefinitionNames") return "search_code";
   if (toolName === "readFile" || toolName === "readFileChunk" || toolName === "readFileRange") return "read_file";
@@ -45,6 +46,8 @@ function getActionType(toolName: string): ApprovalActionType {
 }
 
 function getTargets(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "searchOfficialDocs" || toolName === "searchWeb") return getStringArg(args, "query") ? [getStringArg(args, "query")] : undefined;
+  if (toolName === "browseWebPage" || toolName === "automateBrowser" || toolName === "fetchApiDocs") return getStringArg(args, "url") ? [getStringArg(args, "url")] : undefined;
   if (toolName === "searchCode" || toolName === "searchFilesByName") return getStringArg(args, "query") ? [getStringArg(args, "query")] : undefined;
   if (toolName === "searchCodeRegex") return getStringArg(args, "regex") ? [getStringArg(args, "regex")] : undefined;
   if (toolName === "listFiles" || toolName === "listCodeDefinitionNames") return getStringArg(args, "path") ? [getStringArg(args, "path")] : undefined;
@@ -57,6 +60,12 @@ function getTargets(toolName: string, args: Record<string, unknown>) {
 
 function isReadonlyTool(toolName: string) {
   return (
+    toolName === "getExternalContextStatus" ||
+    toolName === "searchOfficialDocs" ||
+    toolName === "searchWeb" ||
+    toolName === "browseWebPage" ||
+    toolName === "fetchApiDocs" ||
+    toolName === "sequenceReasoning" ||
     toolName === "inspectProject" ||
     toolName === "listFiles" ||
     toolName === "searchFilesByName" ||
@@ -69,17 +78,18 @@ function isReadonlyTool(toolName: string) {
   );
 }
 
-function isAutoApprovedTool(toolName: string) {
+function isAutoApprovedTool(toolName: string, args: Record<string, unknown>) {
   // proposePatch 只生成待审核 diff，不直接写入工作区，因此可以自动执行。
   return isReadonlyTool(toolName) || toolName === "proposePatch";
 }
 
-function requiresUserApproval(toolName: string) {
-  return toolName === "runCommand" || toolName === "applyPatch" || toolName === "writeFile" || toolName === "deleteFile";
+function requiresUserApproval(toolName: string, args: Record<string, unknown>) {
+  return toolName === "runCommand" || toolName === "applyPatch" || toolName === "writeFile" || toolName === "deleteFile" || toolName === "automateBrowser";
 }
 
 function getRiskLevel(toolName: string, args: Record<string, unknown>): ApprovalRiskLevel {
   if (toolName === "deleteFile") return "high";
+  if (toolName === "automateBrowser") return "medium";
   if (toolName === "runCommand") {
     const command = getStringArg(args, "command");
     const policy = evaluateCommandPolicy(command);
@@ -95,6 +105,13 @@ function getRiskLevel(toolName: string, args: Record<string, unknown>): Approval
 }
 
 function getApprovalTitle(toolName: string) {
+  if (toolName === "getExternalContextStatus") return "检查外部上下文状态";
+  if (toolName === "searchOfficialDocs") return "检索官方文档";
+  if (toolName === "searchWeb") return "搜索互联网";
+  if (toolName === "browseWebPage") return "浏览外部网页";
+  if (toolName === "automateBrowser") return "执行浏览器自动化";
+  if (toolName === "fetchApiDocs") return "抓取 API 文档";
+  if (toolName === "sequenceReasoning") return "记录顺序推理";
   if (toolName === "inspectProject") return "检查项目结构";
   if (toolName === "searchCode") return "搜索代码库";
   if (toolName === "searchCodeRegex") return "正则搜索代码库";
@@ -110,6 +127,13 @@ function getApprovalTitle(toolName: string) {
 }
 
 function getApprovalSummary(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "getExternalContextStatus") return "准备检查搜索与浏览器自动化是否可用。";
+  if (toolName === "searchOfficialDocs") return `准备在指定官方域名中检索“${getStringArg(args, "query") || "未提供"}”。`;
+  if (toolName === "searchWeb") return `准备在互联网中检索“${getStringArg(args, "query") || "未提供"}”。`;
+  if (toolName === "browseWebPage") return `准备读取外部网页“${getStringArg(args, "url") || "未提供"}”的正文和链接。`;
+  if (toolName === "automateBrowser") return `准备在浏览器中打开“${getStringArg(args, "url") || "未提供"}”并执行 ${Array.isArray(args.actions) ? args.actions.length : 0} 个动作。`;
+  if (toolName === "fetchApiDocs") return `准备抓取 API 文档“${getStringArg(args, "url") || "未提供"}”。`;
+  if (toolName === "sequenceReasoning") return "准备记录一条显式顺序推理步骤。";
   if (toolName === "inspectProject") return "读取 package 信息、依赖和框架线索，用于选择合适的实现方式。";
   if (toolName === "searchCode") return `准备使用关键词“${getStringArg(args, "query") || "未提供"}”搜索当前工作区。`;
   if (toolName === "searchCodeRegex") return `准备使用正则模式“${getStringArg(args, "regex") || "未提供"}”搜索当前工作区。`;
@@ -156,7 +180,7 @@ export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: 
     title: getApprovalTitle(toolName),
     summary: getApprovalSummary(toolName, args),
     riskLevel,
-    status: isAutoApprovedTool(toolName) ? "auto_approved" : "pending",
+    status: isAutoApprovedTool(toolName, args) ? "auto_approved" : "pending",
     targets: getTargets(toolName, args),
     command: toolName === "runCommand" ? getStringArg(args, "command") : undefined,
     details: {
@@ -166,11 +190,11 @@ export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: 
     }
   });
 
-  if (isAutoApprovedTool(toolName)) {
+  if (isAutoApprovedTool(toolName, args)) {
     return { status: "auto_approved", step };
   }
 
-  if (requiresUserApproval(toolName) || riskLevel !== "low") {
+  if (requiresUserApproval(toolName, args) || riskLevel !== "low") {
     return { status: "requires_approval", step, riskLevel };
   }
 

@@ -2,6 +2,7 @@ import type { AgentStep } from "./types.js";
 import type { FileEditResult } from "./types.js";
 import type { ContextCache } from "./codeDiscovery/index.js";
 import type { ImpactAnalysisResult } from "./impactAnalyzer/index.js";
+import type { ExternalContextSource } from "./externalContext/types.js";
 
 export type AgentRole = "system" | "user" | "assistant" | "tool";
 
@@ -23,6 +24,8 @@ export type AgentContext = {
   impactAnalyses?: ImpactAnalysisResult[];
   /** 记录 Runtime 实际执行过的命令，bugfix 工作流据此确认已尝试复现或验证。 */
   commandsRun?: Array<{ command: string; status: "success" | "failed"; exitCode: number | null }>;
+  /** 保存本轮检索或抓取使用的外部来源，便于审批恢复、引用和审计。 */
+  externalSources?: ExternalContextSource[];
 };
 
 export type AgentToolCall = {

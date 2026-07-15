@@ -750,8 +750,8 @@ test("plan mode exposes only readonly tools to the model", async () => {
 
   const toolNames = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   assert.equal(result.status, "completed");
-  // Symbol Graph 只读取源码并返回静态关系，因此规划模式也应允许使用。
-  assert.deepEqual(toolNames.sort(), ["analyzeImpact", "analyzeSymbolGraph", "checkExistence", "findSimilarPatterns", "inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "searchCode", "searchCodeRegex", "searchFilesByName"].sort());
+  // Symbol Graph 和 External Context Gateway 都是只读上下文能力，因此规划模式也应允许使用。
+  assert.deepEqual(toolNames.sort(), ["analyzeImpact", "analyzeSymbolGraph", "browseWebPage", "checkExistence", "fetchApiDocs", "findSimilarPatterns", "getExternalContextStatus", "inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "searchCode", "searchCodeRegex", "searchFilesByName", "searchOfficialDocs", "searchWeb", "sequenceReasoning"].sort());
 });
 
 test("act mode exposes edit, patch, and command tools to the model", async () => {
@@ -776,6 +776,7 @@ test("act mode exposes edit, patch, and command tools to the model", async () =>
   assert.equal(toolNames.includes("proposePatch"), true);
   assert.equal(toolNames.includes("applyPatch"), true);
   assert.equal(toolNames.includes("runCommand"), true);
+  assert.equal(toolNames.includes("automateBrowser"), true);
   // patch 工具排在直接编辑工具前面，引导常规修改先进入 diff 审核。
   assert.ok(toolNames.indexOf("proposePatch") < toolNames.indexOf("replaceInFile"));
   assert.ok(toolNames.indexOf("applyPatch") < toolNames.indexOf("writeFile"));

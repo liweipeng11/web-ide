@@ -22,6 +22,7 @@ Mini AI Web Editor 是一个本地优先的浏览器端 AI 编码工作台。它
 - 自动发现常见项目命令和包管理器元数据。
 - 支持全局级别和项目级别 Project Rules，让 Agent 在聊天、编辑和验证修复时遵守长期规则。
 - 支持 Project Memory，在不同聊天和服务重启之间保留项目画像、约定、阶段目标、最近改动、未完成事项和已确认风险。
+- 支持 External Context Gateway，让 Agent 按需检索官方文档和互联网、读取公开网页/API 文档，并记录可审计的顺序推理步骤。
 - 提供 Git 工作流面板，支持查看状态、创建任务分支、生成提交信息，并只提交当前任务相关文件。
 
 ## Agent 工作流
@@ -142,6 +143,30 @@ Project Memory 用于给 Agent 提供跨会话的稳定项目背景，数据写�
 可长期维护的字段包括项目简介、当前约定、当前阶段目标和已确认风险。最近改动与未完成事项由服务端从任务事实生成，不接受 API 直接覆盖；清理任务历史不会删除已经同步的最近改动。Project Memory 会注入任务计划、连续 Agent、普通问答、直接补丁和自动验证回修链路。注入模型前会按字段限制条目数量和字符预算，并保持 JSON 结构完整；历史任务文本只作为非指令数据，当前用户请求与最新读取的工作区代码始终优先。
 
 在界面中可通过左侧活动栏的 **Project Memory** 面板编辑长期内容、重新扫描技术栈，并查看最近改动与未完成事项。自动生成的简介会随重新扫描更新，手工维护的简介不会被覆盖。
+
+## External Context Gateway
+
+External Context Gateway 作为连续 Agent 和普通文件问答共用的外部信息接入层，提供：
+
+- `getExternalContextStatus`：在联网前检查搜索密钥、浏览器、代理和官方域名配置。
+- `searchOfficialDocs`：在调用方明确给出的官方域名内检索，并在返回前再次过滤域名；只有服务端配置过的域名才标记为已验证官方来源。
+- `searchWeb`：通过 Brave Search API 发现最新公开信息，可限制检索域名。
+- `browseWebPage`：导航到公开网页，提取可见正文和链接，不执行页面 JavaScript。
+- `automateBrowser`：在 Act 模式中通过本机 Chrome/Edge 执行 JavaScript 渲染、点击、输入、按键、选择、等待选择器和截图；所有调用都需要用户审批。
+- `fetchApiDocs`：抓取 JSON、YAML、Markdown、纯文本或 HTML 格式的公开 API 文档，并识别 OpenAPI 版本、标题、路径和操作数量。
+- `sequenceReasoning`：按运行和分支记录简短、显式的顺序推理步骤，并持久化到 `.mini-ai/state/runtime/external-context/reasoning/`。
+
+搜索能力需要在根目录 `.env` 中配置：
+
+```env
+BRAVE_SEARCH_API_KEY=your_brave_search_api_key
+```
+
+可选配置包括 `BRAVE_SEARCH_BASE_URL`、`EXTERNAL_CONTEXT_TIMEOUT_MS`、`EXTERNAL_CONTEXT_MAX_RESPONSE_BYTES`、`EXTERNAL_CONTEXT_TRUSTED_DOC_DOMAINS`、`EXTERNAL_BROWSER_EXECUTABLE_PATH`、`EXTERNAL_BROWSER_CHANNEL` 和 `EXTERNAL_BROWSER_PROXY_URL`。未配置搜索密钥时，搜索工具会返回明确错误；网页、API 文档抓取和浏览器自动化仍可独立使用。
+
+所有外部内容均作为不可信数据处理，不会被当作 Agent 指令。网关只接受 HTTP(S)，拒绝含凭据 URL、环回/私网/保留地址和云元数据主机；每次重定向和浏览器访问的新来源都会重新校验，并限制超时、重定向次数、内容类型和响应体大小。搜索端点必须使用 HTTPS，且禁止跨来源重定向，避免泄漏搜索密钥。
+
+某些受控网络会把公网域名映射到 `198.18.0.0/15`。确认这是可信本地代理行为后，可显式设置 `EXTERNAL_CONTEXT_ALLOW_PROXY_MAPPED_ADDRESSES=1`；默认保持关闭，不能为了联网而无条件放开保留地址。浏览器自动化不在 Plan 模式提供，页面交互或仅加载并执行脚本都需要审批，不应用于登录、支付、账户变更或破坏性外部操作。
 
 ## 界面功能说明
 

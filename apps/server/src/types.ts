@@ -302,6 +302,7 @@ export type AgentContextSnapshot = {
   unresolvedExistenceChecks?: string[];
   impactAnalyses?: import("./impactAnalyzer/index.js").ImpactAnalysisResult[];
   commandsRun?: Array<{ command: string; status: "success" | "failed"; exitCode: number | null }>;
+  externalSources?: import("./externalContext/types.js").ExternalContextSource[];
 };
 
 export type AgentMode = "plan" | "act";

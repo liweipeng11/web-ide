@@ -5,6 +5,7 @@ import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegi
 import { readonlyAgentToolDefinitions } from "./agentTools.js";
 import { AI_AGENT_ACT_SYSTEM_PROMPT, AI_AGENT_PLAN_SYSTEM_PROMPT } from "./prompts.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
+import { externalBrowserAgentToolDefinitions } from "./externalContext/index.js";
 
 export type AgentMode = "plan" | "act";
 
@@ -18,6 +19,7 @@ export type AgentModeConfig = {
 
 const actToolDefinitions: AgentToolDefinition[] = [
   ...readonlyAgentToolDefinitions,
+  ...externalBrowserAgentToolDefinitions,
   // Act 模式优先暴露 patch 工具，让常规修改先进入 diff 审核；直接编辑工具保留为兜底能力。
   ...patchAgentToolDefinitions,
   ...fileEditToolDefinitions,

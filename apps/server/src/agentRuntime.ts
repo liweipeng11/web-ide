@@ -54,7 +54,8 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
     patternCandidateFiles: [],
     existenceCheckPerformed: false,
     unresolvedExistenceChecks: [],
-    commandsRun: []
+    commandsRun: [],
+    externalSources: []
   };
 }
 
@@ -69,7 +70,8 @@ function snapshotAgentContext(agentContext: AgentContext): AgentContext {
     patternCandidateFiles: agentContext.patternCandidateFiles ? [...agentContext.patternCandidateFiles] : undefined,
     unresolvedExistenceChecks: agentContext.unresolvedExistenceChecks ? [...agentContext.unresolvedExistenceChecks] : undefined,
     impactAnalyses: agentContext.impactAnalyses ? structuredClone(agentContext.impactAnalyses) : undefined,
-    commandsRun: agentContext.commandsRun ? agentContext.commandsRun.map((command) => ({ ...command })) : undefined
+    commandsRun: agentContext.commandsRun ? agentContext.commandsRun.map((command) => ({ ...command })) : undefined,
+    externalSources: agentContext.externalSources ? agentContext.externalSources.map((source) => ({ ...source })) : undefined
   };
 }
 
@@ -100,7 +102,7 @@ function getExistenceCheckBlockReason(toolName: string, agentContext: AgentConte
 function getWorkflowToolBlockReason(toolName: string, agentContext: AgentContext, workflow?: TaskWorkflowSnapshot) {
   if (!workflow) return null;
   const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile", "applyPatch"]);
-  const sideEffectTools = new Set([...editingTools, "runCommand"]);
+  const sideEffectTools = new Set([...editingTools, "runCommand", "automateBrowser"]);
 
   if (workflow.type === "analysis-only" && sideEffectTools.has(toolName)) {
     return `Task workflow ${workflow.type} only allows read-only inspection tools.`;

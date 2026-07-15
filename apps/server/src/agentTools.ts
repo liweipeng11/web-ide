@@ -10,6 +10,7 @@ import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js
 import type { AgentStep } from "./types.js";
 import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
+import { externalContextReadonlyToolDefinitions } from "./externalContext/index.js";
 
 export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
@@ -859,7 +860,8 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         truncated: value.truncated
       };
     }
-  }
+  },
+  ...externalContextReadonlyToolDefinitions
 ];
 
 export const readonlyAgentToolRegistry = createAgentToolRegistry(readonlyAgentToolDefinitions);
