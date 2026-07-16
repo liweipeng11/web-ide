@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "pretest": "pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow && pnpm test:external-context",
+    "pretest": "pnpm test:context-budget && pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow && pnpm test:external-context",
+    "test:context-budget": "tsx --test src/contextBudget/contextBudgetManager.test.ts src/contextBudget/contextBudgetIntegration.test.ts",
     "test:symbol-graph": "tsx --test src/symbolGraph/symbolGraph.test.ts",
     "test:impact-analyzer": "tsx --test src/impactAnalyzer/impactAnalyzer.test.ts",
     "test:safe-editor": "tsx --test src/safeEditor/safeEditor.test.ts",

@@ -377,6 +377,9 @@ export type TaskSession = {
   patchDiagnostics?: PatchGenerationDiagnostics[];
   // 记录每轮 patch 前的上下文选取快照，用于回放“为什么这些文件足够或不足”。
   contextSelectionSnapshots?: import("./contextSelection/types.js").ContextSelectionSnapshot[];
+  // 阶段 1 只保存预算数字和结构化摘要；原始消息仍由 agentMessages 独立持久化以便审计恢复。
+  contextBudgetSnapshot?: import("./contracts/context.js").ContextBudgetSnapshot;
+  contextSummary?: import("./contracts/context.js").StructuredContextSummary;
   // 按时间顺序沉淀 patch 生命周期事件，用于历史回放和审计。
   patchEvents?: PatchLifecycleEvent[];
   // 按时间顺序沉淀工具式文件编辑事件，用于追踪 replaceInFile/writeFile 的真实落盘历史。

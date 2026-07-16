@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { appendAgentMessage, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { getAgentModeConfig, normalizeAgentMode, type AgentMode } from "./agentModes.js";
 import { evaluateAgentToolApproval } from "./agentPermissions.js";
@@ -10,9 +11,14 @@ import { createAgentStep } from "./routeAgentSteps.js";
 import type { AgentMessage as PersistedAgentMessage, AgentStep, PendingAgentToolCall } from "./types.js";
 import { buildTaskWorkflowRuntimePrompt, type TaskWorkflowSnapshot } from "./taskWorkflow/index.js";
 import { getCurrentProjectMemoryPrompt } from "./projectMemory/index.js";
-import { adaptOpenAiCompletionResponse, toOpenAiChatCompletionBody, type ModelMessage, type ModelRequest, type ModelResponse, type ModelToolCall } from "./contracts/index.js";
+import { adaptOpenAiCompletionResponse, toOpenAiChatCompletionBody, type ModelDescriptor, type ModelMessage, type ModelRequest, type ModelResponse, type ModelToolCall } from "./contracts/index.js";
 import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "./observability/index.js";
 import { getPendingPatch } from "./patchStore.js";
+import { ConservativeTokenEstimator, prepareContextBudget } from "./contextBudget/index.js";
+import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
+import { implementedFeatures } from "./featureFlags.js";
+import { getTaskSessionContextState, recordTaskSessionContextBudget } from "./taskSessionStore.js";
+import { createStructuredContextSummary } from "./contextBudget/summary.js";
 
 export type AgentRuntimeResult = {
   status: "completed" | "awaiting_approval" | "step_limit_reached";
@@ -22,6 +28,8 @@ export type AgentRuntimeResult = {
   agentContext: AgentContext;
   generatedPatchIds: string[];
   pendingToolCall?: PendingAgentToolCall | null;
+  contextBudgetSnapshot?: ContextBudgetSnapshot;
+  contextSummary?: StructuredContextSummary | null;
 };
 
 export type AgentRuntimeOptions = {
@@ -42,7 +50,32 @@ export type AgentRuntimeOptions = {
   metricsRecorder?: RunMetricsRecorder;
   providerId?: string;
   modelId?: string;
+  contextBudgetEnabled?: boolean;
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
+  contextSafetyMarginTokens?: number;
+  modelDescriptor?: ModelDescriptor;
+  onContextBudget?: (event: { snapshot: ContextBudgetSnapshot; summary: StructuredContextSummary | null }) => void;
 };
+
+async function loadRuntimeContextState(taskSessionId: string | null | undefined) {
+  if (!taskSessionId) return { planStatus: [] as string[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
+  try {
+    const session = await getTaskSessionContextState(taskSessionId);
+    return {
+      planStatus: [
+        ...(session.planItems ?? []).map((item) => `${item.status}: ${item.title}${item.note ? `（${item.note}）` : ""}`),
+        `approval: ${session.planApproval?.status ?? "not_required"}`
+      ],
+      filesModified: [...session.filesChanged],
+      unresolvedQuestions: (session.planItems ?? []).filter((item) => item.status === "blocked").map((item) => item.note || item.title),
+      contextSummary: session.contextSummary ?? null
+    };
+  } catch {
+    // 无持久化任务的单元调用继续使用 Runtime 内存状态。
+    return { planStatus: [] as string[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
+  }
+}
 
 // 16 步在“搜索 -> 读取上下文 -> 发起补丁/命令审批”的链路里偏紧，
 // 会导致任务在真正进入审批前就触发步数上限。
@@ -163,11 +196,6 @@ function countGeneratedPatchFiles(patchIds: string[]) {
   return patchIds.reduce((count, patchId) => count + (getPendingPatch(patchId)?.files.length ?? 0), 0);
 }
 
-function estimateModelInputTokens(request: Pick<ModelRequest, "messages" | "tools">) {
-  // 阶段 0 使用明确标记的保守估算建立基线，后续可由 Provider tokenizer 替换。
-  return Math.ceil(JSON.stringify({ messages: request.messages, tools: request.tools }).length / 4);
-}
-
 function stableStringify(value: unknown): string {
   if (!value || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -203,8 +231,13 @@ function createRepeatedToolWarningMessage(toolNames: string[]): ModelMessage {
 async function persistAgentMessage(taskSessionId: string | null | undefined, message: ModelMessage) {
   if (!taskSessionId) return;
 
+  message.id ??= `agent-message-${crypto.randomUUID()}`;
+  message.createdAt ??= Date.now();
+
   // Runtime 和持久化层共享 Provider 无关结构，OpenAI 字段只存在于兼容适配器。
   await appendAgentMessage(taskSessionId, {
+    id: message.id,
+    createdAt: message.createdAt,
     role: message.role,
     content: message.content ?? null,
     toolCallId: message.toolCallId,
@@ -246,6 +279,8 @@ function createToolCallFromPending(pendingToolCall: PendingAgentToolCall): Model
 
 function restoreRuntimeMessage(message: PersistedAgentMessage): ModelMessage {
   return {
+    id: message.id,
+    createdAt: message.createdAt,
     role: message.role,
     content: message.content,
     toolCallId: message.toolCallId,
@@ -332,11 +367,22 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);
   const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt());
   const messages: ModelMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
+  messages.forEach((message, index) => {
+    message.id ??= `runtime-${runId}-${index + 1}`;
+    message.createdAt ??= Date.now() + index;
+  });
+  if (!options.messages && options.taskSessionId) {
+    // 初始系统规则和用户目标也进入原始审计链；压缩只改变发送视图，不删除这些记录。
+    for (const message of messages) await persistAgentMessage(options.taskSessionId, message);
+  }
   const generatedPatchIds = options.generatedPatchIds || [];
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, generatedPatchIds, taskSessionId: options.taskSessionId, onAgentStep: options.onAgentStep, registry, emitToolApprovalSteps: false });
   const toolCallCounts = new Map<string, number>();
   const repeatedToolWarnings = new Set<string>();
   let budgetWarningSent = false;
+  let latestContextBudgetSnapshot: ContextBudgetSnapshot | undefined;
+  let latestContextSummary: StructuredContextSummary | null = null;
+  const contextBudgetEnabled = options.contextBudgetEnabled ?? (config.featureFlags.contextBudgetV2 && implementedFeatures.contextBudgetV2);
   const metrics = new RunMetricsTracker(
     {
       runId,
@@ -365,14 +411,48 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     }
 
     logAi(runId, "runtime.completion.request", { step, messageCount: messages.length });
-    const modelRequest: ModelRequest = {
+    const fullModelRequest: ModelRequest = {
       model: modelId,
       temperature: config.aiChatTemperature,
       messages,
       tools: registry.schemas,
       toolChoice: "auto"
     };
-    metrics.recordContextEstimate(estimateModelInputTokens(modelRequest));
+    let modelRequest = fullModelRequest;
+    if (contextBudgetEnabled) {
+      const taskContextState = await loadRuntimeContextState(options.taskSessionId);
+      latestContextSummary ??= taskContextState.contextSummary;
+      const prepared = prepareContextBudget({
+        messages: fullModelRequest.messages,
+        tools: fullModelRequest.tools,
+        agentContext,
+        planStatus: taskContextState.planStatus.length ? taskContextState.planStatus : options.workflow?.steps.map((workflowStep) => `pending: ${workflowStep.title}`),
+        filesModified: taskContextState.filesModified,
+        unresolvedQuestions: taskContextState.unresolvedQuestions,
+        options: {
+          contextWindowTokens: options.contextWindowTokens ?? options.modelDescriptor?.capabilities.contextWindowTokens ?? config.aiContextWindowTokens,
+          reservedOutputTokens: options.maxOutputTokens ?? options.modelDescriptor?.capabilities.maxOutputTokens ?? config.aiMaxOutputTokens,
+          safetyMarginTokens: options.contextSafetyMarginTokens ?? config.aiContextSafetyMarginTokens
+        }
+      });
+      latestContextBudgetSnapshot = prepared.snapshot;
+      latestContextSummary = prepared.summary ?? latestContextSummary;
+      modelRequest = { ...fullModelRequest, messages: prepared.messages };
+      metrics.recordContextEstimate(prepared.snapshot.estimatedInputTokensBeforeCompression, prepared.snapshot.estimatedInputTokensAfterCompression, prepared.snapshot.automaticCompression);
+      // 每次都传播当前有效摘要，避免新 Runtime 丢失上一次压缩状态或保留已经清理的审批。
+      await recordTaskSessionContextBudget(options.taskSessionId, prepared.snapshot, latestContextSummary);
+      options.onContextBudget?.({ snapshot: prepared.snapshot, summary: latestContextSummary });
+      logAi(runId, "runtime.contextBudget", {
+        step,
+        before: prepared.snapshot.estimatedInputTokensBeforeCompression,
+        after: prepared.snapshot.estimatedInputTokensAfterCompression,
+        available: prepared.snapshot.availableInputTokens,
+        compressed: prepared.snapshot.automaticCompression
+      });
+    } else {
+      const estimator = new ConservativeTokenEstimator();
+      metrics.recordContextEstimate(estimator.estimateMessages(fullModelRequest.messages) + estimator.estimateValue(fullModelRequest.tools ?? []));
+    }
     const completionStartedAt = Date.now();
     const completion = await completeModel(modelRequest);
     metrics.recordFirstTokenLatency(
@@ -398,7 +478,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         messages,
         agentContext,
         generatedPatchIds,
-        pendingToolCall: null
+        pendingToolCall: null,
+        contextBudgetSnapshot: latestContextBudgetSnapshot,
+        contextSummary: latestContextSummary
       };
     }
 
@@ -484,6 +566,20 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         };
 
         await setPendingAgentToolCall(options.taskSessionId, pendingToolCall);
+        if (contextBudgetEnabled && latestContextBudgetSnapshot) {
+          const taskContextState = await loadRuntimeContextState(options.taskSessionId);
+          latestContextSummary = createStructuredContextSummary({
+            messages,
+            coveredMessageIds: latestContextSummary?.coveredMessageIds ?? [],
+            agentContext,
+            pendingToolCall,
+            planStatus: taskContextState.planStatus,
+            filesModified: taskContextState.filesModified,
+            unresolvedQuestions: taskContextState.unresolvedQuestions
+          });
+          await recordTaskSessionContextBudget(options.taskSessionId, latestContextBudgetSnapshot, latestContextSummary);
+          options.onContextBudget?.({ snapshot: latestContextBudgetSnapshot, summary: latestContextSummary });
+        }
         logAi(runId, "runtime.awaitingApproval", { toolName: pendingToolCall.toolName, actionId: pendingToolCall.actionId });
         await metrics.finish({ status: "awaiting_approval", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
 
@@ -494,7 +590,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           messages,
           agentContext,
           generatedPatchIds,
-          pendingToolCall
+          pendingToolCall,
+          contextBudgetSnapshot: latestContextBudgetSnapshot,
+          contextSummary: latestContextSummary
         };
       }
 
@@ -529,7 +627,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     messages,
     agentContext,
     generatedPatchIds,
-    pendingToolCall: null
+    pendingToolCall: null,
+    contextBudgetSnapshot: latestContextBudgetSnapshot,
+    contextSummary: latestContextSummary
   };
   } catch (error) {
     await metrics.finish({ status: error instanceof Error && error.name === "AbortError" ? "cancelled" : "failed", failureCategory: classifyRunFailure(error), patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });

@@ -63,9 +63,9 @@ export function createServerCapabilities(input: { flags: FeatureFlags; implement
   };
 }
 
-// 阶段 0 只建立契约和开关；后续实现落地时逐项改为 true，避免 Capability 提前误报。
+// 只有已完成并通过回退测试的能力才标记可用，避免 Capability 提前误报。
 export const implementedFeatures: FeatureImplementations = {
-  contextBudgetV2: false,
+  contextBudgetV2: true,
   modelProviderGateway: false,
   lsp: false,
   inlineEdit: false

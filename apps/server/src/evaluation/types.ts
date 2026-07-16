@@ -24,6 +24,7 @@ export type EvaluationScenario = {
     dangerousCommandBlocked?: boolean;
     resumedAfterApproval?: boolean;
     validationAttempts?: number;
+    contextCompressed?: boolean;
   };
 };
 
@@ -51,4 +52,3 @@ export type EvaluationReport = {
   summary: { total: number; passed: number; failed: number; successRate: number };
   cases: EvaluationCaseReport[];
 };
-

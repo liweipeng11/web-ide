@@ -1,6 +1,7 @@
 import { useRef, type Dispatch, type SetStateAction } from "react";
 import { branchFileChatMessage, clearFileChat, deleteFileChatHistory, deleteFileChatMessage, fetchFileChat, fetchFileChatHistories, resumeTaskSessionChat, streamFileChatMessage, type TaskSession } from "../api";
 import { createChatId, createClientErrorStep, type AppState } from "../appState";
+import { mergeContextBudgetSession } from "../contextBudgetState";
 
 type UseChatSessionOptions = {
   state: AppState;
@@ -185,6 +186,16 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
               currentTaskSessionId: streamEvent.data.session.id,
               agentMode: streamEvent.data.session.agentMode || current.agentMode,
               taskSessions: [streamEvent.data.session, ...current.taskSessions.filter((session) => session.id !== streamEvent.data.session.id)]
+            }));
+          }
+
+          if (streamEvent.event === "context_budget") {
+            setState((current) => ({
+              ...current,
+              taskSessions: current.taskSessions.map((session) => mergeContextBudgetSession(session, streamEvent.data)),
+              selectedTaskSession: current.selectedTaskSession?.id === streamEvent.data.taskSessionId
+                ? mergeContextBudgetSession(current.selectedTaskSession, streamEvent.data)
+                : current.selectedTaskSession
             }));
           }
 

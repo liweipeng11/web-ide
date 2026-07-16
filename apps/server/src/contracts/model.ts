@@ -32,6 +32,9 @@ export type ModelToolCall = {
 };
 
 export type ModelMessage = {
+  // 内部消息标识不会发送给 Provider，仅用于压缩覆盖范围与持久化审计。
+  id?: string;
+  createdAt?: number;
   role: "system" | "user" | "assistant" | "tool";
   content?: string | null;
   toolCallId?: string;

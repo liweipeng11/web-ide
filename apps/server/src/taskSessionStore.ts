@@ -9,6 +9,8 @@ import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, Mis
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
 import { scheduleTaskMetricsFinalization } from "./observability/index.js";
+import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
+import { deleteStoredContextArtifacts } from "./contextBudget/artifactStore.js";
 
 function taskSessionDirectory() {
   return projectRuntimeDirectory("task-sessions");
@@ -46,7 +48,7 @@ async function enqueueTaskSessionUpdate(taskSessionId: string, update: (session:
   const next = previous
     .catch(() => undefined)
     .then(async () => {
-      const session = await readTaskSession(taskSessionId);
+      const session = await readTaskSessionRecord(taskSessionId);
       const updated = await update(session);
       await writeTaskSession(updated);
       return updated;
@@ -491,6 +493,8 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
     patchDiagnostics: normalizePatchDiagnostics(session.patchDiagnostics),
     contextSelectionSnapshots: normalizeContextSelectionSnapshots(session.contextSelectionSnapshots),
+    contextBudgetSnapshot: session.contextBudgetSnapshot && typeof session.contextBudgetSnapshot === "object" ? session.contextBudgetSnapshot : undefined,
+    contextSummary: session.contextSummary && typeof session.contextSummary === "object" ? session.contextSummary : undefined,
     patchEvents: normalizePatchLifecycleEvents(session.patchEvents),
     fileEditEvents: normalizeFileEditLifecycleEvents(session.fileEditEvents)
   };
@@ -547,7 +551,7 @@ async function attachTaskSessionDiffView(session: TaskSession): Promise<TaskSess
   };
 }
 
-async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
+async function readTaskSessionRecord(taskSessionId: string): Promise<TaskSession> {
   const content = await fs.readFile(taskSessionPath(taskSessionId), "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {
       return fs.readFile(legacyTaskSessionPath(taskSessionId), "utf8").catch((legacyError: NodeJS.ErrnoException) => {
@@ -561,7 +565,11 @@ async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
     throw error;
   });
 
-  return attachTaskSessionDiffView(normalizeTaskSession(JSON.parse(content) as TaskSession));
+  return normalizeTaskSession(JSON.parse(content) as TaskSession);
+}
+
+async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
+  return attachTaskSessionDiffView(await readTaskSessionRecord(taskSessionId));
 }
 
 async function writeTaskSession(session: TaskSession) {
@@ -977,6 +985,17 @@ export async function getTaskSession(taskSessionId: string) {
   return readTaskSession(taskSessionId);
 }
 
+export async function getTaskSessionContextState(taskSessionId: string) {
+  if (!taskSessionId.trim()) throw new HttpError(400, "taskSessionId is required");
+  const session = await readTaskSessionRecord(taskSessionId);
+  return {
+    planItems: session.planItems ?? [],
+    planApproval: session.planApproval,
+    filesChanged: session.filesChanged,
+    contextSummary: session.contextSummary
+  };
+}
+
 export async function listTaskSessions(options: { includeDiffView?: boolean } = {}) {
   const files = await listJsonFilesWithLegacyFallback(taskSessionDirectory(), legacyTaskSessionDirectory());
 
@@ -1027,6 +1046,8 @@ export async function deleteTaskSession(taskSessionId: string) {
   if (!deleted) {
     throw new HttpError(404, "Task session not found");
   }
+
+  await deleteStoredContextArtifacts(taskSessionId);
 
   return listTaskSessions();
 }
@@ -1137,6 +1158,10 @@ export async function clearTaskSessionPendingToolCall(taskSessionId: string | nu
       ...session,
       status: session.status === "awaiting_approval" ? "running" : session.status,
       pendingToolCall: null,
+      // 审批实体和上下文摘要必须同步清理，避免 UI 继续展示已经结束的待审批操作。
+      contextSummary: session.contextSummary
+        ? { ...session.contextSummary, pendingApproval: null }
+        : session.contextSummary,
       updatedAt: Date.now()
     };
   });
@@ -1174,6 +1199,10 @@ export async function decideTaskSessionApproval(taskSessionId: string | null | u
       ...session,
       status: clearsPendingToolCall && session.status === "awaiting_approval" ? "running" : session.status,
       pendingToolCall: clearsPendingToolCall ? null : pendingToolCall,
+      // 只清理与本次决策匹配的审批摘要，后续新产生的审批不会被误删。
+      contextSummary: clearsPendingToolCall && session.contextSummary?.pendingApproval?.actionId === actionId
+        ? { ...session.contextSummary, pendingApproval: null }
+        : session.contextSummary,
       steps,
       updatedAt: Date.now()
     };
@@ -1243,6 +1272,18 @@ export async function recordTaskSessionContextSelection(taskSessionId: string | 
     ...session,
     // 保留最近 50 次上下文选取快照，既支持复盘又避免任务文件无限膨胀。
     contextSelectionSnapshots: [snapshot, ...normalizeContextSelectionSnapshots(session.contextSelectionSnapshots)].slice(0, 50),
+    updatedAt: Date.now()
+  }));
+}
+
+export async function recordTaskSessionContextBudget(taskSessionId: string | null | undefined, snapshot: ContextBudgetSnapshot, summary?: StructuredContextSummary | null) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    contextBudgetSnapshot: snapshot,
+    // 没有发生历史压缩时保留上一份摘要，便于用户继续查看最近一次压缩状态。
+    contextSummary: summary ?? session.contextSummary,
     updatedAt: Date.now()
   }));
 }

@@ -233,6 +233,9 @@ export default function ChatPanel({
   const activePlanBlockedCount = activePlanItems.filter((item) => item.status === "blocked").length;
   const activePlanPendingApproval = activeTaskSession?.planApproval?.status === "pending";
   const effectiveAgentMode = activeTaskSession?.agentMode || agentMode;
+  const contextStatusSession = activeTaskSession || selectedTaskSession;
+  const contextBudget = contextStatusSession?.contextBudgetSnapshot;
+  const contextSummary = contextStatusSession?.contextSummary;
 
   useEffect(() => {
     const approvalKey = activePlanPendingApproval && activeTaskSession ? `${activeTaskSession.id}:${activeTaskSession.planApproval?.requestedAt || "pending"}` : null;
@@ -573,6 +576,34 @@ export default function ChatPanel({
         </div>
       </div>
       {renderTaskPlanTrigger()}
+      {contextBudget ? (
+        <details className={`context-budget-status ${contextBudget.automaticCompression ? "compressed" : ""}`}>
+          <summary>
+            <span>上下文 {Math.round(contextBudget.usageRatio * 100)}%</span>
+            <small>
+              {contextBudget.automaticCompression ? "已自动压缩" : "未压缩"} · {contextBudget.includedFileCount} 个文件 · {contextBudget.truncatedArtifactCount} 项裁剪
+            </small>
+          </summary>
+          <div className="context-budget-detail">
+            <p>
+              估算 {contextBudget.estimatedInputTokensAfterCompression.toLocaleString()} / {contextBudget.availableInputTokens.toLocaleString()} tokens
+              {contextBudget.estimator === "conservative" ? "（保守估算）" : ""}
+            </p>
+            {contextSummary ? (
+              <section>
+                <strong>压缩摘要</strong>
+                <dl>
+                  <dt>当前目标</dt><dd>{contextSummary.currentUserGoal}</dd>
+                  <dt>已读文件</dt><dd>{contextSummary.filesRead.join("、") || "无"}</dd>
+                  <dt>已修改文件</dt><dd>{contextSummary.filesModified.join("、") || "无"}</dd>
+                  <dt>最近失败</dt><dd>{contextSummary.recentValidationFailures.join("；") || "无"}</dd>
+                  <dt>待审批</dt><dd>{contextSummary.pendingApproval ? `${contextSummary.pendingApproval.toolName}（${contextSummary.pendingApproval.actionId}）` : "无"}</dd>
+                </dl>
+              </section>
+            ) : <p>尚未生成结构化压缩摘要。</p>}
+          </div>
+        </details>
+      ) : null}
       {showHistories && (
         <div className="task-history-panel">
           <section className="task-history-section">

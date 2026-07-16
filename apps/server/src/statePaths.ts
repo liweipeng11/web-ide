@@ -6,7 +6,7 @@ import { safeResolve } from "./fileTools.js";
 const projectRuntimeRoot = ".mini-ai/state/runtime";
 const legacyProjectRuntimeRoot = ".ai-agent";
 
-type RuntimeDirectoryName = "checkpoints" | "task-sessions" | "ai-logs" | "external-context";
+type RuntimeDirectoryName = "checkpoints" | "task-sessions" | "ai-logs" | "external-context" | "context-artifacts";
 
 export function appStatePath(fileName: string) {
   return path.join(config.stateDirectory, fileName);

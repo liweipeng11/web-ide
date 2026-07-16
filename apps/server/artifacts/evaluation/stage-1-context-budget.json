@@ -1,0 +1,536 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-16T00:53:44.722Z",
+  "provider": "mock",
+  "summary": {
+    "total": 10,
+    "passed": 10,
+    "failed": 0,
+    "successRate": 1
+  },
+  "cases": [
+    {
+      "scenarioId": "single_file_type_fix",
+      "title": "单文件类型错误修复",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [
+          "src/add.ts"
+        ],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": false,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-single_file_type_fix",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.418Z",
+          "finishedAt": "2026-07-16T00:53:44.454Z",
+          "durationMs": 36,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 60,
+            "outputTokens": 15,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 2,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 0,
+            "estimatedTokensBefore": 3190,
+            "estimatedTokensAfter": 3258,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 1,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "cross_file_contract_change",
+      "title": "跨文件接口修改",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [
+          "src/types.ts",
+          "src/user.ts"
+        ],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": false,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-cross_file_contract_change",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.471Z",
+          "finishedAt": "2026-07-16T00:53:44.491Z",
+          "durationMs": 20,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 60,
+            "outputTokens": 15,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 2,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 0,
+            "estimatedTokensBefore": 3312,
+            "estimatedTokensAfter": 3382,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 2,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "vue_component_type_sync",
+      "title": "Vue 组件类型联动",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [
+          "src/Card.vue"
+        ],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": false,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-vue_component_type_sync",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.508Z",
+          "finishedAt": "2026-07-16T00:53:44.526Z",
+          "durationMs": 18,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 60,
+            "outputTokens": 15,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 2,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 0,
+            "estimatedTokensBefore": 3207,
+            "estimatedTokensAfter": 3277,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 1,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "large_file_local_edit",
+      "title": "大文件局部修改",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [
+          "src/large.ts"
+        ],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": false,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-large_file_local_edit",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.540Z",
+          "finishedAt": "2026-07-16T00:53:44.568Z",
+          "durationMs": 28,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 60,
+            "outputTokens": 15,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 2,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 1,
+            "estimatedTokensBefore": 40679,
+            "estimatedTokensAfter": 5003,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 1,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "long_terminal_output",
+      "title": "超长终端输出",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": false,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-long_terminal_output",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.583Z",
+          "finishedAt": "2026-07-16T00:53:44.589Z",
+          "durationMs": 6,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 40,
+            "outputTokens": 10,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 1,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 1,
+            "estimatedTokensBefore": 18597,
+            "estimatedTokensAfter": 5772,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 0,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "unrelated_file_protection",
+      "title": "无关文件保护",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [
+          "src/target.ts"
+        ],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": false,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-unrelated_file_protection",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.599Z",
+          "finishedAt": "2026-07-16T00:53:44.616Z",
+          "durationMs": 17,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 60,
+            "outputTokens": 15,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 2,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 0,
+            "estimatedTokensBefore": 3177,
+            "estimatedTokensAfter": 3247,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 1,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "dangerous_command_blocking",
+      "title": "危险命令阻断",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [],
+        "dangerousCommandBlocked": true,
+        "resumedAfterApproval": false,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-dangerous_command_blocking",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.631Z",
+          "finishedAt": "2026-07-16T00:53:44.635Z",
+          "durationMs": 4,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 40,
+            "outputTokens": 10,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 1,
+            "repeatedCalls": 0,
+            "failedCalls": 1
+          },
+          "context": {
+            "compressionCount": 0,
+            "estimatedTokensBefore": 3003,
+            "estimatedTokensAfter": 3071,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 0,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "approval_resume",
+      "title": "审批后恢复 Agent",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": true,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-approval_resume",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.642Z",
+          "finishedAt": "2026-07-16T00:53:44.648Z",
+          "durationMs": 6,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 40,
+            "outputTokens": 10,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 1,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 0,
+            "estimatedTokensBefore": 2934,
+            "estimatedTokensAfter": 3003,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 0,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "validation_retry",
+      "title": "验证失败后二次修复",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [
+          "src/retry.ts"
+        ],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": false,
+        "validationAttempts": 2,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "task:evaluation-validation_retry",
+          "taskSessionId": "evaluation-validation_retry",
+          "provider": "local",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.659Z",
+          "finishedAt": "2026-07-16T00:53:44.689Z",
+          "durationMs": 30,
+          "firstTokenLatencyMs": null,
+          "firstTokenLatencySource": "unavailable",
+          "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 0,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 0,
+            "estimatedTokensBefore": 3,
+            "estimatedTokensAfter": 3,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 1,
+            "validationCommandCount": 2,
+            "validationStatus": "passed"
+          }
+        }
+      }
+    },
+    {
+      "scenarioId": "near_context_limit_summary",
+      "title": "接近上下文上限仍完成总结",
+      "passed": true,
+      "failures": [],
+      "result": {
+        "success": true,
+        "modifiedFiles": [],
+        "dangerousCommandBlocked": false,
+        "resumedAfterApproval": false,
+        "validationAttempts": 0,
+        "metrics": {
+          "schemaVersion": 1,
+          "runId": "evaluation-near_context_limit_summary",
+          "taskSessionId": null,
+          "provider": "mock",
+          "model": "deterministic-mock-v1",
+          "mode": "task",
+          "scope": "task_run",
+          "startedAt": "2026-07-16T00:53:44.707Z",
+          "finishedAt": "2026-07-16T00:53:44.719Z",
+          "durationMs": 12,
+          "firstTokenLatencyMs": 0,
+          "firstTokenLatencySource": "completion_upper_bound",
+          "usage": {
+            "inputTokens": 40,
+            "outputTokens": 10,
+            "reasoningTokens": 0,
+            "cachedInputTokens": 0
+          },
+          "tools": {
+            "calls": 1,
+            "repeatedCalls": 0,
+            "failedCalls": 0
+          },
+          "context": {
+            "compressionCount": 1,
+            "estimatedTokensBefore": 127976,
+            "estimatedTokensAfter": 4619,
+            "estimator": "conservative"
+          },
+          "result": {
+            "status": "completed",
+            "failureCategory": "none",
+            "patchFileCount": 0,
+            "validationCommandCount": 0,
+            "validationStatus": "not_run"
+          }
+        }
+      }
+    }
+  ]
+}

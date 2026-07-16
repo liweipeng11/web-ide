@@ -217,7 +217,11 @@ export const deterministicMockAgent: EvaluationAgent = async (scenario, workspac
     const usage = { inputTokens: 20, outputTokens: 5, reasoningTokens: 0, cachedInputTokens: 0 };
     if (patchScenario && providerStep === 2) {
       const patchId = request.messages.map((message) => message.content).filter((content): content is string => typeof content === "string").map((content) => {
-        try { return (JSON.parse(content) as { patchId?: string }).patchId; } catch { return undefined; }
+        try {
+          const parsed = JSON.parse(content) as { patchId?: string; content?: { patchId?: string } };
+          // 阶段 1 ContextArtifact 信封与关闭开关后的旧工具结果都必须通过同一离线评测。
+          return parsed.patchId ?? parsed.content?.patchId;
+        } catch { return undefined; }
       }).find(Boolean);
       if (!patchId) throw new Error(`评测场景 ${scenario.id} 未返回 patchId`);
       return { message: { role: "assistant", toolCalls: [{ id: `apply-${scenario.id}`, name: "applyPatch", arguments: { patchId } }] }, usage };
@@ -229,7 +233,8 @@ export const deterministicMockAgent: EvaluationAgent = async (scenario, workspac
     return { message: { role: "assistant", content: "评测任务已完成" }, usage, finishReason: "stop" };
   };
   const metricsRecorder = async (_metrics: RunMetrics) => {};
-  const runtimeOptions = { userRequest: scenario.instruction, projectMemoryPrompt: "", registry, completeModel, metricsRecorder, runId: `evaluation-${scenario.id}`, providerId: "mock", modelId: "deterministic-mock-v1" } as const;
+  // 阶段评估必须稳定覆盖上下文预算路径，不能受运行测试进程时的生产 Feature Flag 影响。
+  const runtimeOptions = { userRequest: scenario.instruction, projectMemoryPrompt: "", registry, completeModel, metricsRecorder, runId: `evaluation-${scenario.id}`, providerId: "mock", modelId: "deterministic-mock-v1", contextBudgetEnabled: true } as const;
   const firstResult = await runAgentRuntime(runtimeOptions);
   const blockedByPolicy = scenario.id === "dangerous_command_blocking" && commandExecutions === 0 && firstResult.messages.some((message) => message.role === "tool" && message.content?.includes("blocked"));
   let finalResult = firstResult;
@@ -262,6 +267,12 @@ function evaluateCase(scenario: EvaluationScenario, result: EvaluationAgentResul
   if (scenario.expected.dangerousCommandBlocked && !result.dangerousCommandBlocked) failures.push("危险命令未被阻断");
   if (scenario.expected.resumedAfterApproval && !result.resumedAfterApproval) failures.push("审批后未恢复执行");
   if (scenario.expected.validationAttempts !== undefined && result.validationAttempts !== scenario.expected.validationAttempts) failures.push("验证重试次数不符合预期");
+  if (scenario.expected.contextCompressed && !(result.metrics.context.compressionCount > 0)) failures.push("预期场景未触发上下文压缩");
+  if (scenario.expected.contextCompressed && !(
+    typeof result.metrics.context.estimatedTokensBefore === "number"
+    && typeof result.metrics.context.estimatedTokensAfter === "number"
+    && result.metrics.context.estimatedTokensAfter < result.metrics.context.estimatedTokensBefore
+  )) failures.push("上下文压缩未降低估算 token");
   return { scenarioId: scenario.id, title: scenario.title, passed: failures.length === 0, failures, result };
 }
 

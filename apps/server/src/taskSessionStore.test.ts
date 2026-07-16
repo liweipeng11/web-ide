@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 
@@ -285,6 +285,26 @@ test("persists agent messages in task sessions", async () => {
       ["assistant-message", "assistant", "I will inspect the project."]
     ]
   );
+});
+
+test("persists context budget snapshot and structured summary without replacing raw messages", async () => {
+  const { session } = await createIsolatedTaskSession("上下文预算持久化");
+  await appendTaskSessionAgentMessage(session.id, { id: "raw-message-1", role: "user", content: "保留原始目标", createdAt: Date.now() });
+  await recordTaskSessionContextBudget(session.id, {
+    modelContextWindowTokens: 1_000, reservedOutputTokens: 100, reservedToolSchemaTokens: 50, safetyMarginTokens: 50,
+    availableInputTokens: 800, estimatedInputTokensBeforeCompression: 900, estimatedInputTokensAfterCompression: 400,
+    compressionCount: 1, truncatedArtifactCount: 2, includedFileCount: 1, usageRatio: 0.5,
+    automaticCompression: true, generatedAt: Date.now(), estimator: "conservative"
+  }, {
+    version: 1, coveredMessageIds: ["raw-message-1"], generatedAt: Date.now(), currentUserGoal: "保留原始目标",
+    confirmedDecisions: [], unresolvedQuestions: [], filesRead: ["src/a.ts"], filesModified: [], commands: [],
+    planStatus: [], recentValidationFailures: [], pendingApproval: null
+  });
+
+  const loaded = await getTaskSession(session.id);
+  assert.equal(loaded.contextBudgetSnapshot?.automaticCompression, true);
+  assert.deepEqual(loaded.contextSummary?.coveredMessageIds, ["raw-message-1"]);
+  assert.equal(loaded.agentMessages?.some((message) => message.id === "raw-message-1"), true);
 });
 
 test("agent message store wraps task session persistence", async () => {
@@ -657,10 +677,23 @@ test("stores and clears pending tool calls for approval resume", async () => {
   assert.deepEqual(pending?.pendingToolCall?.agentContext?.filesRead, ["src/service.ts"]);
   assert.deepEqual(await getPendingAgentToolCall(session.id), pending?.pendingToolCall);
 
+  await recordTaskSessionContextBudget(session.id, {
+    modelContextWindowTokens: 1_000, reservedOutputTokens: 100, reservedToolSchemaTokens: 50, safetyMarginTokens: 50,
+    availableInputTokens: 800, estimatedInputTokensBeforeCompression: 900, estimatedInputTokensAfterCompression: 400,
+    compressionCount: 1, truncatedArtifactCount: 1, includedFileCount: 1, usageRatio: 0.5,
+    automaticCompression: true, generatedAt: Date.now(), estimator: "conservative"
+  }, {
+    version: 1, coveredMessageIds: [], generatedAt: Date.now(), currentUserGoal: "运行测试",
+    confirmedDecisions: [], unresolvedQuestions: [], filesRead: [], filesModified: [], commands: [],
+    planStatus: [], recentValidationFailures: [],
+    pendingApproval: { actionId: "run_command:test-action", toolName: "runCommand", arguments: { command: "pnpm test" } }
+  });
+
   const approved = await decideTaskSessionApproval(session.id, "run_command:test-action", "approved");
 
   assert.equal(approved?.status, "running");
   assert.equal(approved?.pendingToolCall, null);
+  assert.equal(approved?.contextSummary?.pendingApproval, null);
   assert.equal(await getPendingAgentToolCall(session.id), null);
 });
 

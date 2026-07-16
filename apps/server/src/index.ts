@@ -900,7 +900,8 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         userRequest: userRequest.trim(),
         mode: "plan",
         workflow: plannedTaskSession?.workflow || taskSession.workflow,
-        onAgentStep: pushAgentStep
+        onAgentStep: pushAgentStep,
+        onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
       });
       const answer = buildDeferredRuntimeAnswer(runtimeResult, null) || "";
       if (answer) {
@@ -943,7 +944,8 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         userRequest: editRequest,
         mode: "act",
         workflow: plannedTaskSession?.workflow || taskSession.workflow,
-        onAgentStep: pushAgentStep
+        onAgentStep: pushAgentStep,
+        onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
       });
       const runtimePatch = createPatchStreamResponse(runtimeResult.generatedPatchIds.at(-1), taskSession.id, runtimeResult.content || "已生成待审核补丁。", agentSteps);
       const runtimeProgressedTaskSession = runtimePatch

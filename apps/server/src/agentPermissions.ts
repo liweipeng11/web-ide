@@ -35,7 +35,7 @@ function getActionType(toolName: string): ApprovalActionType {
   if (["getExternalContextStatus", "searchOfficialDocs", "searchWeb", "browseWebPage", "automateBrowser", "fetchApiDocs", "sequenceReasoning"].includes(toolName)) return "inspect_project";
   if (toolName === "inspectProject") return "inspect_project";
   if (toolName === "searchCode" || toolName === "searchCodeRegex" || toolName === "listFiles" || toolName === "searchFilesByName" || toolName === "listCodeDefinitionNames") return "search_code";
-  if (toolName === "readFile" || toolName === "readFileChunk" || toolName === "readFileRange") return "read_file";
+  if (toolName === "readFile" || toolName === "readFileChunk" || toolName === "readFileRange" || toolName === "recoverContextArtifact") return "read_file";
   if (toolName === "runCommand") return "run_command";
   if (toolName === "proposePatch") return "edit_files";
   if (toolName === "applyPatch") return "apply_patch";
@@ -53,6 +53,7 @@ function getTargets(toolName: string, args: Record<string, unknown>) {
   if (toolName === "listFiles" || toolName === "listCodeDefinitionNames") return getStringArg(args, "path") ? [getStringArg(args, "path")] : undefined;
   if (toolName === "runCommand") return getStringArg(args, "command") ? [getStringArg(args, "command")] : undefined;
   if (toolName === "applyPatch") return getStringArg(args, "filePath") ? [getStringArg(args, "filePath")] : getStringArg(args, "patchId") ? [getStringArg(args, "patchId")] : undefined;
+  if (toolName === "recoverContextArtifact") return getStringArg(args, "reference") ? [getStringArg(args, "reference")] : undefined;
 
   const filePath = getStringArg(args, "filePath") || getStringArg(args, "path");
   return filePath ? [filePath] : undefined;
@@ -74,7 +75,8 @@ function isReadonlyTool(toolName: string) {
     toolName === "searchCodeRegex" ||
     toolName === "readFile" ||
     toolName === "readFileChunk" ||
-    toolName === "readFileRange"
+    toolName === "readFileRange" ||
+    toolName === "recoverContextArtifact"
   );
 }
 
@@ -118,6 +120,7 @@ function getApprovalTitle(toolName: string) {
   if (toolName === "listCodeDefinitionNames") return "提取代码定义";
   if (toolName === "readFile") return "读取文件";
   if (toolName === "readFileRange") return "读取文件片段";
+  if (toolName === "recoverContextArtifact") return "恢复上下文产物";
   if (toolName === "runCommand") return "运行命令";
   if (toolName === "applyPatch") return "应用补丁";
   if (toolName === "writeFile") return "写入文件";
@@ -140,6 +143,7 @@ function getApprovalSummary(toolName: string, args: Record<string, unknown>) {
   if (toolName === "listCodeDefinitionNames") return `准备提取“${getStringArg(args, "path") || "工作区"}”中的顶级代码定义摘要。`;
   if (toolName === "readFile") return `准备读取文件“${getStringArg(args, "filePath") || "未提供"}”作为上下文。`;
   if (toolName === "readFileRange") return `准备读取文件“${getStringArg(args, "filePath") || "未提供"}”的指定行范围。`;
+  if (toolName === "recoverContextArtifact") return `准备按引用“${getStringArg(args, "reference") || "未提供"}”恢复一段原始工具结果。`;
   if (toolName === "runCommand") return `模型请求运行命令“${getStringArg(args, "command") || "未提供"}”，需要用户批准后执行。`;
   if (toolName === "applyPatch") return "模型请求应用文件补丁，需要用户批准后写入工作区。";
   if (toolName === "writeFile") return `模型请求写入文件“${getStringArg(args, "filePath") || getStringArg(args, "path") || "未提供"}”，需要用户批准。`;

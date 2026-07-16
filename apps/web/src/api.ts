@@ -334,6 +334,38 @@ export type TaskWorkflowSnapshot = {
 // 任务状态会被连续 Agent 的审批、暂停和重规划流程复用。
 export type TaskSessionStatus = "running" | "awaiting_approval" | "awaiting_user" | "paused" | "success" | "failed" | "cancelled" | "awaiting_replan";
 
+export type ContextBudgetSnapshot = {
+  modelContextWindowTokens: number;
+  reservedOutputTokens: number;
+  reservedToolSchemaTokens: number;
+  safetyMarginTokens: number;
+  availableInputTokens: number;
+  estimatedInputTokensBeforeCompression: number;
+  estimatedInputTokensAfterCompression: number;
+  compressionCount: number;
+  truncatedArtifactCount: number;
+  includedFileCount: number;
+  usageRatio: number;
+  automaticCompression: boolean;
+  generatedAt: number;
+  estimator: "provider" | "conservative" | "unknown";
+};
+
+export type StructuredContextSummary = {
+  version: 1;
+  coveredMessageIds: string[];
+  generatedAt: number;
+  currentUserGoal: string;
+  confirmedDecisions: string[];
+  unresolvedQuestions: string[];
+  filesRead: string[];
+  filesModified: string[];
+  commands: Array<{ command: string; status: "success" | "failed"; exitCode: number | null }>;
+  planStatus: string[];
+  recentValidationFailures: string[];
+  pendingApproval: { actionId: string; toolName: string; arguments: unknown } | null;
+};
+
 export type TaskSession = {
   id: string;
   userGoal: string;
@@ -346,6 +378,8 @@ export type TaskSession = {
   filesChanged: string[];
   commandsRun: string[];
   steps: AgentStep[];
+  contextBudgetSnapshot?: ContextBudgetSnapshot;
+  contextSummary?: StructuredContextSummary;
   patchDiagnostics?: PatchGenerationDiagnostics[];
   patchEvents?: PatchLifecycleEvent[];
   planItems?: TaskPlanItem[];
@@ -543,6 +577,7 @@ export type FileChatStreamEvent =
   | { event: "assistant_start"; data: { message: FileChatMessage } }
   | { event: "chat"; data: { chatId: string; historyCount: number; taskSessionId?: string } }
   | { event: "task_session"; data: { session: TaskSession } }
+  | { event: "context_budget"; data: { taskSessionId: string; snapshot: ContextBudgetSnapshot; summary: StructuredContextSummary | null } }
   | { event: "agent_step"; data: { step: AgentStep } }
   | { event: "patch"; data: { patch: GenerateEditResponse } }
   | { event: "delta"; data: { id: string; delta: string } }

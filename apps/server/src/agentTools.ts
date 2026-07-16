@@ -11,6 +11,7 @@ import type { AgentStep } from "./types.js";
 import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { externalContextReadonlyToolDefinitions } from "./externalContext/index.js";
+import { recoverStoredContextArtifact, storeContextArtifact } from "./contextBudget/index.js";
 
 export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
@@ -99,6 +100,33 @@ function getSearchOptions(args: Record<string, unknown>) {
 }
 
 export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
+  {
+    name: "recoverContextArtifact",
+    description: "Recover a bounded chunk of an earlier tool result using its tool-call reference. Use offset/nextOffset to continue without resending the entire artifact.",
+    cacheable: false,
+    parameters: {
+      type: "object",
+      properties: {
+        reference: { type: "string", description: "Recoverable reference in tool-call:<id> format." },
+        offset: { type: "integer", minimum: 0, description: "Zero-based character offset. Defaults to 0." },
+        maxChars: { type: "integer", minimum: 200, maximum: 4000, description: "Maximum characters to return." }
+      },
+      required: ["reference"],
+      additionalProperties: false
+    },
+    async execute(args, runtime) {
+      if (!runtime.taskSessionId) throw new Error("Artifact recovery requires an active task session");
+      return recoverStoredContextArtifact({
+        taskSessionId: runtime.taskSessionId,
+        reference: requiredString(args, "reference"),
+        offset: optionalNonNegativeInteger(args, "offset", 0),
+        maxChars: optionalPositiveInteger(args, "maxChars", 4_000)
+      });
+    },
+    summarize(result) {
+      return result;
+    }
+  },
   // 影响分析只读取静态索引，规划阶段即可用于约束后续修改范围。
   {
     name: "analyzeImpact",
@@ -595,7 +623,7 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       return results;
     },
     summarize(result, cached, args) {
-      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown }>) : [];
+      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown; line?: unknown; column?: unknown; content?: unknown; match?: unknown }>) : [];
       return {
         query: args.query,
         path: args.path || "",
@@ -603,7 +631,15 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         caseSensitive: args.caseSensitive === true,
         cached,
         resultCount: results.length,
-        files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10)
+        files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10),
+        // 仅保留定位所需的命中文件、行号与短片段，完整文件继续通过读取工具按需获取。
+        matches: results.slice(0, 20).map((item) => ({
+          filePath: item.filePath,
+          line: item.line,
+          column: item.column,
+          content: typeof item.content === "string" ? item.content.slice(0, 300) : "",
+          match: typeof item.match === "string" ? item.match.slice(0, 160) : ""
+        }))
       };
     }
   },
@@ -666,7 +702,7 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       return results;
     },
     summarize(result, cached, args) {
-      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown }>) : [];
+      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown; line?: unknown; column?: unknown; content?: unknown; match?: unknown }>) : [];
       return {
         regex: args.regex,
         path: args.path || "",
@@ -674,7 +710,14 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         caseSensitive: args.caseSensitive === true,
         cached,
         resultCount: results.length,
-        files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10)
+        files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10),
+        matches: results.slice(0, 20).map((item) => ({
+          filePath: item.filePath,
+          line: item.line,
+          column: item.column,
+          content: typeof item.content === "string" ? item.content.slice(0, 300) : "",
+          match: typeof item.match === "string" ? item.match.slice(0, 160) : ""
+        }))
       };
     }
   },
@@ -722,7 +765,8 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         totalLines: value.totalLines,
         hasMoreAfter: value.hasMoreAfter,
         nextStartLine: value.nextStartLine,
-        truncated: value.truncated
+        truncated: value.truncated,
+        content: value.content
       };
     }
   },
@@ -790,7 +834,8 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         hasMoreBefore: value.hasMoreBefore,
         hasMoreAfter: value.hasMoreAfter,
         nextStartLine: value.nextStartLine,
-        truncated: value.truncated
+        truncated: value.truncated,
+        content: value.content
       };
     }
   },
@@ -857,7 +902,8 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         totalLines: value.totalLines,
         hasMoreBefore: value.hasMoreBefore,
         hasMoreAfter: value.hasMoreAfter,
-        truncated: value.truncated
+        truncated: value.truncated,
+        content: value.content
       };
     }
   },
@@ -1224,6 +1270,12 @@ export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: Age
     };
 
     const result = cached ? cachedEntry.result : await definition.execute(args, perToolRuntime);
+    if (runtime.taskSessionId && toolCall.id && toolName !== "recoverContextArtifact") {
+      await storeContextArtifact({ taskSessionId: runtime.taskSessionId, toolCallId: toolCall.id, toolName, arguments: args, result }).catch((error) => {
+        // 恢复存储属于辅助能力，写入失败不能改变已成功的工具执行结果。
+        console.warn("[context-artifact] failed to persist tool result", error instanceof Error ? error.message : "unknown error");
+      });
+    }
     const summary = definition.summarize(result, cached, args);
 
     if (cacheable && !cached) {
