@@ -8,12 +8,14 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   await clearTaskMetricsForTest({ key: taskSessionId });
 
   const first = new RunMetricsTracker({ runId: "run-before-approval", taskSessionId, provider: "mock", model: "mock-v1", mode: "act" }, async () => {});
+  first.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8 });
   first.addUsage({ inputTokens: 10, outputTokens: 2, reasoningTokens: 1, cachedInputTokens: 0 });
   first.recordToolCall();
   first.recordContextEstimate(100, 80, true);
   await first.finish({ status: "awaiting_approval" });
 
   const resumed = new RunMetricsTracker({ runId: "run-after-approval", taskSessionId, provider: "mock", model: "mock-v1", mode: "act" }, async () => {});
+  resumed.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8 });
   resumed.addUsage({ inputTokens: 7, outputTokens: 3, reasoningTokens: 0, cachedInputTokens: 2 });
   resumed.recordToolCall({ failed: true });
   await resumed.finish({ status: "completed" });
@@ -28,6 +30,7 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   assert.equal(snapshot.tools.calls, 2);
   assert.equal(snapshot.tools.failedCalls, 1);
   assert.deepEqual(snapshot.usage, { inputTokens: 17, outputTokens: 5, reasoningTokens: 1, cachedInputTokens: 2 });
+  assert.equal(snapshot.estimatedCostUsd, 0.000074);
   assert.equal(snapshot.context.compressionCount, 1);
   assert.equal(snapshot.result.patchFileCount, 2);
   assert.equal(snapshot.result.validationCommandCount, 2);

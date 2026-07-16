@@ -65,6 +65,8 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
         chatMessages: resumed.messages,
         agentSteps: resumed.session.steps,
         agentMode: resumed.session.agentMode || current.agentMode,
+        // 恢复历史任务后，下一次继续执行优先沿用原模型，但不改写全局默认值。
+        taskModelOverride: resumed.session.modelSelection || null,
         currentTaskSessionId: resumed.session.id,
         selectedTaskSession: resumed.session,
         taskSessions: [resumed.session, ...current.taskSessions.filter((session) => session.id !== resumed.session.id)].sort((left, right) => right.createdAt - left.createdAt),
@@ -92,6 +94,7 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
       agentSteps: [],
       chatContextPaths: [],
       userRequest: "",
+      taskModelOverride: null,
       patch: null,
       autoFix: null,
       error: null
@@ -165,10 +168,12 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
     }
 
     const controller = new AbortController();
+    // 未设置临时覆盖时由服务端根据意图选择 Chat/Plan/Act 默认模型。
+    const taskModelSelection = state.taskModelOverride || undefined;
     streamAbortController.current = controller;
     clearPendingChatDeltaTimer();
     pendingChatDeltas.current = {};
-    setState((current) => ({ ...current, loading: true, streaming: true, error: null, patch: null, agentSteps: [], userRequest: replayFromMessageId ? current.userRequest : "" }));
+    setState((current) => ({ ...current, loading: true, streaming: true, error: null, patch: null, agentSteps: [], taskModelOverride: null, userRequest: replayFromMessageId ? current.userRequest : "" }));
 
     let streamTaskSessionId: string | null = null;
 
@@ -248,7 +253,8 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
         controller.signal,
         replayFromMessageId,
         state.selectedPath,
-        approvedTaskSessionId
+        approvedTaskSessionId,
+        taskModelSelection
       );
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {

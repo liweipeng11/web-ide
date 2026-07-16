@@ -319,6 +319,30 @@ export type TaskPlanApproval = {
 
 export type AgentMode = "plan" | "act";
 
+export type ModelSelection = { providerId: string; modelId: string };
+export type ModelSelectionDefaults = { chat: ModelSelection; plan: ModelSelection; act: ModelSelection };
+export type ModelDescriptor = {
+  id: string;
+  providerId: string;
+  displayName: string;
+  capabilities: {
+    contextWindowTokens: number;
+    maxOutputTokens: number;
+    toolCalling: boolean;
+    parallelToolCalling: boolean;
+    imageInput: boolean;
+    reasoningEffort: boolean;
+    promptCache: boolean;
+  };
+  price?: { inputPerMillionTokens?: number; outputPerMillionTokens?: number; cachedInputPerMillionTokens?: number; currency: "USD" };
+  recommendedFor?: string[];
+  disabledReason?: string;
+};
+export type ModelCatalogResponse = {
+  providers: Array<{ id: string; health: { configured: boolean; available: boolean; message?: string }; models: ModelDescriptor[] }>;
+  defaults: ModelSelectionDefaults;
+};
+
 export type TaskWorkflowType = "bugfix" | "feature" | "refactor" | "analysis-only";
 
 export type TaskWorkflowSnapshot = {
@@ -370,6 +394,9 @@ export type TaskSession = {
   id: string;
   userGoal: string;
   agentMode?: AgentMode;
+  modelSelection?: ModelSelection;
+  modelUsage?: { inputTokens: number; outputTokens: number; reasoningTokens: number; cachedInputTokens: number };
+  estimatedCostUsd?: number | null;
   workflow?: TaskWorkflowSnapshot;
   chatId?: string;
   messageIds?: string[];
@@ -602,7 +629,7 @@ export type PickWorkspaceResponse = WorkspaceResponse & {
 export type ServerCapabilities = {
   version: 1;
   features: Record<"contextBudgetV2" | "modelProviderGateway" | "lsp" | "inlineEdit", { enabled: boolean; available: boolean; active: boolean; path: "legacy" | "next" }>;
-  models: { selection: boolean; configured: boolean; defaultModel: string };
+  models: { selection: boolean; configured: boolean; defaultModel: string; catalogEndpoint?: string };
 };
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -634,6 +661,14 @@ export function fetchWorkspace() {
 // 前端只消费服务端裁决后的实际能力，不直接读取构建环境变量。
 export function fetchServerCapabilities() {
   return request<ServerCapabilities>("/api/capabilities");
+}
+
+export function fetchModelCatalog() {
+  return request<ModelCatalogResponse>("/api/models");
+}
+
+export function updateModelDefaults(defaults: ModelSelectionDefaults) {
+  return request<{ defaults: ModelSelectionDefaults }>("/api/models/defaults", { method: "PUT", body: JSON.stringify(defaults) });
 }
 
 export function openWorkspace(workspaceRoot: string) {
@@ -897,14 +932,14 @@ export function sendFileChatMessage(userRequest: string, paths: string[] = [], c
   });
 }
 
-export async function streamFileChatMessage(userRequest: string, paths: string[], chatId: string, agentMode: AgentMode, onEvent: (event: FileChatStreamEvent) => void, signal?: AbortSignal, replayFromMessageId?: string, path?: string | null, approvedTaskSessionId?: string) {
+export async function streamFileChatMessage(userRequest: string, paths: string[], chatId: string, agentMode: AgentMode, onEvent: (event: FileChatStreamEvent) => void, signal?: AbortSignal, replayFromMessageId?: string, path?: string | null, approvedTaskSessionId?: string, modelSelection?: ModelSelection) {
   const response = await fetch("/api/ai/file-chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     signal,
-    body: JSON.stringify({ chatId, path, paths, userRequest, replayFromMessageId, approvedTaskSessionId, agentMode })
+    body: JSON.stringify({ chatId, path, paths, userRequest, replayFromMessageId, approvedTaskSessionId, agentMode, modelSelection })
   });
 
   if (!response.ok || !response.body) {

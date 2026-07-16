@@ -1,5 +1,7 @@
 import { config } from "./config.js";
-import { createAiRunId, logAi, requestJsonChatCompletion } from "./aiHttp.js";
+import { createAiRunId, logAi } from "./aiHttp.js";
+import { requestJsonChatCompletion } from "./modelGatewayClient.js";
+import { getActiveModelId } from "./modelExecutionContext.js";
 import { AI_TASK_PLAN_REWRITE_SYSTEM_PROMPT, AI_TASK_PLAN_SYSTEM_PROMPT } from "./prompts.js";
 import { setTaskPlanItems, setTaskSessionWorkflow } from "./taskSessionStore.js";
 import { createTaskWorkflow, getTaskWorkflowSteps, type TaskWorkflowSnapshot, type TaskWorkflowType } from "./taskWorkflow/index.js";
@@ -197,7 +199,7 @@ export async function generateTaskPlan(userGoal: string, classification?: AgentR
   try {
     const projectMemoryPrompt = await getCurrentProjectMemoryPrompt();
     const data = await requestJsonChatCompletion({
-      model: config.aiModel,
+      model: getActiveModelId(config.aiModel),
       temperature: 0,
       messages: [
         { role: "system", content: [AI_TASK_PLAN_SYSTEM_PROMPT, projectMemoryPrompt].filter(Boolean).join("\n\n") },
@@ -299,7 +301,7 @@ export async function rewriteTaskPlanWithInstruction(session: TaskSession, instr
   try {
     const projectMemoryPrompt = await getCurrentProjectMemoryPrompt();
     const data = await requestJsonChatCompletion({
-      model: config.aiModel,
+      model: getActiveModelId(config.aiModel),
       temperature: 0,
       messages: [
         { role: "system", content: [AI_TASK_PLAN_REWRITE_SYSTEM_PROMPT, projectMemoryPrompt].filter(Boolean).join("\n\n") },

@@ -83,6 +83,27 @@ export function toOpenAiChatCompletionBody(request: ModelRequest) {
     temperature: request.temperature,
     messages: request.messages.map(toOpenAiMessage),
     tools: request.tools,
-    tool_choice: request.toolChoice
+    tool_choice: request.toolChoice,
+    response_format: request.responseFormat ? { type: request.responseFormat } : undefined
+  };
+}
+
+export function fromOpenAiChatCompletionBody(body: Record<string, unknown>): ModelRequest {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  return {
+    model: typeof body.model === "string" ? body.model : "",
+    temperature: typeof body.temperature === "number" ? body.temperature : undefined,
+    messages: messages.map((message) => {
+      const value = message as AgentMessage;
+      return {
+        role: value.role,
+        content: value.content,
+        toolCallId: value.tool_call_id,
+        toolCalls: value.tool_calls?.map(toModelToolCall)
+      };
+    }),
+    tools: Array.isArray(body.tools) ? body.tools : undefined,
+    toolChoice: body.tool_choice === "none" || body.tool_choice === "required" ? body.tool_choice : body.tool_choice ? "auto" : undefined,
+    responseFormat: (body.response_format as { type?: unknown } | undefined)?.type === "json_object" ? "json_object" : undefined
   };
 }

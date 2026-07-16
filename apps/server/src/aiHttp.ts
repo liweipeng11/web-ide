@@ -186,7 +186,7 @@ async function persistAiExchangeLog(entry: Omit<AiExchangeLog, "id" | "createdAt
   }
 }
 
-export async function requestChatCompletion(body: unknown) {
+export async function requestChatCompletion(body: unknown, signal?: AbortSignal) {
   let lastErrorText = "";
 
   for (const url of getChatCompletionUrls()) {
@@ -205,10 +205,12 @@ export async function requestChatCompletion(body: unknown) {
             Authorization: `Bearer ${config.aiApiKey}`,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
+          signal
         });
         break;
       } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw error;
         const message = formatFetchError(error);
         lastErrorText = message;
         logAi("http", "fetch.error", { url, attempt, error: message });
@@ -375,7 +377,24 @@ export async function requestChatCompletionWithToolChoiceFallback(body: Record<s
   }
 }
 
-export async function requestChatCompletionStream(body: unknown, onDelta: (delta: string) => void, signal?: AbortSignal) {
+export type OpenAiCompatibleStreamChunk = {
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      reasoning_content?: string;
+      tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>;
+    };
+    finish_reason?: string | null;
+  }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
+};
+
+export async function requestChatCompletionStream(body: unknown, onDelta: (delta: string) => void, signal?: AbortSignal, onChunk?: (chunk: OpenAiCompatibleStreamChunk) => void) {
   let lastErrorText = "";
 
   for (const url of getChatCompletionUrls()) {
@@ -482,7 +501,8 @@ export async function requestChatCompletionStream(body: unknown, onDelta: (delta
 
           if (!payload || payload === "[DONE]") continue;
 
-          const data = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+          const data = JSON.parse(payload) as OpenAiCompatibleStreamChunk;
+          onChunk?.(data);
           const delta = data.choices?.[0]?.delta?.content || "";
 
           if (delta) {

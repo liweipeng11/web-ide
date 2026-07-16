@@ -19,6 +19,7 @@ import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contract
 import { implementedFeatures } from "./featureFlags.js";
 import { getTaskSessionContextState, recordTaskSessionContextBudget } from "./taskSessionStore.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
+import { providerGateway } from "./providers/index.js";
 
 export type AgentRuntimeResult = {
   status: "completed" | "awaiting_approval" | "step_limit_reached";
@@ -55,6 +56,7 @@ export type AgentRuntimeOptions = {
   maxOutputTokens?: number;
   contextSafetyMarginTokens?: number;
   modelDescriptor?: ModelDescriptor;
+  signal?: AbortSignal;
   onContextBudget?: (event: { snapshot: ContextBudgetSnapshot; summary: StructuredContextSummary | null }) => void;
 };
 
@@ -358,12 +360,22 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const providerId = options.providerId || "openai-compatible";
   const modelId = options.modelId || config.aiModel;
   const completeModel = options.completeModel || (async (request: ModelRequest) => {
+    if (config.featureFlags.modelProviderGateway && implementedFeatures.modelProviderGateway) {
+      return providerGateway.complete(
+        { providerId, modelId },
+        { messages: request.messages, temperature: request.temperature, tools: request.tools, toolChoice: request.toolChoice },
+        options.signal
+      );
+    }
     const providerBody = toOpenAiChatCompletionBody(request);
     const response = options.requestCompletion
       ? await options.requestCompletion(providerBody)
       : await requestChatCompletion(providerBody) as AgentCompletionResponse;
     return "message" in response ? response : adaptOpenAiCompletionResponse(response);
   });
+  const selectedModelDescriptor = options.modelDescriptor || (config.featureFlags.modelProviderGateway && implementedFeatures.modelProviderGateway
+    ? await providerGateway.assertCompatible({ providerId, modelId }, mode === "act" ? "act" : "plan")
+    : undefined);
   const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);
   const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt());
   const messages: ModelMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
@@ -393,6 +405,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     },
     options.metricsRecorder
   );
+  metrics.setPrice(selectedModelDescriptor?.price);
 
   logAi(runId, "runtime.start", { userGoal: agentContext.userGoal, mode, maxSteps, tools: registry.definitions.map((tool) => tool.name) });
 
@@ -430,8 +443,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         filesModified: taskContextState.filesModified,
         unresolvedQuestions: taskContextState.unresolvedQuestions,
         options: {
-          contextWindowTokens: options.contextWindowTokens ?? options.modelDescriptor?.capabilities.contextWindowTokens ?? config.aiContextWindowTokens,
-          reservedOutputTokens: options.maxOutputTokens ?? options.modelDescriptor?.capabilities.maxOutputTokens ?? config.aiMaxOutputTokens,
+          contextWindowTokens: options.contextWindowTokens ?? selectedModelDescriptor?.capabilities.contextWindowTokens ?? config.aiContextWindowTokens,
+          reservedOutputTokens: options.maxOutputTokens ?? selectedModelDescriptor?.capabilities.maxOutputTokens ?? config.aiMaxOutputTokens,
           safetyMarginTokens: options.contextSafetyMarginTokens ?? config.aiContextSafetyMarginTokens
         }
       });

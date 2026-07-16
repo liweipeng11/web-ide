@@ -114,6 +114,13 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
     current.usage.outputTokens += metrics.usage.outputTokens;
     current.usage.reasoningTokens += metrics.usage.reasoningTokens;
     current.usage.cachedInputTokens += metrics.usage.cachedInputTokens;
+    // 本地验证没有模型费用，不能把已知的模型费用污染成“无法估算”。
+    if (!(metrics.scope === "validation_run" && metrics.estimatedCostUsd === null)) {
+      current.estimatedCostUsd = current.estimatedCostUsd === null || metrics.estimatedCostUsd === null
+        ? null
+        // 费用跨多次模型调用累加时统一保留 12 位小数，避免浮点尾差泄漏到 API。
+        : Math.round((current.estimatedCostUsd + metrics.estimatedCostUsd) * 1_000_000_000_000) / 1_000_000_000_000;
+    }
     current.tools.calls += metrics.tools.calls;
     current.tools.repeatedCalls += metrics.tools.repeatedCalls;
     current.tools.failedCalls += metrics.tools.failedCalls;

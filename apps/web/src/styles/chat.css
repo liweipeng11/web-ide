@@ -2,6 +2,110 @@
   position: relative;
 }
 
+.model-selector-bar {
+  align-items: center;
+  background: #f8fafc;
+  border-bottom: 1px solid #dbe3eb;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 6px 10px;
+}
+
+.model-selector-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.model-selector-field span {
+  color: #64748b;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.model-selector-field select {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  color: #334155;
+  font: inherit;
+  font-size: 10px;
+  min-width: 0;
+  padding: 3px 4px;
+}
+
+.active-model-usage {
+  background: #f8fafc;
+  border-bottom: 1px solid #dbe3eb;
+  color: #334155;
+  display: flex;
+  flex-direction: column;
+  font-size: 10px;
+  gap: 2px;
+  padding: 5px 10px;
+}
+
+.active-model-usage small {
+  color: #64748b;
+}
+
+.task-model-override {
+  background: #f8fafc;
+  border-bottom: 1px solid #dbe3eb;
+  padding: 6px 10px;
+}
+
+.task-model-override label {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.task-model-override label > span {
+  color: #475569;
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.task-model-override select {
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  flex: 1;
+  font: inherit;
+  font-size: 10px;
+  min-width: 0;
+  padding: 3px 4px;
+}
+
+.model-capability-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.model-capability-summary span {
+  background: #e2e8f0;
+  border-radius: 999px;
+  color: #475569;
+  font-size: 9px;
+  padding: 2px 6px;
+}
+
+.model-capability-summary .supported {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.model-capability-summary .unsupported {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
 .context-budget-status {
   background: #f8fafc;
   border-bottom: 1px solid #dbe3eb;

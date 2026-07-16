@@ -8,7 +8,7 @@ import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLife
 import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
-import { scheduleTaskMetricsFinalization } from "./observability/index.js";
+import { getTaskMetricsSnapshot, scheduleTaskMetricsFinalization } from "./observability/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { deleteStoredContextArtifacts } from "./contextBudget/artifactStore.js";
 
@@ -577,12 +577,13 @@ async function writeTaskSession(session: TaskSession) {
   await fs.writeFile(taskSessionPath(session.id), `${JSON.stringify(session, null, 2)}\n`, "utf8");
 }
 
-export async function createTaskSession(userGoal: string, options: { chatId?: string; messageIds?: string[]; agentMode?: AgentMode } = {}): Promise<TaskSession> {
+export async function createTaskSession(userGoal: string, options: { chatId?: string; messageIds?: string[]; agentMode?: AgentMode; modelSelection?: import("./contracts/model.js").ModelSelection } = {}): Promise<TaskSession> {
   const now = Date.now();
   const session: TaskSession = {
     id: `task-${now.toString(36)}-${crypto.randomUUID()}`,
     userGoal,
     agentMode: options.agentMode || "act",
+    modelSelection: options.modelSelection,
     chatId: options.chatId,
     messageIds: options.messageIds,
     status: "running",
@@ -1376,7 +1377,7 @@ export async function updateTaskSessionAgentMode(taskSessionId: string | null | 
 export async function updateTaskSessionStatus(taskSessionId: string | null | undefined, status: TaskSession["status"]) {
   if (!taskSessionId) return null;
 
-  const updated = await enqueueTaskSessionUpdate(taskSessionId, (session) => {
+  let updated = await enqueueTaskSessionUpdate(taskSessionId, (session) => {
     if (!["running", "awaiting_approval", "awaiting_user", "paused"].includes(session.status) && status === "cancelled") {
       return session;
     }
@@ -1389,7 +1390,17 @@ export async function updateTaskSessionStatus(taskSessionId: string | null | und
   });
 
   if (updated.status === "success" || updated.status === "failed" || updated.status === "cancelled") {
-    scheduleTaskMetricsFinalization(taskSessionId, updated.status === "success" ? "completed" : updated.status);
+    const finalMetricStatus = updated.status === "success" ? "completed" : updated.status;
+    const metrics = await getTaskMetricsSnapshot(taskSessionId);
+    if (metrics) {
+      updated = await enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+        ...session,
+        modelUsage: metrics.usage,
+        estimatedCostUsd: metrics.estimatedCostUsd ?? null,
+        updatedAt: Date.now()
+      }));
+    }
+    scheduleTaskMetricsFinalization(taskSessionId, finalMetricStatus);
   }
   return updated;
 }

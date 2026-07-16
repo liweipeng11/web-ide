@@ -5,6 +5,13 @@ export type ModelProviderConfig = {
   configured: boolean;
 };
 
+export type ModelPrice = {
+  inputPerMillionTokens?: number;
+  outputPerMillionTokens?: number;
+  cachedInputPerMillionTokens?: number;
+  currency: "USD";
+};
+
 export type ModelCapabilities = {
   contextWindowTokens: number;
   maxOutputTokens: number;
@@ -20,8 +27,20 @@ export type ModelDescriptor = {
   providerId: string;
   displayName: string;
   capabilities: ModelCapabilities;
+  price?: ModelPrice;
   recommendedFor?: string[];
   disabledReason?: string;
+};
+
+export type ModelSelection = {
+  providerId: string;
+  modelId: string;
+};
+
+export type ModelSelectionDefaults = {
+  chat: ModelSelection;
+  plan: ModelSelection;
+  act: ModelSelection;
 };
 
 export type ModelToolCall = {
@@ -47,6 +66,13 @@ export type ModelRequest = {
   temperature?: number;
   tools?: unknown[];
   toolChoice?: "auto" | "none" | "required";
+  responseFormat?: "json_object";
+};
+
+export type ProviderHealth = {
+  configured: boolean;
+  available: boolean;
+  message?: string;
 };
 
 export type ModelUsage = {

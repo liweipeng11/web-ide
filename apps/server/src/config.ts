@@ -19,6 +19,13 @@ function numberFromEnv(name: string, fallback: number) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function optionalNumberFromEnv(name: string) {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
 function booleanFromEnv(name: string, fallback: boolean) {
   const value = process.env[name];
 
@@ -43,10 +50,33 @@ function stringListFromEnv(name: string) {
   return [...new Set((process.env[name] || "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))];
 }
 
+function modelListFromEnv() {
+  const values = (process.env.AI_MODELS || "").split(",").map((value) => value.trim()).filter(Boolean);
+  const catalogValues = modelCatalogFromEnv().map((entry) => typeof entry.id === "string" ? entry.id.trim() : "").filter(Boolean);
+  const legacyModel = process.env.AI_MODEL || "gpt-4.1-mini";
+  return [...new Set([legacyModel, ...values, ...catalogValues])];
+}
+
+function modelCatalogFromEnv(): Array<Record<string, unknown>> {
+  const raw = process.env.AI_MODEL_CATALOG_JSON;
+  if (!raw?.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((value): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value))) : [];
+  } catch {
+    return [];
+  }
+}
+
 export const config = {
   aiApiKey: process.env.AI_API_KEY || "",
   aiBaseUrl: process.env.AI_BASE_URL || "https://api.openai.com/v1",
   aiModel: process.env.AI_MODEL || "gpt-4.1-mini",
+  aiModels: modelListFromEnv(),
+  aiModelCatalog: modelCatalogFromEnv(),
+  aiInputPricePerMillionTokens: optionalNumberFromEnv("AI_INPUT_PRICE_PER_MILLION_TOKENS"),
+  aiOutputPricePerMillionTokens: optionalNumberFromEnv("AI_OUTPUT_PRICE_PER_MILLION_TOKENS"),
+  aiCachedInputPricePerMillionTokens: optionalNumberFromEnv("AI_CACHED_INPUT_PRICE_PER_MILLION_TOKENS"),
   aiChatTemperature: numberFromEnv("AI_CHAT_TEMPERATURE", 0.3),
   aiEditTemperature: numberFromEnv("AI_EDIT_TEMPERATURE", 0),
   aiFullIoLogging: booleanFromEnv("AI_FULL_IO_LOGGING", false),

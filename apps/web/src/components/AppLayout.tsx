@@ -1,5 +1,5 @@
 import type { Dispatch, PointerEvent, SetStateAction } from "react";
-import type { AgentMode, AgentStep, CommandResult, FileTreeNode, TaskPlanItemStatus } from "../api";
+import type { AgentMode, AgentStep, CommandResult, FileTreeNode, ModelSelection, TaskPlanItemStatus } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
 import type { WorkbenchLeftPanel } from "../hooks/useWorkbenchLayout";
@@ -52,6 +52,7 @@ type Props = {
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
   onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
+  onUpdateModelSelection: (target: "chat" | "plan" | "act", selection: ModelSelection) => Promise<void>;
   onNewChat: () => void;
   onDeleteChatHistory: (path: string) => Promise<void>;
   onStopChat: () => void;
@@ -105,6 +106,7 @@ export default function AppLayout({
   onApprovePlan,
   onInterruptTaskForReplan,
   onUpdateAgentMode,
+  onUpdateModelSelection,
   onNewChat,
   onDeleteChatHistory,
   onStopChat,
@@ -268,6 +270,9 @@ export default function AppLayout({
             <ChatPanel
               value={state.userRequest}
               agentMode={state.agentMode}
+              modelCatalog={state.modelCatalog}
+              modelDefaults={state.modelDefaults}
+              taskModelOverride={state.taskModelOverride}
               chatId={state.chatId}
               messages={state.chatMessages}
               agentSteps={state.agentSteps}
@@ -294,6 +299,8 @@ export default function AppLayout({
               onApprovePlan={onApprovePlan}
               onInterruptTaskForReplan={onInterruptTaskForReplan}
               onUpdateAgentMode={onUpdateAgentMode}
+              onUpdateModelSelection={onUpdateModelSelection}
+              onTaskModelOverrideChange={(selection) => setState((current) => ({ ...current, taskModelOverride: selection }))}
               onRollbackCheckpoint={(checkpointId) => void onRollbackCheckpoint(checkpointId)}
               onNewChat={onNewChat}
               onDeleteHistory={(path) => void onDeleteChatHistory(path)}

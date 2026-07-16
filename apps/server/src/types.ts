@@ -165,6 +165,7 @@ export type FileChatRequest = {
   replayFromMessageId?: string;
   approvedTaskSessionId?: string;
   agentMode?: AgentMode;
+  modelSelection?: import("./contracts/model.js").ModelSelection;
 };
 
 export type FileChatResponse = {
@@ -356,6 +357,10 @@ export type TaskSession = {
   id: string;
   userGoal: string;
   agentMode?: AgentMode;
+  // 记录任务实际使用的 Provider/模型，恢复时优先复用且不静默换型。
+  modelSelection?: import("./contracts/model.js").ModelSelection;
+  modelUsage?: import("./contracts/model.js").ModelUsage;
+  estimatedCostUsd?: number | null;
   // 保存任务开始时选中的流程，供计划生成、历史回放和界面解释共同使用。
   workflow?: import("./taskWorkflow/index.js").TaskWorkflowSnapshot;
   chatId?: string;

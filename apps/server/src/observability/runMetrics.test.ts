@@ -13,6 +13,7 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
   const filePath = path.join(directory, "metrics.jsonl");
   try {
     const tracker = new RunMetricsTracker({ runId: "run-1", taskSessionId: "task-1", provider: "mock", model: "mock-model", mode: "act" }, (metrics) => appendRunMetrics(metrics, filePath), false);
+    tracker.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8, cachedInputPerMillionTokens: 1 });
     tracker.addUsage({ inputTokens: 10, outputTokens: 2, reasoningTokens: 1, cachedInputTokens: 4 });
     tracker.recordFirstTokenLatency(25, "provider");
     tracker.recordToolCall();
@@ -23,6 +24,7 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
 
     assert.deepEqual(metrics.tools, { calls: 2, repeatedCalls: 1, failedCalls: 1 });
     assert.equal(metrics.usage.cachedInputTokens, 4);
+    assert.equal(metrics.estimatedCostUsd, 0.000032);
     assert.equal(metrics.result.patchFileCount, 2);
     assert.equal(metrics.firstTokenLatencyMs, 25);
     assert.equal(metrics.firstTokenLatencySource, "provider");

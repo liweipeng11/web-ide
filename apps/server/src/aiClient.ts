@@ -1,14 +1,13 @@
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
+import { createAiRunId, logAi } from "./aiHttp.js";
 import {
-  createAiRunId,
-  logAi,
   requestChatCompletion,
   requestChatCompletionStream,
   requestChatCompletionWithToolChoiceFallback,
   requestJsonChatCompletion,
   requestJsonChatCompletionWithToolChoiceFallback
-} from "./aiHttp.js";
+} from "./modelGatewayClient.js";
 import { buildUserPrompt, AI_AGENT_INTENT_SYSTEM_PROMPT, AI_FILE_CHAT_SYSTEM_PROMPT, AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, AI_SEARCH_KEYWORDS_SYSTEM_PROMPT, AI_SYSTEM_PROMPT } from "./prompts.js";
 import { discoverProjectCommands } from "./commandDiscovery.js";
 import { formatCommandFailureForPrompt, getLastFailedCommandResultForChat } from "./commandResults.js";
@@ -23,6 +22,7 @@ import { getWorkspaceRoot } from "./workspaceStore.js";
 import { agentToolSchemas, createAgentToolRuntime, executeAgentToolCall, type AgentContext, type AgentToolCall } from "./agentTools.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import { getCurrentProjectMemoryPrompt } from "./projectMemory/index.js";
+import { getActiveModelId } from "./modelExecutionContext.js";
 
 type ChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
@@ -172,7 +172,7 @@ export async function classifyAgentRequest(history: FileChatMessage[], userReque
 
   try {
     const data = await requestJsonChatCompletion({
-      model: config.aiModel,
+      model: getActiveModelId(config.aiModel),
       temperature: 0,
       messages: [
         { role: "system", content: AI_AGENT_INTENT_SYSTEM_PROMPT },
@@ -507,7 +507,7 @@ async function generateSearchKeywords(userRequest: string, filePath: string | nu
 
   try {
     const data = await requestJsonChatCompletion({
-      model: config.aiModel,
+      model: getActiveModelId(config.aiModel),
       temperature: 0,
       messages: [
         { role: "system", content: AI_SEARCH_KEYWORDS_SYSTEM_PROMPT },
@@ -798,7 +798,7 @@ function attachEditScope(result: AiEditResult, agentContext: AgentContext, selec
 }
 
 
-async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentContext, onAgentStep: ((step: AgentStep) => void) | undefined, deferFinalAnswer: boolean): Promise<FileChatToolLoopResult> {
+async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentContext, onAgentStep: ((step: AgentStep) => void) | undefined, deferFinalAnswer: boolean, modelId = config.aiModel): Promise<FileChatToolLoopResult> {
   const runId = createAiRunId("chat");
   const startedAt = Date.now();
   const toolMessages = [...messages];
@@ -808,7 +808,7 @@ async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentC
   for (let step = 0; step < MAX_FILE_CHAT_TOOL_STEPS; step += 1) {
     logAi(runId, "completion.request", { step, messageCount: toolMessages.length, tools: true });
     const completionBody = {
-      model: config.aiModel,
+      model: modelId,
       temperature: config.aiChatTemperature,
       messages: toolMessages,
       tools: agentToolSchemas,
@@ -868,7 +868,7 @@ async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentC
   }
 
   const data = await requestChatCompletion({
-    model: config.aiModel,
+    model: modelId,
     temperature: config.aiChatTemperature,
     messages: toolMessages
   });
@@ -881,12 +881,12 @@ async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentC
   };
 }
 
-async function generateFileChatAssistantContent(messages: ChatMessage[], agentContext: AgentContext, onAgentStep?: (step: AgentStep) => void) {
-  const result = await runFileChatToolLoop(messages, agentContext, onAgentStep, false);
+async function generateFileChatAssistantContent(messages: ChatMessage[], agentContext: AgentContext, onAgentStep?: (step: AgentStep) => void, modelId = config.aiModel) {
+  const result = await runFileChatToolLoop(messages, agentContext, onAgentStep, false, modelId);
   return result.finalContent || "";
 }
 
-async function streamFileChatFinalAnswer(messages: ChatMessage[], onDelta: (delta: string) => void, signal?: AbortSignal) {
+async function streamFileChatFinalAnswer(messages: ChatMessage[], onDelta: (delta: string) => void, signal?: AbortSignal, modelId = config.aiModel) {
   const finalMessages: ChatMessage[] = [
     ...messages,
     {
@@ -898,7 +898,7 @@ async function streamFileChatFinalAnswer(messages: ChatMessage[], onDelta: (delt
   try {
     return await requestChatCompletionStream(
       {
-        model: config.aiModel,
+        model: modelId,
         temperature: config.aiChatTemperature,
         messages: finalMessages,
         stream: true
@@ -913,7 +913,7 @@ async function streamFileChatFinalAnswer(messages: ChatMessage[], onDelta: (delt
 
     logAi("chat-stream", "fallback.nonStreamFinal", { status: error.status, error: error.message });
     const data = await requestChatCompletion({
-      model: config.aiModel,
+      model: modelId,
       temperature: config.aiChatTemperature,
       messages: finalMessages
     });
@@ -1212,7 +1212,7 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
 
     logAi(runId, "edit.parse.repair.start", { rawPreview: rawContent });
     const repairResponse = await requestJsonChatCompletion({
-      model: config.aiModel,
+      model: getActiveModelId(config.aiModel),
       temperature: config.aiEditTemperature,
       messages: [
         {
@@ -1363,7 +1363,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
     const forceInitialSearch = false;
     logAi(runId, "completion.request", { step, messageCount: toolMessages.length, tools: true, forceInitialSearch });
     const completionBody = {
-      model: config.aiModel,
+      model: getActiveModelId(config.aiModel),
       temperature: config.aiEditTemperature,
       messages: toolMessages,
       tools: agentToolSchemas,
@@ -1485,7 +1485,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
   });
 
   const data = await requestJsonChatCompletion({
-    model: config.aiModel,
+    model: getActiveModelId(config.aiModel),
     temperature: config.aiEditTemperature,
     messages: toolMessages
   });
@@ -1532,7 +1532,7 @@ export async function generateAiEdit(filePath: string | null, content: string, u
 
   logAi(runId, "completion.request", { messageCount: 2, tools: false });
   const data = await requestJsonChatCompletion({
-    model: config.aiModel,
+    model: getActiveModelId(config.aiModel),
     temperature: config.aiEditTemperature,
     messages: [
       { role: "system", content: [AI_SYSTEM_PROMPT, projectMemoryPrompt].filter(Boolean).join("\n\n") },
@@ -1577,7 +1577,7 @@ export async function generateAiEdit(filePath: string | null, content: string, u
   };
 }
 
-export async function generateFileChatReply(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string, onAgentStep?: (step: AgentStep) => void) {
+export async function generateFileChatReply(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string, onAgentStep?: (step: AgentStep) => void, modelId = config.aiModel) {
   if (!config.aiApiKey) {
     return [
       `Received: ${userRequest}`,
@@ -1625,7 +1625,7 @@ export async function generateFileChatReply(contextFiles: ChatContextFile[], his
     },
     ...recentHistory,
     { role: "user", content: userRequest }
-  ], agentContext, onAgentStep);
+  ], agentContext, onAgentStep, modelId);
 }
 
 async function buildFileChatMessages(contextFiles: ChatContextFile[], history: FileChatMessage[], userRequest: string, chatId?: string): Promise<ChatMessage[]> {
@@ -1670,7 +1670,8 @@ export async function streamFileChatReply(
   onDelta: (delta: string) => void,
   signal?: AbortSignal,
   chatId?: string,
-  onAgentStep?: (step: AgentStep) => void
+  onAgentStep?: (step: AgentStep) => void,
+  modelId = config.aiModel
 ) {
   if (!config.aiApiKey) {
     const text = [
@@ -1693,7 +1694,7 @@ export async function streamFileChatReply(
     searchResultFiles: [],
     relevantFiles: contextFiles.map((file) => file.path)
   };
-  const toolLoop = await runFileChatToolLoop(await buildFileChatMessages(contextFiles, history, userRequest, chatId), agentContext, onAgentStep, true);
+  const toolLoop = await runFileChatToolLoop(await buildFileChatMessages(contextFiles, history, userRequest, chatId), agentContext, onAgentStep, true, modelId);
 
   if (toolLoop.finalContent !== null) {
     if (!signal?.aborted && toolLoop.finalContent) {
@@ -1703,5 +1704,5 @@ export async function streamFileChatReply(
     return signal?.aborted ? "" : toolLoop.finalContent;
   }
 
-  return streamFileChatFinalAnswer(toolLoop.messages, onDelta, signal);
+  return streamFileChatFinalAnswer(toolLoop.messages, onDelta, signal, modelId);
 }

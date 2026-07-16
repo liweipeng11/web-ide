@@ -7,9 +7,10 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
+import { RunMetricsTracker } from "./observability/index.js";
 
 async function createIsolatedTaskSession(userGoal = "实现任务计划器") {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-plan-"));
@@ -44,6 +45,31 @@ test("adds, updates, and deletes task plan items", async () => {
 
   const removed = await deleteTaskPlanItem(session.id, planItemId);
   assert.deepEqual(removed?.planItems, []);
+});
+
+test("任务会话持久化实际 Provider 和模型选择", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-model-"));
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  try {
+    const modelSelection = { providerId: "openai-compatible", modelId: "task-specific-model" };
+    const session = await createTaskSession("使用指定模型", { agentMode: "plan", modelSelection });
+    const loaded = await getTaskSession(session.id);
+    assert.deepEqual(loaded.modelSelection, modelSelection);
+    assert.equal(loaded.agentMode, "plan");
+  } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
+});
+
+test("任务完成时把模型 Usage 和费用写入会话", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("记录模型用量");
+  try {
+    const tracker = new RunMetricsTracker({ runId: "task-session-usage", taskSessionId: session.id, provider: "mock", model: "priced-model", mode: "chat" }, async () => {});
+    tracker.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8 });
+    tracker.addUsage({ inputTokens: 10, outputTokens: 2, reasoningTokens: 0, cachedInputTokens: 0 });
+    await tracker.finish({ status: "completed" });
+    const completed = await updateTaskSessionStatus(session.id, "success");
+    assert.deepEqual(completed?.modelUsage, { inputTokens: 10, outputTokens: 2, reasoningTokens: 0, cachedInputTokens: 0 });
+    assert.equal(completed?.estimatedCostUsd, 0.000036);
+  } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
 });
 
 test("rejects empty task plan item titles", async () => {

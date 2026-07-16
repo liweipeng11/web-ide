@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "pretest": "pnpm test:context-budget && pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow && pnpm test:external-context",
+    "pretest": "pnpm test:providers && pnpm test:context-budget && pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow && pnpm test:external-context",
+    "test:providers": "tsx --test src/providers/providerGateway.test.ts src/providers/openAiCompatibleProvider.test.ts src/modelGatewayClient.test.ts src/modelSelectionStore.test.ts src/modelRoutes.test.ts",
     "test:context-budget": "tsx --test src/contextBudget/contextBudgetManager.test.ts src/contextBudget/contextBudgetIntegration.test.ts",
     "test:symbol-graph": "tsx --test src/symbolGraph/symbolGraph.test.ts",
     "test:impact-analyzer": "tsx --test src/impactAnalyzer/impactAnalyzer.test.ts",

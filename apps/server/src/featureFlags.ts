@@ -33,6 +33,7 @@ export type ServerCapabilities = {
     selection: boolean;
     configured: boolean;
     defaultModel: string;
+    catalogEndpoint?: string;
   };
 };
 
@@ -58,7 +59,8 @@ export function createServerCapabilities(input: { flags: FeatureFlags; implement
     models: {
       selection: features.modelProviderGateway.active,
       configured: input.aiConfigured,
-      defaultModel: input.defaultModel
+      defaultModel: input.defaultModel,
+      catalogEndpoint: features.modelProviderGateway.active ? "/api/models" : undefined
     }
   };
 }
@@ -66,7 +68,7 @@ export function createServerCapabilities(input: { flags: FeatureFlags; implement
 // 只有已完成并通过回退测试的能力才标记可用，避免 Capability 提前误报。
 export const implementedFeatures: FeatureImplementations = {
   contextBudgetV2: true,
-  modelProviderGateway: false,
+  modelProviderGateway: true,
   lsp: false,
   inlineEdit: false
 };

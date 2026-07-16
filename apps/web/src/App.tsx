@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { decideApprovalRequest, type AgentStep, type FileTreeNode } from "./api";
+import { useEffect, useState } from "react";
+import { decideApprovalRequest, fetchModelCatalog, updateModelDefaults, type AgentStep, type FileTreeNode, type ModelSelection } from "./api";
 import { initialState, type AppState } from "./appState";
 import AppLayout from "./components/AppLayout";
 import { useChatSession } from "./hooks/useChatSession";
@@ -30,6 +30,26 @@ export default function App() {
     setFiles,
     refreshTaskSessions: taskSessions.refreshTaskSessions
   });
+
+  useEffect(() => {
+    let active = true;
+    fetchModelCatalog()
+      .then((catalog) => active && setState((current) => ({ ...current, modelCatalog: catalog, modelDefaults: catalog.defaults })))
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  async function handleUpdateModelSelection(target: "chat" | "plan" | "act", selection: ModelSelection) {
+    if (!state.modelDefaults) return;
+    const nextDefaults = { ...state.modelDefaults, [target]: selection };
+    setState((current) => ({ ...current, modelDefaults: nextDefaults, error: null }));
+    try {
+      const result = await updateModelDefaults(nextDefaults);
+      setState((current) => ({ ...current, modelDefaults: result.defaults }));
+    } catch (error) {
+      setState((current) => ({ ...current, modelDefaults: state.modelDefaults, error: error instanceof Error ? error.message : "模型选择保存失败" }));
+    }
+  }
 
   async function handleApprovePlan(taskSessionId: string) {
     const session = await taskSessions.handleApprovePlan(taskSessionId);
@@ -143,6 +163,7 @@ export default function App() {
       onApprovePlan={handleApprovePlan}
       onInterruptTaskForReplan={handleInterruptTaskForReplan}
       onUpdateAgentMode={taskSessions.handleUpdateAgentMode}
+      onUpdateModelSelection={handleUpdateModelSelection}
       onNewChat={chatSession.handleNewChat}
       onDeleteChatHistory={chatSession.handleDeleteChatHistory}
       onStopChat={chatSession.handleStopChat}

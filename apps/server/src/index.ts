@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { createServer } from "node:http";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
-import { buildContextualEditRequest, classifyAgentRequest, ensureEditableAgentRequestClassification, generateFileChatReply, shouldGeneratePatchForIntent, streamFileChatReply, type AgentStep } from "./aiClient.js";
+import { buildContextualEditRequest, classifyAgentRequest, ensureEditableAgentRequestClassification, generateFileChatReply, inferAgentRequestClassification, shouldGeneratePatchForIntent, streamFileChatReply, type AgentStep } from "./aiClient.js";
 import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime.js";
 import { normalizeAgentMode } from "./agentModes.js";
 import { appendFileChatMessage, appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, ensureFileChatMessages, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
@@ -31,6 +31,10 @@ import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
 import { createProjectMemoryRouter } from "./projectMemory/index.js";
 import { createCapabilityRouter } from "./capabilityRoutes.js";
+import { createModelRouter } from "./modelRoutes.js";
+import { resolveModelSelection } from "./modelSelectionStore.js";
+import { ProviderError } from "./providers/index.js";
+import { withModelExecution } from "./modelExecutionContext.js";
 
 const app = express();
 const server = createServer(app);
@@ -42,8 +46,18 @@ async function classifyDirectEditRequest(userRequest: string) {
   return ensureEditableAgentRequestClassification(await classifyAgentRequest([], userRequest));
 }
 
+function runWithTaskModel<T>(taskSessionId: string, mode: "chat" | "plan" | "act", selection: import("./contracts/model.js").ModelSelection, callback: () => T) {
+  return withModelExecution({ selection, taskSessionId, mode }, callback);
+}
+
+function selectInitialModelMode(userRequest: string, requestedMode: "plan" | "act"): "chat" | "plan" | "act" {
+  if (requestedMode === "plan") return "plan";
+  return shouldGeneratePatchForIntent(inferAgentRequestClassification(userRequest).intent) ? "act" : "chat";
+}
+
 app.use(express.json({ limit: "5mb" }));
 app.use("/api", createCapabilityRouter({ flags: config.featureFlags }));
+if (config.featureFlags.modelProviderGateway) app.use("/api", createModelRouter());
 app.use("/api", createSearchRouter());
 app.use("/api/git-workflow", createGitWorkflowRouter());
 app.use("/api/vue2-template", createVue2TemplateRouter());
@@ -87,6 +101,13 @@ function requireChatKey(requestBody?: Partial<FileChatRequest>, query?: Request[
   }
 
   return chatKey;
+}
+
+async function resolveRequestModel(requestBody: Partial<FileChatRequest>, mode: "chat" | "plan" | "act") {
+  if (!config.featureFlags.modelProviderGateway) {
+    return { providerId: "openai-compatible", modelId: config.aiModel };
+  }
+  return resolveModelSelection(mode, requestBody.modelSelection);
 }
 
 // 统一校验计划状态，避免接口写入前端无法识别的状态值。
@@ -356,9 +377,10 @@ app.post(
       throw new HttpError(400, "userRequest is required");
     }
 
-    const taskSession = await createTaskSession(userRequest.trim());
-    const classification = await classifyDirectEditRequest(userRequest.trim());
-    const plannedTaskSession = await initializeTaskPlan(taskSession, classification, { forceApproval: true });
+    const modelSelection = await resolveRequestModel({}, "act");
+    const taskSession = await createTaskSession(userRequest.trim(), { agentMode: "act", modelSelection });
+    const classification = await runWithTaskModel(taskSession.id, "act", modelSelection, () => classifyDirectEditRequest(userRequest.trim()));
+    const plannedTaskSession = await runWithTaskModel(taskSession.id, "act", modelSelection, () => initializeTaskPlan(taskSession, classification, { forceApproval: true }));
 
     if (plannedTaskSession?.planApproval?.status === "pending") {
       response.status(202).json({
@@ -377,7 +399,7 @@ app.post(
     };
 
     try {
-      const patchResponse = await createEditPatchResponse(filePath, userRequest, pushAgentStep, taskSession.id);
+      const patchResponse = await runWithTaskModel(taskSession.id, "act", modelSelection, () => createEditPatchResponse(filePath, userRequest, pushAgentStep, taskSession.id));
       await advanceTaskPlanProgress(taskSession.id, "patch_generated");
       await Promise.all(taskStepWrites);
       response.json({
@@ -421,10 +443,11 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
       throw new HttpError(400, "userRequest is required");
     }
 
-    const taskSession = await createTaskSession(userRequest.trim());
+    const modelSelection = await resolveRequestModel({}, "act");
+    const taskSession = await createTaskSession(userRequest.trim(), { agentMode: "act", modelSelection });
     taskSessionId = taskSession.id;
-    const classification = await classifyDirectEditRequest(userRequest.trim());
-    const plannedTaskSession = await initializeTaskPlan(taskSession, classification, { forceApproval: true });
+    const classification = await runWithTaskModel(taskSession.id, "act", modelSelection, () => classifyDirectEditRequest(userRequest.trim()));
+    const plannedTaskSession = await runWithTaskModel(taskSession.id, "act", modelSelection, () => initializeTaskPlan(taskSession, classification, { forceApproval: true }));
 
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -460,9 +483,9 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
       content: filePath ? `准备编辑：${filePath}` : "准备处理工作区编辑请求"
     });
 
-    const patchResponse = await createEditPatchResponse(filePath, userRequest, (step) => {
+    const patchResponse = await runWithTaskModel(taskSession.id, "act", modelSelection, () => createEditPatchResponse(filePath, userRequest, (step) => {
       pushAgentStep(step);
-    }, taskSession.id);
+    }, taskSession.id));
     const progressedTaskSession = await advanceTaskPlanProgress(taskSession.id, "patch_generated");
 
     pushAgentStep({
@@ -602,7 +625,8 @@ app.post(
     }
 
     const session = await getTaskSession(taskSessionId);
-    response.json({ session: await rewriteTaskPlanWithInstruction(session, instruction.trim()) });
+    const selection = await resolveModelSelection(session.agentMode === "plan" ? "plan" : "act", session.modelSelection);
+    response.json({ session: await runWithTaskModel(session.id, session.agentMode === "plan" ? "plan" : "act", selection, () => rewriteTaskPlanWithInstruction(session, instruction.trim())) });
   })
 );
 
@@ -659,6 +683,8 @@ app.post(
       userRequest: sessionBeforeDecision.userGoal,
       mode: sessionBeforeDecision.agentMode || "act",
       workflow: sessionBeforeDecision.workflow,
+      providerId: sessionBeforeDecision.modelSelection?.providerId,
+      modelId: sessionBeforeDecision.modelSelection?.modelId,
       persistedMessages: sessionBeforeDecision.agentMessages || [],
       pendingToolCall,
       decision,
@@ -757,15 +783,17 @@ app.post(
     }
 
     const requestedAgentMode = normalizeAgentMode((request.body as Partial<FileChatRequest>).agentMode);
-    const taskSession = await createTaskSession(userRequest.trim(), { chatId: chatKey, agentMode: requestedAgentMode });
+    const initialModelMode = selectInitialModelMode(userRequest.trim(), requestedAgentMode);
+    const modelSelection = await resolveRequestModel(request.body as Partial<FileChatRequest>, initialModelMode);
+    const taskSession = await createTaskSession(userRequest.trim(), { chatId: chatKey, agentMode: requestedAgentMode, modelSelection });
 
     try {
       const contextPaths = getRequestedContextPaths(request.body as Partial<FileChatRequest>);
       const contextFiles = await readChatContextFiles(contextPaths);
       await addTaskSessionFilesRead(taskSession.id, contextFiles.map((file) => file.path));
       const history = await getFileChatMessages(chatKey);
-      const classification = await classifyAgentRequest(history, userRequest.trim());
-      const plannedTaskSession = await initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length });
+      const classification = await runWithTaskModel(taskSession.id, initialModelMode, modelSelection, () => classifyAgentRequest(history, userRequest.trim()));
+      const plannedTaskSession = await runWithTaskModel(taskSession.id, initialModelMode, modelSelection, () => initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length }));
 
       if (plannedTaskSession?.planApproval?.status === "pending") {
         const answer = "已根据你的需求生成执行计划，请批准后再开始修改代码。";
@@ -774,9 +802,9 @@ app.post(
         return;
       }
       const taskStepWrites: Promise<unknown>[] = [];
-      const answer = await generateFileChatReply(contextFiles, history, userRequest.trim(), chatKey, (step) => {
+      const answer = await runWithTaskModel(taskSession.id, initialModelMode, modelSelection, () => generateFileChatReply(contextFiles, history, userRequest.trim(), chatKey, (step) => {
         taskStepWrites.push(appendTaskSessionStep(taskSession.id, step));
-      });
+      }, modelSelection.modelId));
       const messages = await appendFileChatTurn(chatKey, userRequest.trim(), answer);
       await Promise.all(taskStepWrites);
       await advanceTaskPlanProgress(taskSession.id, "validation_success");
@@ -826,12 +854,18 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       throw new HttpError(400, "userRequest is required");
     }
 
+    const initialModelMode = selectInitialModelMode(userRequest.trim(), requestedAgentMode);
+    const requestedModelSelection = approvedTaskSessionId ? null : await resolveRequestModel(request.body as Partial<FileChatRequest>, initialModelMode);
     const taskSession =
       approvedTaskSessionId
         ? await approveTaskSessionPlan(approvedTaskSessionId)
             .then((session) => session || getTaskSession(approvedTaskSessionId))
             .then((session) => updateTaskSessionChatId(session.id, chatKey).then((updated) => updated || session))
-        : await createTaskSession(userRequest.trim(), { chatId: chatKey, agentMode: requestedAgentMode });
+        : await createTaskSession(userRequest.trim(), { chatId: chatKey, agentMode: requestedAgentMode, modelSelection: requestedModelSelection || undefined });
+    const modelSelection = await resolveModelSelection(
+      taskSession.modelSelection ? (taskSession.agentMode === "plan" ? "plan" : initialModelMode) : initialModelMode,
+      taskSession.modelSelection || requestedModelSelection
+    );
     taskSessionId = taskSession.id;
     const contextPaths = getRequestedContextPaths(request.body as Partial<FileChatRequest>);
     const contextFiles = await readChatContextFiles(contextPaths);
@@ -857,14 +891,15 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       sendEvent("agent_step", { step });
     };
 
-    const classification = await classifyAgentRequest(turn.history, userRequest.trim());
+    const executionMode = taskSession.agentMode === "plan" ? "plan" : "act";
+    const classification = await runWithTaskModel(taskSession.id, executionMode, modelSelection, () => classifyAgentRequest(turn.history, userRequest.trim()));
     const plannedTaskSession = approvedTaskSessionId
       ? taskSession
-      : await initializeTaskPlan(taskSession, classification, {
+      : await runWithTaskModel(taskSession.id, executionMode, modelSelection, () => initializeTaskPlan(taskSession, classification, {
           contextFileCount: contextPaths.length,
           selectedPath,
           forceApproval: requestedAgentMode === "plan" ? false : undefined
-        });
+        }));
     sendEvent("task_session", { session: plannedTaskSession || taskSession });
     pushAgentStep(
       createAgentStep({
@@ -899,6 +934,9 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         taskSessionId: taskSession.id,
         userRequest: userRequest.trim(),
         mode: "plan",
+        providerId: modelSelection.providerId,
+        modelId: modelSelection.modelId,
+        signal: controller.signal,
         workflow: plannedTaskSession?.workflow || taskSession.workflow,
         onAgentStep: pushAgentStep,
         onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
@@ -943,6 +981,9 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         taskSessionId: taskSession.id,
         userRequest: editRequest,
         mode: "act",
+        providerId: modelSelection.providerId,
+        modelId: modelSelection.modelId,
+        signal: controller.signal,
         workflow: plannedTaskSession?.workflow || taskSession.workflow,
         onAgentStep: pushAgentStep,
         onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
@@ -971,15 +1012,16 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
 
     }
 
-    const answer = await streamFileChatReply(
+    const answer = await runWithTaskModel(taskSession.id, "chat", modelSelection, () => streamFileChatReply(
       contextFiles,
       turn.history,
       userRequest.trim(),
       (delta) => sendEvent("delta", { id: turn.assistantMessage.id, delta }),
       controller.signal,
       chatKey,
-      pushAgentStep
-    );
+      pushAgentStep,
+      modelSelection.modelId
+    ));
     const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
 
     completed = true;
@@ -1169,7 +1211,10 @@ app.post(
 );
 
 app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
-  const status = error instanceof HttpError ? error.status : 500;
+  const providerStatus = error instanceof ProviderError
+    ? error.status || (error.code === "authentication" ? 401 : error.code === "rate_limit" ? 429 : error.code === "unavailable" || error.code === "timeout" ? 503 : error.code === "cancelled" ? 499 : 400)
+    : undefined;
+  const status = error instanceof HttpError ? error.status : providerStatus || 500;
   const message = error instanceof Error ? error.message : "Internal server error";
 
   console.error(message);

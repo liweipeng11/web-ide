@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { appStatePath } from "../statePaths.js";
-import type { ModelUsage } from "../contracts/model.js";
+import type { ModelPrice, ModelUsage } from "../contracts/model.js";
 
 export type RunFailureCategory = "none" | "timeout" | "model_error" | "tool_error" | "validation_failure" | "cancelled" | "step_limit" | "internal_error";
 export type RunFinalStatus = "completed" | "awaiting_approval" | "failed" | "cancelled" | "step_limit_reached";
@@ -20,6 +20,8 @@ export type RunMetrics = {
   firstTokenLatencyMs: number | null;
   firstTokenLatencySource: "provider" | "completion_upper_bound" | "unavailable";
   usage: ModelUsage;
+  // 价格未知时保持 null，禁止用 0 伪装成免费。
+  estimatedCostUsd: number | null;
   tools: { calls: number; repeatedCalls: number; failedCalls: number };
   context: { compressionCount: number; estimatedTokensBefore: number | null; estimatedTokensAfter: number | null; estimator: "conservative" | "unavailable" };
   result: {
@@ -62,6 +64,7 @@ export class RunMetricsTracker {
   private firstTokenLatencyMs: number | null = null;
   private firstTokenLatencySource: RunMetrics["firstTokenLatencySource"] = "unavailable";
   private context: RunMetrics["context"] = { compressionCount: 0, estimatedTokensBefore: null, estimatedTokensAfter: null, estimator: "unavailable" };
+  private price: ModelPrice | undefined;
 
   constructor(
     private readonly identity: Pick<RunMetrics, "runId" | "taskSessionId" | "provider" | "model" | "mode"> & Partial<Pick<RunMetrics, "scope">>,
@@ -74,6 +77,17 @@ export class RunMetricsTracker {
     this.usage.outputTokens += usage.outputTokens;
     this.usage.reasoningTokens += usage.reasoningTokens;
     this.usage.cachedInputTokens += usage.cachedInputTokens;
+  }
+
+  setPrice(price?: ModelPrice) {
+    this.price = price;
+  }
+
+  private estimateCostUsd() {
+    if (this.price?.inputPerMillionTokens === undefined || this.price.outputPerMillionTokens === undefined) return null;
+    const uncachedInputTokens = Math.max(0, this.usage.inputTokens - this.usage.cachedInputTokens);
+    const cachedRate = this.price.cachedInputPerMillionTokens ?? this.price.inputPerMillionTokens;
+    return (uncachedInputTokens * this.price.inputPerMillionTokens + this.usage.cachedInputTokens * cachedRate + this.usage.outputTokens * this.price.outputPerMillionTokens) / 1_000_000;
   }
 
   recordToolCall(input: { repeated?: boolean; failed?: boolean } = {}) {
@@ -120,6 +134,7 @@ export class RunMetricsTracker {
       firstTokenLatencyMs: this.firstTokenLatencyMs,
       firstTokenLatencySource: this.firstTokenLatencySource,
       usage: { ...this.usage },
+      estimatedCostUsd: this.estimateCostUsd(),
       tools: { calls: this.toolCalls, repeatedCalls: this.repeatedToolCalls, failedCalls: this.failedToolCalls },
       context: { ...this.context },
       result: {
