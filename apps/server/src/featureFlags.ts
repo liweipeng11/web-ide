@@ -69,6 +69,6 @@ export function createServerCapabilities(input: { flags: FeatureFlags; implement
 export const implementedFeatures: FeatureImplementations = {
   contextBudgetV2: true,
   modelProviderGateway: true,
-  lsp: false,
+  lsp: true,
   inlineEdit: false
 };

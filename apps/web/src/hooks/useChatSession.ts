@@ -127,7 +127,7 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
     await handleSendChatMessage(state.userRequest);
   }
 
-  async function handleSendChatMessage(content: string, replayFromMessageId?: string, approvedTaskSessionId?: string) {
+  async function handleSendChatMessage(content: string, replayFromMessageId?: string, approvedTaskSessionId?: string, options: { contextPaths?: string[] } = {}) {
     if (!state.workspaceRoot || !content.trim() || state.streaming) return;
 
     function flushPendingChatDeltas() {
@@ -180,7 +180,7 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
     try {
       await streamFileChatMessage(
         content.trim(),
-        state.chatContextPaths,
+        options.contextPaths ?? state.chatContextPaths,
         state.chatId,
         state.agentMode,
         (streamEvent) => {

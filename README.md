@@ -497,6 +497,20 @@ apps/
 
 旧目录 `.mini-ai-web-editor/` 和 `.ai-agent/` 仍作为读取 fallback 保留，避免已有聊天历史、任务会话和 checkpoint 失效；新数据会写入 `.mini-ai/state/`。
 
+## Language Service / LSP
+
+设置 `LSP_ENABLED=1` 后，服务端会按文件语言发现并复用工作区或系统中已有的 Language Server：
+
+- TypeScript / JavaScript：`typescript-language-server`
+- Vue：`vue-language-server`（`@vue/language-server`）
+- Python：`basedpyright-langserver`、`pyright-langserver` 或 `pylsp`
+
+Node Language Server 可以安装在当前工作区的 `node_modules` 中；Python Language Server 可以通过系统 PATH 提供。项目不会自动下载或执行项目自定义命令。未发现服务端时，TS/JS/Vue 会明确降级到现有 Symbol Graph，Python 保持普通文本编辑能力。Language Server 进程在工作区切换、服务退出或长时间空闲时释放。
+
+编辑器支持诊断 Marker、F12 定义、Shift+F12 引用列表、F2 Rename、Hover、工作区符号搜索、LSP Code Action 及“交给 Agent 修复”。Rename 和带 WorkspaceEdit 的 Code Action 只生成待审阅 Patch，不会直接落盘；诊断修复会启动现有 Agent 流程，最终修改仍经过 Patch、审批和 Checkpoint。Agent 侧提供只读诊断、定义、引用、Hover 和符号搜索工具。
+
+Language Server 崩溃后会惰性重启并恢复当前未保存文档；编辑器按文档版本持续刷新诊断。默认不输出 Language Server stderr 内容，如需本地排障可显式设置 `LSP_DEBUG_LOGGING=1`，敏感字段仍会被脱敏且输出有长度限制。
+
 ## 当前限制
 
 这个项目仍是一个早期本地编码 Agent，还不是完整的自治开发平台。目前尚未提供：
@@ -504,7 +518,7 @@ apps/
 - Git push、pull request 创建、代码评审评论处理等完整协作流程。
 - MCP servers、插件、可复用 skills、hooks 或自定义 subagents。
 - 云端后台执行、定时任务或并行 Agent。
-- LSP、Tree-sitter、语义仓库索引或向量搜索。
+- Tree-sitter 或向量搜索；LSP 首批仅覆盖 TypeScript/JavaScript/Vue/Python。
 - 浏览器自动化或视觉测试。
 - 登录、团队工作区、角色权限或企业审计能力。
 - 操作系统级或容器级命令沙箱。

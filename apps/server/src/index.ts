@@ -35,6 +35,7 @@ import { createModelRouter } from "./modelRoutes.js";
 import { resolveModelSelection } from "./modelSelectionStore.js";
 import { ProviderError } from "./providers/index.js";
 import { withModelExecution } from "./modelExecutionContext.js";
+import { createLanguageServiceRouter, languageServiceGateway } from "./languageService/index.js";
 
 const app = express();
 const server = createServer(app);
@@ -62,6 +63,7 @@ app.use("/api", createSearchRouter());
 app.use("/api/git-workflow", createGitWorkflowRouter());
 app.use("/api/vue2-template", createVue2TemplateRouter());
 app.use("/api/project-memory", createProjectMemoryRouter());
+app.use("/api", createLanguageServiceRouter());
 
 function createStreamRunId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -232,7 +234,9 @@ app.post(
   "/api/workspace/open",
   asyncRoute(async (request, response) => {
     const workspaceRoot = typeof request.body?.workspaceRoot === "string" ? request.body.workspaceRoot : "";
+    const previousWorkspaceRoot = getWorkspaceRoot();
     const nextWorkspaceRoot = await setWorkspaceRoot(workspaceRoot);
+    if (previousWorkspaceRoot && previousWorkspaceRoot !== nextWorkspaceRoot) await languageServiceGateway.disposeWorkspace(previousWorkspaceRoot);
     await ensureProjectRulesDirectory(nextWorkspaceRoot);
 
     clearPendingPatches();
@@ -250,7 +254,9 @@ app.post(
       return;
     }
 
+    const previousWorkspaceRoot = getWorkspaceRoot();
     const nextWorkspaceRoot = await setWorkspaceRoot(selectedPath);
+    if (previousWorkspaceRoot && previousWorkspaceRoot !== nextWorkspaceRoot) await languageServiceGateway.disposeWorkspace(previousWorkspaceRoot);
     await ensureProjectRulesDirectory(nextWorkspaceRoot);
 
     clearPendingPatches();
@@ -1230,3 +1236,9 @@ server.listen(config.serverPort, () => {
   console.log(`Mini AI Web Editor server running on http://localhost:${config.serverPort}`);
   console.log(`Workspace root: ${getWorkspaceRoot() || "(none)"}`);
 });
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    void languageServiceGateway.disposeAll().finally(() => server.close(() => process.exit(0)));
+  });
+}

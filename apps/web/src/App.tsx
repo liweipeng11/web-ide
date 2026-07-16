@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { decideApprovalRequest, fetchModelCatalog, updateModelDefaults, type AgentStep, type FileTreeNode, type ModelSelection } from "./api";
+import { decideApprovalRequest, fetchModelCatalog, updateModelDefaults, type AgentStep, type FileTreeNode, type ModelSelection, type UnifiedDiagnostic } from "./api";
 import { initialState, type AppState } from "./appState";
 import AppLayout from "./components/AppLayout";
 import { useChatSession } from "./hooks/useChatSession";
@@ -89,6 +89,17 @@ export default function App() {
     await patchActions.handleApply(filePath, commandCenter.handleValidateAndFix);
   }
 
+  async function handleFixDiagnostic(diagnostic: UnifiedDiagnostic, codeActionTitle?: string) {
+    const contextPaths = [...new Set([...state.chatContextPaths, diagnostic.filePath])];
+    const prompt = [
+      `请修复 ${diagnostic.filePath}:${diagnostic.range.start.line}:${diagnostic.range.start.column} 的诊断：${diagnostic.message}`,
+      codeActionTitle ? `Language Server 建议操作：${codeActionTitle}` : "",
+      "请分析根因，生成可审阅 Patch，并在应用后执行相关验证。"
+    ].filter(Boolean).join("\n");
+    setState((current) => ({ ...current, chatContextPaths: contextPaths, userRequest: "" }));
+    await chatSession.handleSendChatMessage(prompt, undefined, undefined, { contextPaths });
+  }
+
   async function handleApprovalDecision(step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") {
     const taskSessionId = state.currentTaskSessionId || state.selectedTaskSession?.id || null;
 
@@ -173,6 +184,7 @@ export default function App() {
       onRunCommandSuggestion={commandCenter.handleRunCommandSuggestion}
       onValidateAndFix={commandCenter.handleValidateAndFix}
       onGenerate={chatSession.handleGenerate}
+      onFixDiagnostic={handleFixDiagnostic}
       onApplyPatch={handleApplyPatch}
       onRejectPatch={patchActions.handleReject}
       onRollbackCheckpoint={patchActions.rollbackCheckpointAndRefresh}

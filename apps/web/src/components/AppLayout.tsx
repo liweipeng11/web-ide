@@ -1,5 +1,5 @@
 import type { Dispatch, PointerEvent, SetStateAction } from "react";
-import type { AgentMode, AgentStep, CommandResult, FileTreeNode, ModelSelection, TaskPlanItemStatus } from "../api";
+import type { AgentMode, AgentStep, CommandResult, FileTreeNode, ModelSelection, SourceLocation, TaskPlanItemStatus, UnifiedDiagnostic } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
 import type { WorkbenchLeftPanel } from "../hooks/useWorkbenchLayout";
@@ -62,6 +62,7 @@ type Props = {
   onRunCommandSuggestion: (suggestion: CommandSuggestion, options?: { autoSafeOnly?: boolean }) => Promise<CommandResult | null>;
   onValidateAndFix: (command: string) => Promise<unknown>;
   onGenerate: () => Promise<void>;
+  onFixDiagnostic: (diagnostic: UnifiedDiagnostic, codeActionTitle?: string) => Promise<void>;
   onApplyPatch: (filePath?: string) => Promise<void>;
   onRejectPatch: (filePath?: string) => Promise<void>;
   onRollbackCheckpoint: (checkpointId: string) => Promise<void>;
@@ -116,6 +117,7 @@ export default function AppLayout({
   onRunCommandSuggestion,
   onValidateAndFix,
   onGenerate,
+  onFixDiagnostic,
   onApplyPatch,
   onRejectPatch,
   onRollbackCheckpoint,
@@ -244,6 +246,10 @@ export default function AppLayout({
                 onSave={() => void onSaveFile()}
                 onSelectTab={onSelectOpenFile}
                 onCloseTab={onCloseOpenFile}
+                onNavigate={async (location: SourceLocation) => { await onOpenFile(location.filePath); }}
+                onRequestAgentFix={(diagnostic: UnifiedDiagnostic, codeActionTitle?: string) => void onFixDiagnostic(diagnostic, codeActionTitle)}
+                onPendingPatch={(patch) => setState((current) => ({ ...current, patch, error: null }))}
+                onLanguageServiceError={(message) => setState((current) => ({ ...current, error: message }))}
                 onChange={(fileContent) =>
                   setState((current) => ({
                     ...current,

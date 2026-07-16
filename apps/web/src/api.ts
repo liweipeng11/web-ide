@@ -10,6 +10,29 @@ export type ReadFileResponse = {
   content: string;
 };
 
+export type LanguageServiceSource = "lsp" | "symbol_graph" | "text_search" | "combined" | "none";
+export type SourceLocation = { filePath: string; line: number; column: number; endLine?: number; endColumn?: number; source?: LanguageServiceSource; complete?: boolean };
+export type SourceRange = { start: { line: number; column: number }; end: { line: number; column: number } };
+export type LanguageServiceCapability = {
+  languageId: string;
+  diagnostics: boolean;
+  definition: boolean;
+  references: boolean;
+  hover: boolean;
+  workspaceSymbols: boolean;
+  codeActions: boolean;
+  rename: boolean;
+  source: LanguageServiceSource;
+  available: boolean;
+  degraded: boolean;
+  detail?: string;
+};
+export type UnifiedDiagnostic = { filePath: string; range: SourceRange; severity: "error" | "warning" | "information" | "hint"; message: string; code?: string | number; source: LanguageServiceSource; documentVersion?: number };
+export type UnifiedSymbol = { name: string; kind: string; location: SourceLocation; containerName?: string; source: LanguageServiceSource };
+export type HoverInfo = { contents: string; range?: SourceRange; source: LanguageServiceSource };
+export type LanguageWorkspaceEdit = { changes: Record<string, Array<{ range: SourceRange; newText: string }>>; source: LanguageServiceSource };
+export type UnifiedCodeAction = { title: string; kind?: string; diagnostics: UnifiedDiagnostic[]; edit?: LanguageWorkspaceEdit; preferred?: boolean; source: LanguageServiceSource };
+
 export type GenerateEditResponse = {
   taskSessionId?: string;
   patchId: string;
@@ -779,6 +802,46 @@ export function saveFile(path: string, content: string) {
     method: "POST",
     body: JSON.stringify({ path, content })
   });
+}
+
+export function fetchLanguageServiceCapabilities(path: string) {
+  return request<LanguageServiceCapability>(`/api/language-service/capabilities?path=${encodeURIComponent(path)}`);
+}
+
+export function syncLanguageDocument(input: { filePath: string; content?: string; version: number; action: "open" | "change" | "save" | "close" }) {
+  return request<{ success: boolean; version: number }>("/api/language-service/documents", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function fetchLanguageDiagnostics(path: string, version: number) {
+  return request<{ diagnostics: UnifiedDiagnostic[] }>(`/api/language-service/diagnostics?path=${encodeURIComponent(path)}&version=${version}`);
+}
+
+export function findLanguageDefinition(location: SourceLocation) {
+  return request<{ result: SourceLocation[] }>("/api/language-service/definition", { method: "POST", body: JSON.stringify({ location }) });
+}
+
+export function findLanguageReferences(location: SourceLocation) {
+  return request<{ result: SourceLocation[] }>("/api/language-service/references", { method: "POST", body: JSON.stringify({ location }) });
+}
+
+export function fetchLanguageHover(location: SourceLocation) {
+  return request<{ result: HoverInfo | null }>("/api/language-service/hover", { method: "POST", body: JSON.stringify({ location }) });
+}
+
+export function fetchLanguageCodeActions(filePath: string, range: SourceRange, diagnostics: UnifiedDiagnostic[]) {
+  return request<{ actions: UnifiedCodeAction[] }>("/api/language-service/code-actions", { method: "POST", body: JSON.stringify({ filePath, range, diagnostics }) });
+}
+
+export function createLanguageWorkspaceEditPatch(edit: LanguageWorkspaceEdit, summary: string) {
+  return request<{ patch: GenerateEditResponse }>("/api/language-service/workspace-edit/patch", { method: "POST", body: JSON.stringify({ edit, summary }) });
+}
+
+export function renameLanguageSymbol(location: SourceLocation, newName: string) {
+  return request<{ edit: LanguageWorkspaceEdit; patch: GenerateEditResponse }>("/api/language-service/rename", { method: "POST", body: JSON.stringify({ location, newName }) });
+}
+
+export function searchLanguageWorkspaceSymbols(query: string) {
+  return request<{ symbols: UnifiedSymbol[] }>(`/api/language-service/symbols?query=${encodeURIComponent(query)}`);
 }
 
 export function generateEdit(path: string | null, userRequest: string) {

@@ -895,3 +895,78 @@ body.resizing-terminal .terminal-resizer::after {
   width: 30px;
 }
 
+.lsp-state {
+  color: #71c995;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.lsp-state.degraded {
+  color: #d7ad64;
+}
+
+.workspace-symbol-search {
+  position: absolute;
+  z-index: 20;
+  top: 70px;
+  left: 50%;
+  width: min(560px, calc(100% - 48px));
+  max-height: 360px;
+  transform: translateX(-50%);
+  overflow: hidden;
+  border: 1px solid #3b4656;
+  border-radius: 6px;
+  background: #181d25;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 45%);
+}
+
+.workspace-symbol-search input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid #303846;
+  outline: 0;
+  color: #e5eaf0;
+  background: #202630;
+}
+
+.workspace-symbol-results {
+  max-height: 310px;
+  overflow: auto;
+}
+
+.workspace-symbol-heading {
+  padding: 10px 12px;
+  border-bottom: 1px solid #303846;
+  color: #c7d0dc;
+  font-size: 12px;
+  background: #202630;
+}
+
+.workspace-symbol-results button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid #252c36;
+  color: #dce3eb;
+  background: transparent;
+  text-align: left;
+}
+
+.workspace-symbol-results button:hover {
+  background: #293343;
+}
+
+.workspace-symbol-results span {
+  overflow: hidden;
+  color: #8f9baa;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
