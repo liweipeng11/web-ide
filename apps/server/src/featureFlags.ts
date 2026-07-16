@@ -70,5 +70,5 @@ export const implementedFeatures: FeatureImplementations = {
   contextBudgetV2: true,
   modelProviderGateway: true,
   lsp: true,
-  inlineEdit: false
+  inlineEdit: true
 };

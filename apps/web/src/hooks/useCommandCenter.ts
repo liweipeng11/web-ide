@@ -191,6 +191,7 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
     confirmed?: boolean;
     changedFiles?: string[];
     failureCategories?: VerificationIssueCategory[];
+    changeContext?: string;
   } = {}): Promise<AutoValidationResponse | null> {
     if (!state.workspaceRoot || state.loading || state.streaming) return null;
 
@@ -209,6 +210,7 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
         maxAttempts,
         changedFiles: options.changedFiles,
         failureCategories: options.failureCategories,
+        changeContext: options.changeContext,
         confirmed: options.confirmed
       });
 

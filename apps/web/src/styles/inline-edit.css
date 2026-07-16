@@ -1,0 +1,132 @@
+.inline-edit-trigger {
+  border: 1px solid #3f5f8a;
+  border-radius: 5px;
+  background: #17263a;
+  color: #b9d7ff;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.editor-pane {
+  position: relative;
+}
+
+.inline-edit-widget {
+  position: absolute;
+  z-index: 20;
+  top: 68px;
+  right: 18px;
+  width: min(460px, calc(100% - 36px));
+  padding: 12px;
+  border: 1px solid #42658d;
+  border-radius: 8px;
+  background: #111b28;
+  color: #dce9f7;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 38%);
+}
+
+.inline-edit-selection-action {
+  border: 1px solid #4d78a8;
+  border-radius: 5px;
+  background: #173454;
+  color: #e8f3ff;
+  padding: 3px 7px;
+  font-size: 11px;
+  box-shadow: 0 3px 10px rgb(0 0 0 / 25%);
+  cursor: pointer;
+}
+
+.inline-edit-widget-title,
+.inline-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.inline-edit-widget-title span {
+  color: #91a8c2;
+  font-size: 12px;
+}
+
+.inline-edit-widget textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  margin: 10px 0;
+  padding: 9px;
+  resize: vertical;
+  border: 1px solid #314862;
+  border-radius: 6px;
+  background: #0b131e;
+  color: #eef6ff;
+  font: inherit;
+}
+
+.inline-edit-actions {
+  justify-content: flex-end;
+}
+
+.inline-edit-actions button {
+  border: 1px solid #40536a;
+  border-radius: 5px;
+  background: #1c2a3b;
+  color: #dce9f7;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.inline-edit-actions button.primary {
+  border-color: #3b8d68;
+  background: #1d6348;
+  color: #fff;
+}
+
+.inline-edit-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.inline-edit-explanation,
+.inline-edit-error {
+  margin: 0 0 9px;
+  font-size: 12px;
+}
+
+.inline-edit-explanation { color: #a8bdd3; }
+.inline-edit-stream-state { color: #8cc8ff; font-size: 12px; }
+.inline-edit-error { color: #ff9c9c; }
+
+.inline-edit-original-range,
+.inline-edit-original-text {
+  background: rgb(174 61 61 / 24%);
+  text-decoration-color: #d86b6b;
+  text-decoration-line: line-through;
+}
+
+.inline-edit-proposed-zone {
+  overflow: hidden;
+  border-left: 3px solid #45a878;
+  background: rgb(38 117 80 / 25%);
+  color: #c9f1dc;
+}
+
+.inline-edit-proposed-zone pre {
+  margin: 0;
+  padding: 4px 8px;
+  white-space: pre-wrap;
+  font: inherit;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

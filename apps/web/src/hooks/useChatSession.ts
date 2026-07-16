@@ -1,5 +1,5 @@
 import { useRef, type Dispatch, type SetStateAction } from "react";
-import { branchFileChatMessage, clearFileChat, deleteFileChatHistory, deleteFileChatMessage, fetchFileChat, fetchFileChatHistories, resumeTaskSessionChat, streamFileChatMessage, type TaskSession } from "../api";
+import { branchFileChatMessage, clearFileChat, deleteFileChatHistory, deleteFileChatMessage, fetchFileChat, fetchFileChatHistories, resumeTaskSessionChat, streamFileChatMessage, type AgentMode, type TaskSession } from "../api";
 import { createChatId, createClientErrorStep, type AppState } from "../appState";
 import { mergeContextBudgetSession } from "../contextBudgetState";
 
@@ -127,7 +127,7 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
     await handleSendChatMessage(state.userRequest);
   }
 
-  async function handleSendChatMessage(content: string, replayFromMessageId?: string, approvedTaskSessionId?: string, options: { contextPaths?: string[] } = {}) {
+  async function handleSendChatMessage(content: string, replayFromMessageId?: string, approvedTaskSessionId?: string, options: { contextPaths?: string[]; agentMode?: AgentMode } = {}) {
     if (!state.workspaceRoot || !content.trim() || state.streaming) return;
 
     function flushPendingChatDeltas() {
@@ -182,7 +182,7 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
         content.trim(),
         options.contextPaths ?? state.chatContextPaths,
         state.chatId,
-        state.agentMode,
+        options.agentMode ?? state.agentMode,
         (streamEvent) => {
           if (streamEvent.event === "task_session") {
             streamTaskSessionId = streamEvent.data.session.id;

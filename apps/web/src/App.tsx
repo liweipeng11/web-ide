@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { decideApprovalRequest, fetchModelCatalog, updateModelDefaults, type AgentStep, type FileTreeNode, type ModelSelection, type UnifiedDiagnostic } from "./api";
+import { decideApprovalRequest, fetchModelCatalog, updateModelDefaults, type AgentStep, type FileTreeNode, type ModelSelection, type PatchFileChange, type UnifiedDiagnostic } from "./api";
 import { initialState, type AppState } from "./appState";
 import AppLayout from "./components/AppLayout";
 import { useChatSession } from "./hooks/useChatSession";
@@ -8,6 +8,7 @@ import { usePatchActions } from "./hooks/usePatchActions";
 import { useTaskSessions } from "./hooks/useTaskSessions";
 import { useWorkbenchLayout } from "./hooks/useWorkbenchLayout";
 import { useWorkspaceFiles } from "./hooks/useWorkspaceFiles";
+import type { InlineEditUpgradeRequest } from "./hooks/useInlineEdit";
 
 export default function App() {
   // App 只负责组合各领域 hook，避免继续堆积业务细节。
@@ -100,6 +101,32 @@ export default function App() {
     await chatSession.handleSendChatMessage(prompt, undefined, undefined, { contextPaths });
   }
 
+  async function handleUpgradeInlineEdit(request: InlineEditUpgradeRequest) {
+    const contextPaths = [...new Set([...state.chatContextPaths, request.draft.filePath])];
+    const prompt = [
+      "Inline Edit 判断该需求需要跨文件修改，请升级为完整 Patch Review。",
+      `目标文件：${request.draft.filePath}`,
+      `原修改要求：${request.instruction}`,
+      `升级原因：${request.reason}`,
+      `原选区：${request.draft.selection.start.line}:${request.draft.selection.start.column}-${request.draft.selection.end.line}:${request.draft.selection.end.column}`,
+      request.draft.selectedText ? `原选区内容：\n${request.draft.selectedText.slice(0, 8_000)}` : "原选区为空，请以光标位置为修改入口。",
+      "请分析影响范围，生成可审阅 Patch；不得静默落盘。"
+    ].join("\n\n");
+    setState((current) => ({ ...current, patch: null, chatContextPaths: contextPaths, error: null }));
+    await chatSession.handleSendChatMessage(prompt, undefined, undefined, { contextPaths, agentMode: "act" });
+  }
+
+  async function handleRegeneratePatchFile(file: PatchFileChange) {
+    const prompt = [
+      `请重新生成 Patch 中 ${file.path} 的修改。`,
+      `当前修改摘要：${file.summary}`,
+      "保留原任务目标，但重新分析该文件的最小必要改动；如果影响其他文件，请生成完整可审阅 Patch。",
+      `当前候选内容（仅供参考）：\n${file.newContent.slice(0, 8_000)}`
+    ].join("\n\n");
+    setState((current) => ({ ...current, patch: null, error: null, chatContextPaths: [...new Set([...current.chatContextPaths, file.path])] }));
+    await chatSession.handleSendChatMessage(prompt, undefined, undefined, { contextPaths: [file.path], agentMode: "act" });
+  }
+
   async function handleApprovalDecision(step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") {
     const taskSessionId = state.currentTaskSessionId || state.selectedTaskSession?.id || null;
 
@@ -189,6 +216,8 @@ export default function App() {
       onRejectPatch={patchActions.handleReject}
       onRollbackCheckpoint={patchActions.rollbackCheckpointAndRefresh}
       onDecideApproval={handleApprovalDecision}
+      onUpgradeInlineEdit={handleUpgradeInlineEdit}
+      onRegeneratePatchFile={handleRegeneratePatchFile}
     />
   );
 }

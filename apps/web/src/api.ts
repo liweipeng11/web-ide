@@ -33,6 +33,30 @@ export type HoverInfo = { contents: string; range?: SourceRange; source: Languag
 export type LanguageWorkspaceEdit = { changes: Record<string, Array<{ range: SourceRange; newText: string }>>; source: LanguageServiceSource };
 export type UnifiedCodeAction = { title: string; kind?: string; diagnostics: UnifiedDiagnostic[]; edit?: LanguageWorkspaceEdit; preferred?: boolean; source: LanguageServiceSource };
 
+export type InlineEditRequest = {
+  filePath: string;
+  documentVersion: number;
+  documentLineCount: number;
+  selectionStartLineMaxColumn: number;
+  selectionEndLineMaxColumn: number;
+  selection: SourceRange;
+  selectedText: string;
+  instruction: string;
+  prefix: string;
+  suffix: string;
+  languageId: string;
+  diagnostics?: Array<{ message: string; severity: "error" | "warning" | "info"; range?: SourceRange }>;
+  projectRules?: string | null;
+};
+export type InlineEditCandidate = { filePath: string; baseVersion: number; range: SourceRange; replacement: string; explanation?: string };
+export type InlineEditResult = { mode: "inline"; candidate: InlineEditCandidate } | { mode: "patch_review"; reason: string };
+export type InlineEditStreamEvent =
+  | { type: "started" }
+  | { type: "delta"; generatedCharacters: number }
+  | { type: "candidate_delta"; replacement: string }
+  | { type: "result"; result: InlineEditResult }
+  | { type: "error"; message: string };
+
 export type GenerateEditResponse = {
   taskSessionId?: string;
   patchId: string;
@@ -786,6 +810,7 @@ export function validateAndFix(command?: string | null, options: {
   maxAttempts?: number;
   changedFiles?: string[];
   failureCategories?: VerificationIssueCategory[];
+  changeContext?: string;
   confirmed?: boolean;
 } = {}) {
   return request<AutoValidationResponse>("/api/ai/validate-and-fix", {
@@ -797,11 +822,40 @@ export function validateAndFix(command?: string | null, options: {
   });
 }
 
-export function saveFile(path: string, content: string) {
-  return request<{ success: boolean; path: string }>("/api/file", {
+export function saveFile(path: string, content: string, baseContent?: string) {
+  return request<{ success: boolean; path: string; checkpoint: Checkpoint | null }>("/api/file", {
     method: "POST",
-    body: JSON.stringify({ path, content })
+    body: JSON.stringify({ path, content, baseContent })
   });
+}
+
+export async function streamInlineEdit(input: InlineEditRequest, onEvent: (event: InlineEditStreamEvent) => void, signal?: AbortSignal) {
+  const response = await fetch("/api/inline-edit/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    signal
+  });
+
+  if (!response.ok || !response.body) {
+    const data = await response.json().catch(() => null);
+    throw new Error(data?.error || `Inline Edit 请求失败，状态码 ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const packets = buffer.split("\n\n");
+    buffer = packets.pop() || "";
+    for (const packet of packets) {
+      const dataLine = packet.match(/^data:\s*(.+)$/m)?.[1];
+      if (dataLine) onEvent(JSON.parse(dataLine) as InlineEditStreamEvent);
+    }
+  }
 }
 
 export function fetchLanguageServiceCapabilities(path: string) {

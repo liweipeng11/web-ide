@@ -18,6 +18,8 @@ export type GenerateEditRequest = {
 export type SaveFileRequest = {
   path: string;
   content: string;
+  // 客户端最后一次已保存内容，用于阻止覆盖磁盘上的并发修改。
+  baseContent?: string;
 };
 
 // 文件内精确替换参数，供底层编辑服务和后续 Agent 工具复用。
@@ -135,6 +137,7 @@ export type AutoValidationRequest = {
   // 完整应用 patch 后传入实际变更文件，供增量验证器收敛包和测试范围。
   changedFiles?: string[];
   failureCategories?: import("./verifier/types.js").VerificationIssueCategory[];
+  changeContext?: string;
   confirmed?: boolean;
 };
 

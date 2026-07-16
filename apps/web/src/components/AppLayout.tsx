@@ -1,8 +1,9 @@
 import type { Dispatch, PointerEvent, SetStateAction } from "react";
-import type { AgentMode, AgentStep, CommandResult, FileTreeNode, ModelSelection, SourceLocation, TaskPlanItemStatus, UnifiedDiagnostic } from "../api";
+import type { AgentMode, AgentStep, CommandResult, FileTreeNode, ModelSelection, PatchFileChange, SourceLocation, TaskPlanItemStatus, UnifiedDiagnostic, VerificationIssueCategory } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
 import type { WorkbenchLeftPanel } from "../hooks/useWorkbenchLayout";
+import type { InlineEditChangeContext, InlineEditUpgradeRequest } from "../hooks/useInlineEdit";
 import GitWorkflowPanel from "../gitWorkflow/GitWorkflowPanel";
 import ChatPanel from "./ChatPanel";
 import CodeSearchPanel from "./CodeSearchPanel";
@@ -32,7 +33,7 @@ type Props = {
   onSelectOpenFile: (path: string) => void;
   onCloseOpenFile: (path: string) => void;
   onToggleShowIgnored: (showIgnored: boolean) => Promise<void>;
-  onSaveFile: () => Promise<void>;
+  onSaveFile: (contentOverride?: string) => Promise<boolean>;
   onStartChatResize: (event: PointerEvent) => void;
   onStartTerminalResize: (event: PointerEvent) => void;
   onCloseTerminal: () => void;
@@ -60,13 +61,15 @@ type Props = {
   onBranchMessage: (messageId: string) => Promise<void>;
   onRerunMessage: (content: string, messageId: string) => void;
   onRunCommandSuggestion: (suggestion: CommandSuggestion, options?: { autoSafeOnly?: boolean }) => Promise<CommandResult | null>;
-  onValidateAndFix: (command: string) => Promise<unknown>;
+  onValidateAndFix: (command: string, options?: { changedFiles?: string[]; failureCategories?: VerificationIssueCategory[]; changeContext?: string }) => Promise<unknown>;
   onGenerate: () => Promise<void>;
   onFixDiagnostic: (diagnostic: UnifiedDiagnostic, codeActionTitle?: string) => Promise<void>;
   onApplyPatch: (filePath?: string) => Promise<void>;
   onRejectPatch: (filePath?: string) => Promise<void>;
   onRollbackCheckpoint: (checkpointId: string) => Promise<void>;
   onDecideApproval: (step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") => Promise<void>;
+  onUpgradeInlineEdit: (request: InlineEditUpgradeRequest) => Promise<void>;
+  onRegeneratePatchFile: (file: PatchFileChange) => Promise<void>;
 };
 
 export default function AppLayout({
@@ -121,7 +124,9 @@ export default function AppLayout({
   onApplyPatch,
   onRejectPatch,
   onRollbackCheckpoint,
-  onDecideApproval
+  onDecideApproval,
+  onUpgradeInlineEdit,
+  onRegeneratePatchFile
 }: Props) {
   // 优先展示当前正在运行的任务计划，历史任务详情仍在展开面板里维护。
   const activeTaskSession = state.taskSessions.find((session) => session.id === state.currentTaskSessionId) || state.selectedTaskSession || null;
@@ -235,7 +240,7 @@ export default function AppLayout({
 
           <div className="editor-column">
             {state.patch ? (
-              <PatchReviewPane patch={state.patch} loading={state.loading} autoFix={state.autoFix} onApply={onApplyPatch} onReject={onRejectPatch} onRunCommand={(command) => void onValidateAndFix(command)} />
+              <PatchReviewPane patch={state.patch} loading={state.loading} autoFix={state.autoFix} onApply={onApplyPatch} onReject={onRejectPatch} onRunCommand={(command) => void onValidateAndFix(command)} onRegenerateFile={(file) => void onRegeneratePatchFile(file)} />
             ) : (
               <EditorPane
                 path={state.selectedPath}
@@ -250,6 +255,17 @@ export default function AppLayout({
                 onRequestAgentFix={(diagnostic: UnifiedDiagnostic, codeActionTitle?: string) => void onFixDiagnostic(diagnostic, codeActionTitle)}
                 onPendingPatch={(patch) => setState((current) => ({ ...current, patch, error: null }))}
                 onLanguageServiceError={(message) => setState((current) => ({ ...current, error: message }))}
+                projectRules={state.projectRules?.combinedInstructions}
+                onAcceptAndValidate={async (content, context: InlineEditChangeContext) => {
+                  const changeContext = [
+                    `Inline Edit 文件：${context.draft.filePath}`,
+                    `修改要求：${context.instruction}`,
+                    `选区：${context.draft.selection.start.line}:${context.draft.selection.start.column}-${context.draft.selection.end.line}:${context.draft.selection.end.column}`,
+                    context.draft.selectedText ? `修改前选区内容：\n${context.draft.selectedText.slice(0, 4_000)}` : "修改前为空选区"
+                  ].join("\n\n");
+                  if (await onSaveFile(content)) await onValidateAndFix("", { changedFiles: [context.draft.filePath], changeContext });
+                }}
+                onUpgradeInlineEdit={onUpgradeInlineEdit}
                 onChange={(fileContent) =>
                   setState((current) => ({
                     ...current,

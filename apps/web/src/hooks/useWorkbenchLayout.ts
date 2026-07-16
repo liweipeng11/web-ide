@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 export type WorkbenchLeftPanel = "files" | "search" | "rules" | "memory" | "git";
 
 type UseWorkbenchLayoutOptions = {
-  onSaveFile: () => Promise<void> | void;
+  onSaveFile: () => Promise<unknown> | void;
 };
 
 // 管理工作台壳层的尺寸、拖拽和快捷键，避免入口组件被界面状态淹没。

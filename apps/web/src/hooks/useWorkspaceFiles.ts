@@ -197,16 +197,18 @@ export function useWorkspaceFiles({ state, setState, setFiles }: UseWorkspaceFil
     }
   }
 
-  async function handleSaveFile() {
-    if (!state.selectedPath || savingFile || state.fileContent === state.savedFileContent) return;
+  async function handleSaveFile(contentOverride?: string) {
+    const nextContent = contentOverride ?? state.fileContent;
+    if (!state.selectedPath || savingFile) return false;
+    if (nextContent === state.savedFileContent) return true;
 
     const pathToSave = state.selectedPath;
-    const contentToSave = state.fileContent;
+    const contentToSave = nextContent;
     setSavingFile(true);
     setState((current) => ({ ...current, error: null }));
 
     try {
-      await saveFile(pathToSave, contentToSave);
+      const result = await saveFile(pathToSave, contentToSave, state.savedFileContent);
       setState((current) => {
         if (current.selectedPath !== pathToSave) return current;
 
@@ -214,14 +216,18 @@ export function useWorkspaceFiles({ state, setState, setFiles }: UseWorkspaceFil
           ...current,
           savedFileContent: contentToSave,
           openFiles: current.openFiles.map((file) => (file.path === pathToSave ? { ...file, content: contentToSave, savedContent: contentToSave } : file)),
+          lastCheckpoint: result.checkpoint ?? current.lastCheckpoint,
+          dismissedCheckpointId: result.checkpoint ? null : current.dismissedCheckpointId,
           error: null
         };
       });
+      return true;
     } catch (error) {
       setState((current) => ({
         ...current,
         error: error instanceof Error ? error.message : "保存文件失败"
       }));
+      return false;
     } finally {
       setSavingFile(false);
     }

@@ -2,4 +2,5 @@
 @import "./styles/workspace-panels.css";
 @import "./styles/chat.css";
 @import "./styles/diff.css";
+@import "./styles/inline-edit.css";
 @import "./gitWorkflow/gitWorkflow.css";

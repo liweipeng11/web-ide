@@ -6,7 +6,7 @@ import { buildContextualEditRequest, classifyAgentRequest, ensureEditableAgentRe
 import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime.js";
 import { normalizeAgentMode } from "./agentModes.js";
 import { appendFileChatMessage, appendFileChatTurn, branchFileChatMessages, clearFileChatMessages, deleteFileChatHistory, deleteFileChatMessage, ensureFileChatMessages, finishFileChatTurn, getFileChatMessages, listFileChatHistories, startFileChatTurn } from "./chatStore.js";
-import { getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
+import { createCheckpoint, getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
 import { discoverProjectCommands } from "./commandDiscovery.js";
 import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { getRecentCommandResults } from "./commandResults.js";
@@ -36,6 +36,7 @@ import { resolveModelSelection } from "./modelSelectionStore.js";
 import { ProviderError } from "./providers/index.js";
 import { withModelExecution } from "./modelExecutionContext.js";
 import { createLanguageServiceRouter, languageServiceGateway } from "./languageService/index.js";
+import { createInlineEditRouter } from "./inlineEdit/routes.js";
 
 const app = express();
 const server = createServer(app);
@@ -64,6 +65,7 @@ app.use("/api/git-workflow", createGitWorkflowRouter());
 app.use("/api/vue2-template", createVue2TemplateRouter());
 app.use("/api/project-memory", createProjectMemoryRouter());
 app.use("/api", createLanguageServiceRouter());
+if (config.featureFlags.inlineEdit) app.use("/api", createInlineEditRouter());
 
 function createStreamRunId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -343,7 +345,7 @@ app.post(
 app.post(
   "/api/ai/validate-and-fix",
   asyncRoute(async (request, response) => {
-    const { command, selectedPath, taskSessionId, attempts, maxAttempts, changedFiles, failureCategories, confirmed } = request.body as Partial<AutoValidationRequest>;
+    const { command, selectedPath, taskSessionId, attempts, maxAttempts, changedFiles, failureCategories, changeContext, confirmed } = request.body as Partial<AutoValidationRequest>;
 
     response.json(
       await runAutoValidation({
@@ -354,6 +356,7 @@ app.post(
         maxAttempts,
         changedFiles,
         failureCategories,
+        changeContext,
         confirmed
       })
     );
@@ -363,14 +366,29 @@ app.post(
 app.post(
   "/api/file",
   asyncRoute(async (request, response) => {
-    const { path: filePath, content } = request.body as Partial<SaveFileRequest>;
+    const { path: filePath, content, baseContent } = request.body as Partial<SaveFileRequest>;
 
     if (!filePath || typeof content !== "string") {
       throw new HttpError(400, "path and content are required");
     }
 
+    const currentContent = await readWorkspaceFile(filePath);
+
+    // 保存前校验客户端基线，避免 Inline Edit 接受后覆盖磁盘上的并发修改。
+    if (typeof baseContent === "string" && currentContent !== baseContent) {
+      throw new HttpError(409, `${filePath} 已在磁盘上发生变化，请重新加载后再保存`);
+    }
+
+    if (currentContent === content) {
+      response.json({ success: true, path: filePath, checkpoint: null });
+      return;
+    }
+
+    const checkpoint = await createCheckpoint(`file-save:${filePath}`, [{ filePath, oldContent: currentContent, newContent: content, summary: "保存编辑器修改" }], {
+      source: { toolName: "saveFile", reason: "editor_save" }
+    });
     await writeWorkspaceFile(filePath, content);
-    response.json({ success: true, path: filePath });
+    response.json({ success: true, path: filePath, checkpoint });
   })
 );
 

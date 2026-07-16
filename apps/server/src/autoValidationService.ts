@@ -59,7 +59,7 @@ function summarizeIssues(report: VerificationReport) {
     .join("\n");
 }
 
-function buildFixPrompt(result: CommandResult, report: VerificationReport, attempts: number, maxAttempts: number) {
+function buildFixPrompt(result: CommandResult, report: VerificationReport, attempts: number, maxAttempts: number, changeContext?: string) {
   return [
     "Automatic validation failed. Generate a new repair patch from the command output below.",
     "",
@@ -74,6 +74,9 @@ function buildFixPrompt(result: CommandResult, report: VerificationReport, attem
     "",
     "Structured issues:",
     summarizeIssues(report),
+    "",
+    "Original change context:",
+    changeContext?.trim().slice(0, 6_000) || "(not provided)",
     "",
     "Failure output:",
     tail(summarizeCommandFailure(result), maxFailurePromptChars)
@@ -92,6 +95,7 @@ export type AutoValidationOptions = {
   maxAttempts?: number;
   changedFiles?: string[];
   failureCategories?: VerificationIssueCategory[];
+  changeContext?: string;
   confirmed?: boolean;
 };
 
@@ -217,7 +221,7 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
 
     pushAgentStep(createAgentStep({ type: "message", content: `Validation failed. Generating repair patch ${nextAttempt}/${maxAttempts} for: ${command}` }));
     await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
-    const patch = await dependencies.createEditPatchResponse(options.selectedPath, buildFixPrompt(result, verification, nextAttempt, maxAttempts), pushAgentStep, taskSessionId);
+    const patch = await dependencies.createEditPatchResponse(options.selectedPath, buildFixPrompt(result, verification, nextAttempt, maxAttempts, options.changeContext), pushAgentStep, taskSessionId);
     await dependencies.appendTaskSessionPatchEvent?.(taskSessionId, {
       type: "auto_fix_patch_created",
       patchId: patch.patchId,

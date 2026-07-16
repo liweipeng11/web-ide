@@ -156,7 +156,7 @@ test("requires confirmation before running an unknown command", async () => {
 
 test("generates a reviewable repair patch after failed validation", async () => {
   const harness = createHarness({ result: commandResult("failed") });
-  const result = await harness.run({ command: "pnpm test", selectedPath: "src/app.ts", taskSessionId: "task-1", attempts: 0, maxAttempts: 3 });
+  const result = await harness.run({ command: "pnpm test", selectedPath: "src/app.ts", taskSessionId: "task-1", attempts: 0, maxAttempts: 3, changeContext: "Inline Edit 要求：简化条件判断" });
 
   assert.equal(result.status, "fix_generated");
   assert.equal(result.attempts, 1);
@@ -168,6 +168,7 @@ test("generates a reviewable repair patch after failed validation", async () => 
   assert.equal(harness.patchCalls[0].taskSessionId, "task-1");
   assert.match(harness.patchCalls[0].prompt, /1 test failed/);
   assert.match(harness.patchCalls[0].prompt, /commandsToRun must include the same validation command/);
+  assert.match(harness.patchCalls[0].prompt, /Inline Edit 要求：简化条件判断/);
   assert.equal(harness.storedSteps.some((step) => step.type === "edit"), true);
 });
 

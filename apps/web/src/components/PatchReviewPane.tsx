@@ -11,6 +11,7 @@ type Props = {
   onApply: (filePath?: string) => void;
   onReject: (filePath?: string) => void;
   onRunCommand: (command: string) => void;
+  onRegenerateFile: (file: PatchFileChange) => void;
 };
 
 function getLanguage(path: string) {
@@ -53,7 +54,7 @@ function getSafeEditRoleLabel(role: SafeEditFileRole) {
   return { required: "必要改动", supporting: "配套改动", validation_only: "仅建议验证", expansion: "扩散改动" }[role];
 }
 
-export default function PatchReviewPane({ patch, loading, autoFix, onApply, onReject, onRunCommand }: Props) {
+export default function PatchReviewPane({ patch, loading, autoFix, onApply, onReject, onRunCommand, onRegenerateFile }: Props) {
   const [selectedPath, setSelectedPath] = useState(() => patch.files[0]?.path || "");
 
   useEffect(() => {
@@ -129,6 +130,9 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
               <span>{selectedFile.summary}</span>
             </div>
             <div className="diff-file-actions">
+              <button type="button" disabled={loading} onClick={() => onRegenerateFile(selectedFile)}>
+                重新生成此文件
+              </button>
               <button type="button" disabled={loading} onClick={() => onApply(selectedFile.path)}>
                 Accept
               </button>
