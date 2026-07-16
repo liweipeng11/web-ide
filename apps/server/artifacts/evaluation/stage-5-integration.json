@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "stage": 5,
+  "generatedAt": "2026-07-16T07:58:39.717Z",
+  "threshold": 90,
+  "accepted": true,
+  "summary": {
+    "total": 18,
+    "passed": 18,
+    "failed": 0,
+    "completionRate": 100
+  },
+  "checks": [
+    {
+      "id": "default-contextBudgetV2",
+      "category": "default_activation",
+      "title": "Context Budget V2 默认启用",
+      "passed": true,
+      "detail": "enabled=true, available=true, path=next"
+    },
+    {
+      "id": "rollback-contextBudgetV2",
+      "category": "rollback",
+      "title": "Context Budget V2 可显式回退",
+      "passed": true,
+      "detail": "enabled=false, path=legacy"
+    },
+    {
+      "id": "default-modelProviderGateway",
+      "category": "default_activation",
+      "title": "Model Provider Gateway 默认启用",
+      "passed": true,
+      "detail": "enabled=true, available=true, path=next"
+    },
+    {
+      "id": "rollback-modelProviderGateway",
+      "category": "rollback",
+      "title": "Model Provider Gateway 可显式回退",
+      "passed": true,
+      "detail": "enabled=false, path=legacy"
+    },
+    {
+      "id": "default-lsp",
+      "category": "default_activation",
+      "title": "Language Service / LSP 默认启用",
+      "passed": true,
+      "detail": "enabled=true, available=true, path=next"
+    },
+    {
+      "id": "rollback-lsp",
+      "category": "rollback",
+      "title": "Language Service / LSP 可显式回退",
+      "passed": true,
+      "detail": "enabled=false, path=legacy"
+    },
+    {
+      "id": "default-inlineEdit",
+      "category": "default_activation",
+      "title": "Inline Edit 默认启用",
+      "passed": true,
+      "detail": "enabled=true, available=true, path=next"
+    },
+    {
+      "id": "rollback-inlineEdit",
+      "category": "rollback",
+      "title": "Inline Edit 可显式回退",
+      "passed": true,
+      "detail": "enabled=false, path=legacy"
+    },
+    {
+      "id": "scenario-single_file_type_fix",
+      "category": "integration_scenario",
+      "title": "单文件类型错误修复",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-cross_file_contract_change",
+      "category": "integration_scenario",
+      "title": "跨文件接口修改",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-vue_component_type_sync",
+      "category": "integration_scenario",
+      "title": "Vue 组件类型联动",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-large_file_local_edit",
+      "category": "integration_scenario",
+      "title": "大文件局部修改",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-long_terminal_output",
+      "category": "integration_scenario",
+      "title": "超长终端输出",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-unrelated_file_protection",
+      "category": "integration_scenario",
+      "title": "无关文件保护",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-dangerous_command_blocking",
+      "category": "integration_scenario",
+      "title": "危险命令阻断",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-approval_resume",
+      "category": "integration_scenario",
+      "title": "审批后恢复 Agent",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-validation_retry",
+      "category": "integration_scenario",
+      "title": "验证失败后二次修复",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    },
+    {
+      "id": "scenario-near_context_limit_summary",
+      "category": "integration_scenario",
+      "title": "接近上下文上限仍完成总结",
+      "passed": true,
+      "detail": "离线集成场景通过"
+    }
+  ],
+  "evaluation": {
+    "total": 10,
+    "passed": 10,
+    "failed": 0,
+    "successRate": 1
+  }
+}

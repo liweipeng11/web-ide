@@ -101,6 +101,10 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
   };
 }
 
+function normalizeInjectedCompletion(response: AgentCompletionResponse | ModelResponse): ModelResponse {
+  return "message" in response ? response as ModelResponse : adaptOpenAiCompletionResponse(response);
+}
+
 function snapshotAgentContext(agentContext: AgentContext): AgentContext {
   // 只复制可序列化字段，避免审批等待期间后续内存修改污染持久化快照。
   return {
@@ -359,7 +363,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_AGENT_STEPS;
   const providerId = options.providerId || "openai-compatible";
   const modelId = options.modelId || config.aiModel;
-  const completeModel = options.completeModel || (async (request: ModelRequest) => {
+  const completeModel: (request: ModelRequest) => Promise<ModelResponse> = options.completeModel || (async (request: ModelRequest) => {
+    if (options.requestCompletion) {
+      const response = await options.requestCompletion(toOpenAiChatCompletionBody(request));
+      return normalizeInjectedCompletion(response);
+    }
     if (config.featureFlags.modelProviderGateway && implementedFeatures.modelProviderGateway) {
       return providerGateway.complete(
         { providerId, modelId },
@@ -368,12 +376,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       );
     }
     const providerBody = toOpenAiChatCompletionBody(request);
-    const response = options.requestCompletion
-      ? await options.requestCompletion(providerBody)
-      : await requestChatCompletion(providerBody) as AgentCompletionResponse;
-    return "message" in response ? response : adaptOpenAiCompletionResponse(response);
+    const response = await requestChatCompletion(providerBody) as AgentCompletionResponse;
+    return normalizeInjectedCompletion(response);
   });
-  const selectedModelDescriptor = options.modelDescriptor || (config.featureFlags.modelProviderGateway && implementedFeatures.modelProviderGateway
+  // 测试、离线评测和受控调用方注入模型实现时，不应再要求其注册生产 Provider。
+  const selectedModelDescriptor = options.modelDescriptor || (!options.completeModel && !options.requestCompletion && config.featureFlags.modelProviderGateway && implementedFeatures.modelProviderGateway
     ? await providerGateway.assertCompatible({ providerId, modelId }, mode === "act" ? "act" : "plan")
     : undefined);
   const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);

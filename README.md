@@ -4,6 +4,18 @@ Mini AI Web Editor 是一个本地优先的浏览器端 AI 编码工作台。它
 
 当前项目的定位不是完全自动化的云端开发平台，而是一个透明、可控、可回滚的本地编码 Agent：先理解上下文，再生成可审查补丁，由用户决定是否应用、验证和提交。
 
+## 阶段 5：集成验收与默认启用
+
+阶段 0-4 完成的 Context Budget V2、Model Provider Gateway、Language Service / LSP 和 Inline Edit 现已默认启用。部署时不配置对应环境变量也会进入新路径；如需紧急回退，可将单项环境变量显式设置为 `0`、`false`、`no` 或 `off`，Capability API 会同步返回实际生效路径。
+
+执行完整发布验收：
+
+```bash
+pnpm verify:stage5
+```
+
+该命令串联服务端全量测试、服务端与前端类型检查、前端生产构建，并生成 `apps/server/artifacts/evaluation/stage-5-integration.json`。验收报告覆盖四项默认启用检查、四项独立回退检查和十类离线集成场景，完成度低于 90% 时命令返回失败。
+
 ## 功能特性
 
 - 在浏览器 UI 中打开并恢复本地项目工作区。

@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
 import { createCapabilityRouter } from "./capabilityRoutes.js";
-import { createServerCapabilities, readFeatureFlags, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
+import { createServerCapabilities, defaultFeatureFlags, readFeatureFlags, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
 
-test("Feature Flag 默认关闭并支持常用布尔值", () => {
-  assert.deepEqual(readFeatureFlags({}), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false });
+test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {
+  assert.deepEqual(readFeatureFlags({}), defaultFeatureFlags);
   assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on" }), { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true });
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off" }), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false });
+  assert.deepEqual(readFeatureFlags({ LSP_ENABLED: "invalid-value" }), defaultFeatureFlags);
 });
 
 test("Capability API 返回脱敏能力快照", async () => {

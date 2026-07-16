@@ -16,14 +16,26 @@ const featureFlagEnvironmentNames: Record<keyof FeatureFlags, string> = {
   inlineEdit: "INLINE_EDIT_ENABLED"
 };
 
-function parseBoolean(value: string | undefined) {
-  if (!value?.trim()) return false;
-  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+export const defaultFeatureFlags: FeatureFlags = {
+  contextBudgetV2: true,
+  modelProviderGateway: true,
+  lsp: true,
+  inlineEdit: true
+};
+
+function parseBoolean(value: string | undefined, defaultValue: boolean) {
+  if (!value?.trim()) return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return defaultValue;
 }
 
-// 所有新能力默认关闭，保证部署后仍走原有稳定路径。
+// 阶段 5 默认启用已完成验收的能力，同时保留环境变量作为紧急回退开关。
 export function readFeatureFlags(environment: NodeJS.ProcessEnv = process.env): FeatureFlags {
-  return Object.fromEntries(Object.entries(featureFlagEnvironmentNames).map(([key, name]) => [key, parseBoolean(environment[name])])) as FeatureFlags;
+  return Object.fromEntries(
+    (Object.entries(featureFlagEnvironmentNames) as Array<[keyof FeatureFlags, string]>).map(([key, name]) => [key, parseBoolean(environment[name], defaultFeatureFlags[key])])
+  ) as FeatureFlags;
 }
 
 export type ServerCapabilities = {
