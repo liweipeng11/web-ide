@@ -19,10 +19,9 @@
   justify-content: space-between;
 }
 
-.model-settings-trigger {
+.model-status {
   align-items: center;
   background: transparent;
-  border-color: transparent;
   display: flex;
   gap: 6px;
   min-height: 28px;
@@ -30,20 +29,14 @@
   padding: 0 7px;
 }
 
-.model-settings-trigger:hover,
-.model-settings-trigger.active {
-  background: #eef5ff;
-  border-color: #b8d5f4;
-}
-
-.model-settings-trigger span {
+.model-status span {
   color: #334155;
   flex: 0 0 auto;
   font-size: 11px;
   font-weight: 700;
 }
 
-.model-settings-trigger small {
+.model-status small {
   color: #64748b;
   font-size: 10px;
   max-width: 116px;

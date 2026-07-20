@@ -94,6 +94,7 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
       agentSteps: [],
       chatContextPaths: [],
       userRequest: "",
+      agentMode: current.defaultAgentMode,
       taskModelOverride: null,
       patch: null,
       autoFix: null,

@@ -20,7 +20,7 @@ import { createVue2TemplateRouter } from "./vue2Template/routes.js";
 import { createSearchRouter } from "./searchRoutes.js";
 import { clearPendingPatches, deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
 import { applyPendingPatch } from "./patchApplyService.js";
-import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
+import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory, readAgentRulesSettings, writeAgentRulesSettings } from "./projectRules.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
 import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
@@ -312,6 +312,20 @@ app.get(
     const rawPaths = request.query.path;
     const contextPaths = (Array.isArray(rawPaths) ? rawPaths : rawPaths ? [rawPaths] : []).filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
     response.json(await discoverProjectRules(contextPaths));
+  })
+);
+
+app.get(
+  "/api/agent-rules",
+  asyncRoute(async (_request, response) => {
+    response.json({ settings: await readAgentRulesSettings() });
+  })
+);
+
+app.put(
+  "/api/agent-rules",
+  asyncRoute(async (request, response) => {
+    response.json({ settings: await writeAgentRulesSettings(request.body || {}) });
   })
 );
 

@@ -1,10 +1,10 @@
-.provider-settings-page {
+.provider-settings-panel {
   background: #f3f5f8;
   box-sizing: border-box;
   display: grid;
   gap: 14px;
   grid-template-columns: 292px minmax(0, 1fr);
-  height: 100vh;
+  height: 100%;
   padding: 16px;
 }
 
@@ -586,10 +586,10 @@
 }
 
 @media (max-width: 760px) {
-  .provider-settings-page {
+  .provider-settings-panel {
     grid-template-columns: 1fr;
     height: auto;
-    min-height: 100vh;
+    min-height: 100%;
   }
 
   .provider-page-sidebar {

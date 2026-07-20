@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
-export type WorkbenchLeftPanel = "files" | "search" | "rules" | "memory" | "git";
+export type WorkbenchLeftPanel = "files" | "search" | "git";
 
 type UseWorkbenchLayoutOptions = {
   onSaveFile: () => Promise<unknown> | void;
@@ -20,7 +20,10 @@ const LAYOUT_PREFERENCES_KEY = "mini-ai-web-editor:layout";
 
 function readLayoutPreferences(): LayoutPreferences {
   try {
-    return JSON.parse(window.localStorage.getItem(LAYOUT_PREFERENCES_KEY) || "{}") as LayoutPreferences;
+    const preferences = JSON.parse(window.localStorage.getItem(LAYOUT_PREFERENCES_KEY) || "{}") as LayoutPreferences;
+    // 已迁移到设置页的旧面板不再恢复，避免启动后出现空白侧栏。
+    if (!["files", "search", "git"].includes(preferences.leftPanel || "")) preferences.leftPanel = "files";
+    return preferences;
   } catch {
     // 本地偏好损坏时回退到安全默认值，不影响工作台启动。
     return {};

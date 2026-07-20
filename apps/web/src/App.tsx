@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { createProvider, decideApprovalRequest, fetchModelCatalog, updateProviderSettings, type AgentStep, type CreateProviderInput, type FileTreeNode, type PatchFileChange, type ProviderSettings, type ProviderSettingsInput, type UnifiedDiagnostic } from "./api";
+import { createProvider, decideApprovalRequest, fetchModelCatalog, updateModelDefaults, updateProviderSettings, type AgentMode, type AgentStep, type CreateProviderInput, type FileTreeNode, type ModelSelectionDefaults, type PatchFileChange, type ProviderSettings, type ProviderSettingsInput, type UnifiedDiagnostic } from "./api";
+import { writeAgentPreferences } from "./agentPreferences";
 import { initialState, type AppState } from "./appState";
 import AppLayout from "./components/AppLayout";
-import ProviderSettingsPage from "./components/models/ProviderSettingsPage";
+import SettingsPage, { type SettingsSection } from "./components/settings/SettingsPage";
 import { useChatSession } from "./hooks/useChatSession";
 import { useCommandCenter } from "./hooks/useCommandCenter";
 import { usePatchActions } from "./hooks/usePatchActions";
@@ -16,6 +17,7 @@ export default function App() {
   const [files, setFiles] = useState<FileTreeNode[]>([]);
   const [state, setState] = useState<AppState>(initialState);
   const [currentPath, setCurrentPath] = useState(window.location.pathname);
+  const [savingDefaults, setSavingDefaults] = useState(false);
 
   const workspaceFiles = useWorkspaceFiles({ state, setState, setFiles });
   const layout = useWorkbenchLayout({ onSaveFile: workspaceFiles.handleSaveFile });
@@ -77,6 +79,23 @@ export default function App() {
       } : current.modelCatalog
     }));
     return result.settings;
+  }
+
+  async function handleSaveAgentDefaults(defaultMode: AgentMode, defaults: ModelSelectionDefaults) {
+    setSavingDefaults(true);
+    try {
+      const result = await updateModelDefaults(defaults);
+      writeAgentPreferences({ defaultMode });
+      setState((current) => ({
+        ...current,
+        defaultAgentMode: defaultMode,
+        agentMode: current.currentTaskSessionId ? current.agentMode : defaultMode,
+        modelDefaults: result.defaults,
+        modelCatalog: current.modelCatalog ? { ...current.modelCatalog, defaults: result.defaults } : current.modelCatalog
+      }));
+    } finally {
+      setSavingDefaults(false);
+    }
   }
 
   function navigateTo(path: string) {
@@ -194,15 +213,26 @@ export default function App() {
     }
   }
 
-  if (currentPath === "/settings/providers") {
+  if (currentPath === "/settings" || currentPath.startsWith("/settings/")) {
+    const requestedSection = currentPath.split("/")[2];
+    const section: SettingsSection = requestedSection === "providers" || requestedSection === "rules" || requestedSection === "memory" ? requestedSection : "general";
     return (
-      <ProviderSettingsPage
-        settings={state.providerSettings}
+      <SettingsPage
+        section={section}
+        defaultAgentMode={state.defaultAgentMode}
+        modelDefaults={state.modelDefaults}
+        providerSettings={state.providerSettings}
         catalog={state.modelCatalog}
+        projectRules={state.projectRules}
+        workspaceRoot={state.workspaceRoot}
         loading={state.loading}
+        savingDefaults={savingDefaults}
         onBack={() => navigateTo("/")}
-        onSave={handleUpdateProviderSettings}
-        onCreate={handleCreateProvider}
+        onNavigate={(nextSection) => navigateTo(`/settings/${nextSection}`)}
+        onSaveDefaults={handleSaveAgentDefaults}
+        onSaveProvider={handleUpdateProviderSettings}
+        onCreateProvider={handleCreateProvider}
+        onRefreshProjectRules={workspaceFiles.handleRefreshProjectRules}
       />
     );
   }
@@ -241,7 +271,6 @@ export default function App() {
       onOpenChatHistory={chatSession.handleOpenChatHistory}
       onRefreshChatHistories={chatSession.handleRefreshChatHistories}
       onRefreshTaskSessions={taskSessions.handleRefreshTaskSessions}
-      onRefreshProjectRules={workspaceFiles.handleRefreshProjectRules}
       onOpenTaskSession={handleOpenTaskSession}
       onDeleteTaskSession={taskSessions.handleDeleteTaskSession}
       onAddPlanItem={taskSessions.handleAddPlanItem}
@@ -251,7 +280,7 @@ export default function App() {
       onApprovePlan={handleApprovePlan}
       onInterruptTaskForReplan={handleInterruptTaskForReplan}
       onUpdateAgentMode={taskSessions.handleUpdateAgentMode}
-      onOpenProviderSettings={() => navigateTo("/settings/providers")}
+      onOpenSettings={() => navigateTo("/settings/general")}
       onNewChat={chatSession.handleNewChat}
       onDeleteChatHistory={chatSession.handleDeleteChatHistory}
       onStopChat={chatSession.handleStopChat}

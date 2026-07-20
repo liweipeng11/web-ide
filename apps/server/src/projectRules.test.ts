@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory } from "./projectRules.js";
+import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory, readAgentRulesSettings, writeAgentRulesSettings } from "./projectRules.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 
 test("discoverProjectRules loads global and project-scoped mini-ai rules", async () => {
@@ -51,4 +51,27 @@ test("ensureGlobalRulesDirectory creates the user .mini-ai rules folder", async 
   assert.equal(rulesRoot, globalRulesRoot);
   assert.equal((await fs.stat(globalRulesRoot)).isDirectory(), true);
   assert.equal((await fs.stat(path.join(globalRulesRoot, "rules"))).isDirectory(), true);
+});
+
+test("Agent Rules settings read and write global and project AGENTS.md", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-rules-"));
+  const globalRulesRoot = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-global-")), ".mini-ai");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const saved = await writeAgentRulesSettings(
+    {
+      globalContent: "全局规则",
+      projectContent: "项目规则"
+    },
+    { globalRulesRoot }
+  );
+
+  assert.equal(saved.global.content, "全局规则");
+  assert.equal(saved.project.content, "项目规则");
+  assert.equal(saved.project.available, true);
+  assert.equal(await fs.readFile(path.join(globalRulesRoot, "AGENTS.md"), "utf8"), "全局规则");
+  assert.equal(await fs.readFile(path.join(workspaceRoot, ".mini-ai", "AGENTS.md"), "utf8"), "项目规则");
+
+  const loaded = await readAgentRulesSettings({ globalRulesRoot });
+  assert.deepEqual(loaded, saved);
 });

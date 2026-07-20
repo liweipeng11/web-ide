@@ -1,4 +1,5 @@
 import type { AgentMode, AgentStep, Checkpoint, CommandPolicyResult, CommandResult, FileChatHistoryItem, FileChatMessage, FileTreeNode, GenerateEditResponse, ModelCatalogResponse, ModelSelection, ModelSelectionDefaults, ProjectRulesResponse, ProviderSettings, TaskSession, VerificationIssueCategory } from "./api";
+import { readAgentPreferences } from "./agentPreferences";
 
 export type OpenFileTab = {
   path: string;
@@ -13,6 +14,7 @@ export type AppState = {
   openFiles: OpenFileTab[];
   userRequest: string;
   agentMode: AgentMode;
+  defaultAgentMode: AgentMode;
   modelCatalog: ModelCatalogResponse | null;
   modelDefaults: ModelSelectionDefaults | null;
   providerSettings: ProviderSettings[];
@@ -82,13 +84,16 @@ export function createCommandAgentStep(command: string, status: NonNullable<Extr
   };
 }
 
+const initialAgentPreferences = readAgentPreferences();
+
 export const initialState: AppState = {
   selectedPath: null,
   fileContent: "",
   savedFileContent: "",
   openFiles: [],
   userRequest: "",
-  agentMode: "act",
+  agentMode: initialAgentPreferences.defaultMode,
+  defaultAgentMode: initialAgentPreferences.defaultMode,
   modelCatalog: null,
   modelDefaults: null,
   providerSettings: [],

@@ -4,16 +4,15 @@ import AddProviderModal from "./AddProviderModal";
 import ProviderModelManagerModal from "./ProviderModelManagerModal";
 
  type Props = {
-  settings: ProviderSettings[];
+ settings: ProviderSettings[];
   catalog: ModelCatalogResponse | null;
   loading: boolean;
-  onBack: () => void;
   onSave: (input: ProviderSettingsInput) => Promise<void>;
   onCreate: (input: CreateProviderInput) => Promise<ProviderSettings>;
 };
 
 /** Provider 独立设置页，负责提供商导航、连接配置和模型目录管理。 */
-export default function ProviderSettingsPage({ settings, catalog, loading, onBack, onSave, onCreate }: Props) {
+export default function ProviderSettingsPage({ settings, catalog, loading, onSave, onCreate }: Props) {
   const [selectedId, setSelectedId] = useState("");
   const [providerSearch, setProviderSearch] = useState("");
   const [name, setName] = useState("");
@@ -103,7 +102,7 @@ export default function ProviderSettingsPage({ settings, catalog, loading, onBac
   }
 
   return (
-    <main className="provider-settings-page">
+    <div className="provider-settings-panel">
       <aside className="provider-page-sidebar">
         <div className="provider-page-brand">
           <strong>模型平台</strong>
@@ -128,7 +127,6 @@ export default function ProviderSettingsPage({ settings, catalog, loading, onBac
           <div><h1>{selected?.name || "Provider 设置"}</h1><span>{selected?.providerId || "请选择提供商"}</span></div>
           <div className="provider-page-header-actions">
             {selected ? <button type="button" className={enabled ? "provider-enable-switch on" : "provider-enable-switch"} role="switch" aria-checked={enabled} onClick={() => setEnabled((value) => !value)}><span /></button> : null}
-            <button type="button" onClick={onBack}>返回主页面</button>
           </div>
         </header>
 
@@ -179,6 +177,6 @@ export default function ProviderSettingsPage({ settings, catalog, loading, onBac
           onApply={(nextModels) => { setModels(nextModels); setFeedback(`已更新 ${nextModels.length} 个模型，请保存设置`); }}
         />
       ) : null}
-    </main>
+    </div>
   );
 }

@@ -99,7 +99,7 @@ export default function ProjectMemoryPanel({ disabled, workspaceRoot }: Props) {
     : [];
 
   return (
-    <section className="project-memory-panel">
+    <section className="project-memory-panel settings-memory-panel">
       <div className="project-memory-heading">
         <div>
           <h2>Project Memory</h2>

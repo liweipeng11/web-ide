@@ -601,6 +601,11 @@ export type ProjectRulesResponse = {
   supportedFiles: string[];
 };
 
+export type AgentRulesSettings = {
+  global: { path: string; content: string };
+  project: { path: string; content: string; available: boolean };
+};
+
 export type ProjectMemoryTechStack = {
   packageManager: string | null;
   languages: string[];
@@ -824,6 +829,17 @@ export function fetchProjectCommands() {
 export function fetchProjectRules(paths: string[] = []) {
   const query = paths.map((path) => `path=${encodeURIComponent(path)}`).join("&");
   return request<ProjectRulesResponse>(`/api/project-rules${query ? `?${query}` : ""}`);
+}
+
+export function fetchAgentRulesSettings() {
+  return request<{ settings: AgentRulesSettings }>("/api/agent-rules");
+}
+
+export function updateAgentRulesSettings(input: { globalContent: string; projectContent?: string }) {
+  return request<{ settings: AgentRulesSettings }>("/api/agent-rules", {
+    method: "PUT",
+    body: JSON.stringify(input)
+  });
 }
 
 export function fetchProjectMemory() {

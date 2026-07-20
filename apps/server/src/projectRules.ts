@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { HttpError } from "./errors.js";
 import { safeResolve } from "./fileTools.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import type { ProjectRule, ProjectRulesResponse } from "./types.js";
@@ -33,6 +34,16 @@ type RuleMetadata = {
 
 type DiscoverProjectRulesOptions = {
   globalRulesRoot?: string;
+};
+
+export type AgentRulesSettings = {
+  global: { path: string; content: string };
+  project: { path: string; content: string; available: boolean };
+};
+
+export type AgentRulesSettingsInput = {
+  globalContent?: unknown;
+  projectContent?: unknown;
 };
 
 function normalizeWorkspacePath(value: string) {
@@ -289,6 +300,62 @@ export function getDefaultGlobalRulesRoot() {
 export async function ensureGlobalRulesDirectory(globalRulesRoot = getDefaultGlobalRulesRoot()) {
   await fs.mkdir(path.join(globalRulesRoot, "rules"), { recursive: true });
   return globalRulesRoot;
+}
+
+async function readEditableRule(filePath: string) {
+  return fs.readFile(filePath, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+}
+
+function normalizeEditableRule(value: unknown, fieldName: string) {
+  if (typeof value !== "string") throw new HttpError(400, `${fieldName} must be a string`);
+  if (value.length > maxRuleFileChars) throw new HttpError(400, `${fieldName} cannot exceed ${maxRuleFileChars} characters`);
+  return value.replace(/\r\n/g, "\n");
+}
+
+/** 读取设置页可直接维护的全局和项目 AGENTS.md。 */
+export async function readAgentRulesSettings(options: DiscoverProjectRulesOptions = {}): Promise<AgentRulesSettings> {
+  const globalRulesRoot = options.globalRulesRoot || getDefaultGlobalRulesRoot();
+  const workspaceRoot = getWorkspaceRoot();
+
+  return {
+    global: {
+      path: "~/.mini-ai/AGENTS.md",
+      content: await readEditableRule(path.join(globalRulesRoot, "AGENTS.md"))
+    },
+    project: {
+      path: miniAiAgentFile,
+      content: workspaceRoot ? await readEditableRule(safeResolve(miniAiAgentFile, { allowIgnored: true })) : "",
+      available: Boolean(workspaceRoot)
+    }
+  };
+}
+
+/** 保存设置页中的 AGENTS.md；未提交的作用域保持原内容不变。 */
+export async function writeAgentRulesSettings(input: AgentRulesSettingsInput, options: DiscoverProjectRulesOptions = {}) {
+  const globalRulesRoot = options.globalRulesRoot || getDefaultGlobalRulesRoot();
+  const workspaceRoot = getWorkspaceRoot();
+
+  if (input.globalContent === undefined && input.projectContent === undefined) {
+    throw new HttpError(400, "At least one Agent Rules field is required");
+  }
+
+  if (input.globalContent !== undefined) {
+    const content = normalizeEditableRule(input.globalContent, "globalContent");
+    await ensureGlobalRulesDirectory(globalRulesRoot);
+    await fs.writeFile(path.join(globalRulesRoot, "AGENTS.md"), content, "utf8");
+  }
+
+  if (input.projectContent !== undefined) {
+    if (!workspaceRoot) throw new HttpError(400, "Open a workspace before saving project Agent Rules");
+    const content = normalizeEditableRule(input.projectContent, "projectContent");
+    await ensureProjectRulesDirectory(workspaceRoot);
+    await fs.writeFile(safeResolve(miniAiAgentFile, { allowIgnored: true }), content, "utf8");
+  }
+
+  return readAgentRulesSettings({ globalRulesRoot });
 }
 
 export async function discoverProjectRules(contextPaths: string[] = [], options: DiscoverProjectRulesOptions = {}): Promise<ProjectRulesResponse> {

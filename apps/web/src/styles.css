@@ -3,5 +3,6 @@
 @import "./styles/chat.css";
 @import "./styles/diff.css";
 @import "./styles/inline-edit.css";
+@import "./styles/settings.css";
 @import "./styles/provider-settings.css";
 @import "./gitWorkflow/gitWorkflow.css";

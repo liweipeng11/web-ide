@@ -13,8 +13,6 @@ const CodeSearchPanel = lazy(() => import("./CodeSearchPanel"));
 const EditorPane = lazy(() => import("./EditorPane"));
 const GitWorkflowPanel = lazy(() => import("../gitWorkflow/GitWorkflowPanel"));
 const PatchReviewPane = lazy(() => import("./PatchReviewPane"));
-const ProjectMemoryPanel = lazy(() => import("./ProjectMemoryPanel"));
-const ProjectRulesPanel = lazy(() => import("./ProjectRulesPanel"));
 const TerminalPanel = lazy(() => import("./TerminalPanel"));
 
 function PanelLoading({ label, fill = false }: { label: string; fill?: boolean }) {
@@ -59,7 +57,6 @@ type Props = {
   onOpenChatHistory: (path: string) => Promise<void>;
   onRefreshChatHistories: () => Promise<void>;
   onRefreshTaskSessions: () => Promise<void>;
-  onRefreshProjectRules: () => Promise<void>;
   onOpenTaskSession: (taskSessionId: string) => Promise<void>;
   onDeleteTaskSession: (taskSessionId: string) => Promise<void>;
   onAddPlanItem: (taskSessionId: string, title: string) => Promise<void>;
@@ -69,7 +66,7 @@ type Props = {
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
   onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
-  onOpenProviderSettings: () => void;
+  onOpenSettings: () => void;
   onNewChat: () => void;
   onDeleteChatHistory: (path: string) => Promise<void>;
   onStopChat: () => void;
@@ -121,7 +118,6 @@ export default function AppLayout({
   onOpenChatHistory,
   onRefreshChatHistories,
   onRefreshTaskSessions,
-  onRefreshProjectRules,
   onOpenTaskSession,
   onDeleteTaskSession,
   onAddPlanItem,
@@ -131,7 +127,7 @@ export default function AppLayout({
   onApprovePlan,
   onInterruptTaskForReplan,
   onUpdateAgentMode,
-  onOpenProviderSettings,
+  onOpenSettings,
   onNewChat,
   onDeleteChatHistory,
   onStopChat,
@@ -241,12 +237,6 @@ export default function AppLayout({
             <button type="button" className={leftPanelVisible && leftPanel === "files" ? "active" : ""} title="文件树" aria-label="文件树" aria-pressed={leftPanelVisible && leftPanel === "files"} onClick={() => onSelectLeftPanel("files")}>
               <Icon name="folder-open" />
             </button>
-            <button type="button" className={leftPanelVisible && leftPanel === "rules" ? "active" : ""} title="Project Rules" aria-label="Project Rules" aria-pressed={leftPanelVisible && leftPanel === "rules"} onClick={() => onSelectLeftPanel("rules")}>
-              <Icon name="rules" />
-            </button>
-            <button type="button" className={leftPanelVisible && leftPanel === "memory" ? "active" : ""} title="Project Memory" aria-label="Project Memory" aria-pressed={leftPanelVisible && leftPanel === "memory"} onClick={() => onSelectLeftPanel("memory")}>
-              <Icon name="memory" />
-            </button>
             <button type="button" className={leftPanelVisible && leftPanel === "search" ? "active" : ""} title="代码搜索 (Ctrl+Shift+F)" aria-label="代码搜索" aria-pressed={leftPanelVisible && leftPanel === "search"} onClick={() => onSelectLeftPanel("search")}>
               <Icon name="search" />
             </button>
@@ -267,10 +257,6 @@ export default function AppLayout({
                 />
               ) : leftPanel === "search" ? (
                 <CodeSearchPanel disabled={!state.workspaceRoot} onOpenFile={onOpenFile} />
-              ) : leftPanel === "rules" ? (
-                <ProjectRulesPanel disabled={!state.workspaceRoot} rules={state.projectRules} onRefresh={() => void onRefreshProjectRules()} />
-              ) : leftPanel === "memory" ? (
-                <ProjectMemoryPanel key={state.workspaceRoot} disabled={!state.workspaceRoot} workspaceRoot={state.workspaceRoot} />
               ) : (
                 <GitWorkflowPanel
                   disabled={!state.workspaceRoot}
@@ -369,7 +355,7 @@ export default function AppLayout({
               onApprovePlan={onApprovePlan}
               onInterruptTaskForReplan={onInterruptTaskForReplan}
               onUpdateAgentMode={onUpdateAgentMode}
-              onOpenProviderSettings={onOpenProviderSettings}
+              onOpenSettings={onOpenSettings}
               onRollbackCheckpoint={(checkpointId) => void onRollbackCheckpoint(checkpointId)}
               onNewChat={onNewChat}
               onDeleteHistory={(path) => void onDeleteChatHistory(path)}

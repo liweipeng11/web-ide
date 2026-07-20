@@ -38,7 +38,7 @@ type Props = {
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
   onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
-  onOpenProviderSettings: () => void;
+  onOpenSettings: () => void;
   onRollbackCheckpoint: (checkpointId: string) => void;
   onNewChat: () => void;
   onDeleteHistory: (path: string) => void;
@@ -190,7 +190,7 @@ export default function ChatPanel({
   onApprovePlan,
   onInterruptTaskForReplan,
   onUpdateAgentMode,
-  onOpenProviderSettings,
+  onOpenSettings,
   onRollbackCheckpoint,
   onNewChat,
   onDeleteHistory,
@@ -555,6 +555,9 @@ export default function ChatPanel({
           <span>{chatId.startsWith("chat:") ? "新对话" : "历史对话"}</span>
         </div>
         <div className="chat-heading-actions">
+          <button type="button" className="icon-button" title="智能体设置" aria-label="智能体设置" onClick={onOpenSettings}>
+            <Icon name="settings" />
+          </button>
           <button type="button" className="icon-button" disabled={loading} title="New chat" aria-label="New chat" onClick={onNewChat}>
             <Icon name="chat" />
           </button>
@@ -594,10 +597,10 @@ export default function ChatPanel({
           ))}
         </div>
         {modelDefaults && selectableModels.length ? (
-          <button type="button" className="model-settings-trigger" onClick={onOpenProviderSettings}>
+          <div className="model-status" aria-label={`当前模型：${effectiveTaskModel?.displayName || "默认"}`}>
             <span>模型</span>
             <small>{effectiveTaskModel?.displayName || "默认"}</small>
-          </button>
+          </div>
         ) : null}
       </div>
       {renderTaskPlanTrigger()}
