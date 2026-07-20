@@ -511,13 +511,13 @@ apps/
 
 ## Language Service / LSP
 
-设置 `LSP_ENABLED=1` 后，服务端会按文件语言发现并复用工作区或系统中已有的 Language Server：
+Language Service 默认启用；设置 `LSP_ENABLED=0` 可显式关闭。服务端内置并按文件语言启动以下 Language Server：
 
 - TypeScript / JavaScript：`typescript-language-server`
 - Vue：`vue-language-server`（`@vue/language-server`）
 - Python：`basedpyright-langserver`、`pyright-langserver` 或 `pylsp`
 
-Node Language Server 可以安装在当前工作区的 `node_modules` 中；Python Language Server 可以通过系统 PATH 提供。项目不会自动下载或执行项目自定义命令。未发现服务端时，TS/JS/Vue 会明确降级到现有 Symbol Graph，Python 保持普通文本编辑能力。Language Server 进程在工作区切换、服务退出或长时间空闲时释放。
+发现顺序为“工作区本地依赖 → Web IDE 服务端内置依赖 → 系统 PATH”。工作区可安装并固定自己的 Node Language Server 版本；未安装时会直接使用 Web IDE 内置的 `typescript-language-server`、`@vue/language-server` 或 `basedpyright`，不会污染用户项目，也不需要联网下载。项目只发现固定白名单中的命令，不读取项目自定义启动命令或参数。所有来源均不可用时，TS/JS/Vue 会明确降级到现有 Symbol Graph，Python 使用有限文本能力。Language Server 进程在工作区切换、服务退出或长时间空闲时释放。
 
 编辑器支持诊断 Marker、F12 定义、Shift+F12 引用列表、F2 Rename、Hover、工作区符号搜索、LSP Code Action 及“交给 Agent 修复”。Rename 和带 WorkspaceEdit 的 Code Action 只生成待审阅 Patch，不会直接落盘；诊断修复会启动现有 Agent 流程，最终修改仍经过 Patch、审批和 Checkpoint。Agent 侧提供只读诊断、定义、引用、Hover 和符号搜索工具。
 
