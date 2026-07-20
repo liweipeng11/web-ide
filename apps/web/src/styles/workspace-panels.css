@@ -488,24 +488,54 @@
 
 .file-tree ul {
   list-style: none;
-  margin: 8px 0 0;
-  padding: 0 0 0 12px;
+  margin: 2px 0 0 7px;
+  padding: 0 0 0 10px;
 }
 
 .file-tree > ul {
+  margin-left: 0;
   padding-left: 0;
+}
+
+.file-tree ul ul {
+  border-left: 1px solid #e2e8f0;
 }
 
 .file-tree summary {
   align-items: center;
+  border-radius: 6px;
   color: #334155;
   cursor: pointer;
   display: flex;
   font-size: 11px;
   gap: 6px;
-  line-height: 28px;
-  min-height: 28px;
+  line-height: 26px;
+  list-style: none;
+  min-height: 26px;
   min-width: 0;
+  padding: 0 6px 0 4px;
+}
+
+.file-tree summary::-webkit-details-marker {
+  display: none;
+}
+
+.file-tree summary::before {
+  color: #94a3b8;
+  content: "›";
+  flex: 0 0 auto;
+  font-size: 15px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.file-tree details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.file-tree summary:hover {
+  background: #eef2f7;
+  color: #111827;
 }
 
 .tree-file {
@@ -561,6 +591,7 @@
 
 .tree-file.selected {
   background: #e6f0ff;
+  box-shadow: inset 2px 0 0 #2563eb;
   color: #155aa8;
 }
 
@@ -584,7 +615,7 @@
   border-bottom: 1px solid #d8dee5;
   display: flex;
   flex: 0 0 auto;
-  min-height: 38px;
+  min-height: 36px;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -593,17 +624,13 @@
 .editor-tab {
   align-items: center;
   background: transparent;
-  border: 0;
   border-right: 1px solid #d8dee5;
-  border-radius: 0;
   color: #4b5563;
   display: inline-flex;
   flex: 0 1 190px;
-  gap: 7px;
-  justify-content: flex-start;
-  min-height: 38px;
+  min-height: 36px;
   min-width: 120px;
-  padding: 0 9px 0 12px;
+  position: relative;
 }
 
 .editor-tab:hover {
@@ -615,6 +642,26 @@
   background: #ffffff;
   box-shadow: inset 0 2px 0 #1d6fd8;
   color: #111827;
+}
+
+.editor-tab-main {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  display: flex;
+  flex: 1 1 auto;
+  gap: 7px;
+  justify-content: flex-start;
+  min-height: 36px;
+  min-width: 0;
+  padding: 0 5px 0 11px;
+}
+
+.editor-tab-main:hover:not(:disabled) {
+  border-color: transparent;
+  color: inherit;
 }
 
 .editor-tab-badge {
@@ -644,13 +691,18 @@
 
 .editor-tab-close {
   align-items: center;
-  border-radius: 4px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
   color: #647181;
   display: inline-flex;
   flex: 0 0 auto;
-  height: 20px;
+  height: 22px;
   justify-content: center;
-  width: 20px;
+  margin-right: 5px;
+  min-height: 22px;
+  padding: 0;
+  width: 22px;
 }
 
 .editor-tab-close:hover,
@@ -675,12 +727,13 @@
 
 .editor-pathbar {
   align-items: center;
+  background: #ffffff;
   border-bottom: 1px solid #e4e9f0;
   display: flex;
   flex: 0 0 auto;
   gap: 12px;
   justify-content: space-between;
-  min-height: 36px;
+  min-height: 38px;
   min-width: 0;
   padding: 6px 10px 6px 12px;
 }
@@ -836,9 +889,9 @@ body.resizing-terminal .terminal-resizer::after {
   flex: 1;
   font: inherit;
   font-size: 11px;
-  min-height: 28px;
+  min-height: 26px;
   min-width: 0;
-  padding: 0 8px;
+  padding: 0 6px;
 }
 
 .terminal-command-form button {
@@ -879,14 +932,49 @@ body.resizing-terminal .terminal-resizer::after {
   align-items: center;
   display: inline-flex;
   flex: 0 0 auto;
-  gap: 8px;
+  gap: 10px;
+}
+
+.editor-status-group,
+.editor-command-group {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+}
+
+.editor-status-group {
+  border-right: 1px solid #e2e8f0;
+  padding-right: 10px;
 }
 
 .editor-actions .save-state {
+  align-items: center;
   color: #647181;
-  display: inline;
+  display: inline-flex;
   font-size: 10px;
+  gap: 5px;
   margin-top: 0;
+}
+
+.editor-actions .save-state::before {
+  background: #22c55e;
+  border-radius: 50%;
+  content: "";
+  height: 6px;
+  width: 6px;
+}
+
+.editor-actions .save-state.dirty::before {
+  background: #f59e0b;
+}
+
+.editor-actions .save-state.saving::before {
+  animation: save-state-pulse 900ms ease-in-out infinite;
+  background: #3b82f6;
+}
+
+@keyframes save-state-pulse {
+  50% { opacity: 0.35; }
 }
 
 .editor-actions button {
@@ -895,10 +983,20 @@ body.resizing-terminal .terminal-resizer::after {
   width: 30px;
 }
 
+.editor-actions .inline-edit-trigger {
+  padding: 0 9px;
+  width: auto;
+}
+
 .lsp-state {
   color: #71c995;
   font-size: 11px;
   white-space: nowrap;
+}
+
+.tree-file:hover:not(.selected) {
+  background: #eef2f7;
+  color: #111827;
 }
 
 .lsp-state.degraded {

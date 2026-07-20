@@ -38,8 +38,7 @@ type Props = {
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
   onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
-  onUpdateModelSelection: (target: "chat" | "plan" | "act", selection: ModelSelection) => Promise<void>;
-  onTaskModelOverrideChange: (selection: ModelSelection | null) => void;
+  onOpenProviderSettings: () => void;
   onRollbackCheckpoint: (checkpointId: string) => void;
   onNewChat: () => void;
   onDeleteHistory: (path: string) => void;
@@ -191,8 +190,7 @@ export default function ChatPanel({
   onApprovePlan,
   onInterruptTaskForReplan,
   onUpdateAgentMode,
-  onUpdateModelSelection,
-  onTaskModelOverrideChange,
+  onOpenProviderSettings,
   onRollbackCheckpoint,
   onNewChat,
   onDeleteHistory,
@@ -246,6 +244,7 @@ export default function ChatPanel({
   const contextStatusSession = activeTaskSession || selectedTaskSession;
   const contextBudget = contextStatusSession?.contextBudgetSnapshot;
   const contextSummary = contextStatusSession?.contextSummary;
+  const contextUsagePercent = contextBudget ? Math.min(100, Math.max(0, Math.round(contextBudget.usageRatio * 100))) : 0;
   const selectableModels = useMemo(
     () => (modelCatalog?.providers || []).flatMap((provider) => provider.models.map((model) => ({ provider, model }))),
     [modelCatalog]
@@ -254,37 +253,6 @@ export default function ChatPanel({
   const effectiveTaskModel = effectiveTaskSelection
     ? selectableModels.find(({ provider, model }) => provider.id === effectiveTaskSelection.providerId && model.id === effectiveTaskSelection.modelId)?.model
     : null;
-
-  function renderModelSelector(target: "chat" | "plan" | "act") {
-    const selection = modelDefaults?.[target];
-    if (!selection || !selectableModels.length) return null;
-    const selected = selectableModels.find(({ model }) => model.providerId === selection.providerId && model.id === selection.modelId)?.model;
-    const price = selected?.price;
-    const priceText = price?.inputPerMillionTokens !== undefined && price.outputPerMillionTokens !== undefined
-      ? `$${price.inputPerMillionTokens}/$${price.outputPerMillionTokens} / 1M`
-      : "价格未知";
-
-    return (
-      <label className="model-selector-field">
-        <span>{target === "chat" ? "Chat" : target === "plan" ? "Plan" : "Act"}</span>
-        <select
-          value={JSON.stringify(selection)}
-          disabled={disabled || loading || streaming}
-          title={selected ? `${selected.capabilities.contextWindowTokens.toLocaleString()} 上下文 · ${priceText}` : "模型不可用"}
-          onChange={(event) => void onUpdateModelSelection(target, JSON.parse(event.target.value) as ModelSelection)}
-        >
-          {selectableModels.map(({ provider, model }) => {
-            const unavailable = !provider.health.available || Boolean(model.disabledReason) || (target === "act" && !model.capabilities.toolCalling);
-            return (
-              <option key={`${provider.id}:${model.id}`} value={JSON.stringify({ providerId: provider.id, modelId: model.id })} disabled={unavailable}>
-                {model.displayName}{unavailable ? "（不可用）" : ""}
-              </option>
-            );
-          })}
-        </select>
-      </label>
-    );
-  }
 
   useEffect(() => {
     const approvalKey = activePlanPendingApproval && activeTaskSession ? `${activeTaskSession.id}:${activeTaskSession.planApproval?.requestedAt || "pending"}` : null;
@@ -582,26 +550,11 @@ export default function ChatPanel({
   return (
     <aside className="chat-panel">
       <div className="chat-heading">
-        <div>
+        <div className="chat-heading-title">
           <h2>智能体</h2>
           <span>{chatId.startsWith("chat:") ? "新对话" : "历史对话"}</span>
         </div>
         <div className="chat-heading-actions">
-          <div className="agent-mode-toggle" role="group" aria-label="Agent mode">
-            {(["plan", "act"] as AgentMode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={effectiveAgentMode === mode ? "active" : ""}
-                disabled={disabled || loading || streaming}
-                title={mode === "plan" ? "Plan 模式只读分析并输出方案" : "Act 模式可生成补丁并请求验证"}
-                aria-pressed={effectiveAgentMode === mode}
-                onClick={() => void onUpdateAgentMode(activeTaskSession?.id || selectedTaskSession?.id || null, mode)}
-              >
-                {mode === "plan" ? "Plan" : "Act"}
-              </button>
-            ))}
-          </div>
           <button type="button" className="icon-button" disabled={loading} title="New chat" aria-label="New chat" onClick={onNewChat}>
             <Icon name="chat" />
           </button>
@@ -624,63 +577,42 @@ export default function ChatPanel({
           </button>
         </div>
       </div>
-      {modelDefaults && selectableModels.length ? (
-        <div className="model-selector-bar" aria-label="默认模型选择">
-          {renderModelSelector("chat")}
-          {renderModelSelector("plan")}
-          {renderModelSelector("act")}
-        </div>
-      ) : null}
-      {modelDefaults && selectableModels.length ? (
-        <div className="task-model-override">
-          <label>
-            <span>本次任务模型</span>
-            <select
-              value={taskModelOverride ? JSON.stringify(taskModelOverride) : ""}
+      <div className="chat-toolbar">
+        <div className="agent-mode-toggle" role="group" aria-label="Agent mode">
+          {(["plan", "act"] as AgentMode[]).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              className={effectiveAgentMode === mode ? "active" : ""}
               disabled={disabled || loading || streaming}
-              onChange={(event) => onTaskModelOverrideChange(event.target.value ? JSON.parse(event.target.value) as ModelSelection : null)}
+              title={mode === "plan" ? "Plan 模式只读分析并输出方案" : "Act 模式可生成补丁并请求验证"}
+              aria-pressed={effectiveAgentMode === mode}
+              onClick={() => void onUpdateAgentMode(activeTaskSession?.id || selectedTaskSession?.id || null, mode)}
             >
-              <option value="">使用 {effectiveAgentMode === "plan" ? "Plan" : "Act"} 默认模型</option>
-              {selectableModels.map(({ provider, model }) => {
-                const unavailable = !provider.health.available || Boolean(model.disabledReason) || (effectiveAgentMode === "act" && !model.capabilities.toolCalling);
-                return <option key={`task:${provider.id}:${model.id}`} value={JSON.stringify({ providerId: provider.id, modelId: model.id })} disabled={unavailable}>{model.displayName}{unavailable ? "（不可用）" : ""}</option>;
-              })}
-            </select>
-          </label>
-          {effectiveTaskModel ? (
-            <div className="model-capability-summary">
-              <span>{effectiveTaskModel.capabilities.contextWindowTokens.toLocaleString()} 上下文</span>
-              <span>{effectiveTaskModel.capabilities.maxOutputTokens.toLocaleString()} 最大输出</span>
-              <span className={effectiveTaskModel.capabilities.toolCalling ? "supported" : "unsupported"}>工具{effectiveTaskModel.capabilities.toolCalling ? "✓" : "×"}</span>
-              <span className={effectiveTaskModel.capabilities.parallelToolCalling ? "supported" : "unsupported"}>并行工具{effectiveTaskModel.capabilities.parallelToolCalling ? "✓" : "×"}</span>
-              <span className={effectiveTaskModel.capabilities.imageInput ? "supported" : "unsupported"}>图像{effectiveTaskModel.capabilities.imageInput ? "✓" : "×"}</span>
-              <span className={effectiveTaskModel.capabilities.reasoningEffort ? "supported" : "unsupported"}>推理强度{effectiveTaskModel.capabilities.reasoningEffort ? "✓" : "×"}</span>
-              <span className={effectiveTaskModel.capabilities.promptCache ? "supported" : "unsupported"}>缓存{effectiveTaskModel.capabilities.promptCache ? "✓" : "×"}</span>
-              <span>{effectiveTaskModel.price?.inputPerMillionTokens !== undefined && effectiveTaskModel.price.outputPerMillionTokens !== undefined ? `$${effectiveTaskModel.price.inputPerMillionTokens}/$${effectiveTaskModel.price.outputPerMillionTokens} 每 1M` : "价格未知"}</span>
-              {effectiveTaskModel.recommendedFor?.length ? <span>推荐：{effectiveTaskModel.recommendedFor.join("、")}</span> : null}
-              {effectiveTaskModel.disabledReason ? <span className="unsupported">禁用：{effectiveTaskModel.disabledReason}</span> : null}
-            </div>
-          ) : null}
+              {mode === "plan" ? "Plan" : "Act"}
+            </button>
+          ))}
         </div>
-      ) : null}
-      {activeTaskSession?.modelSelection ? (
-        <div className="active-model-usage">
-          <span>本任务：{activeTaskSession.modelSelection.providerId} / {activeTaskSession.modelSelection.modelId}</span>
-          {activeTaskSession.modelUsage ? (
-            <small>
-              输入 {activeTaskSession.modelUsage.inputTokens.toLocaleString()} · 输出 {activeTaskSession.modelUsage.outputTokens.toLocaleString()} tokens · {activeTaskSession.estimatedCostUsd === null || activeTaskSession.estimatedCostUsd === undefined ? "费用无法估算" : `约 $${activeTaskSession.estimatedCostUsd.toFixed(6)}`}
-            </small>
-          ) : <small>Usage 将在任务完成后显示</small>}
-        </div>
-      ) : null}
+        {modelDefaults && selectableModels.length ? (
+          <button type="button" className="model-settings-trigger" onClick={onOpenProviderSettings}>
+            <span>模型</span>
+            <small>{effectiveTaskModel?.displayName || "默认"}</small>
+          </button>
+        ) : null}
+      </div>
       {renderTaskPlanTrigger()}
       {contextBudget ? (
         <details className={`context-budget-status ${contextBudget.automaticCompression ? "compressed" : ""}`}>
           <summary>
-            <span>上下文 {Math.round(contextBudget.usageRatio * 100)}%</span>
-            <small>
-              {contextBudget.automaticCompression ? "已自动压缩" : "未压缩"} · {contextBudget.includedFileCount} 个文件 · {contextBudget.truncatedArtifactCount} 项裁剪
-            </small>
+            <div className="context-budget-summary-copy">
+              <span>上下文 {contextUsagePercent}%</span>
+              <small>
+                {contextBudget.automaticCompression ? "已自动压缩" : "未压缩"} · {contextBudget.includedFileCount} 个文件 · {contextBudget.truncatedArtifactCount} 项裁剪
+              </small>
+            </div>
+            <div className="context-budget-progress" role="progressbar" aria-label="上下文占用" aria-valuemin={0} aria-valuemax={100} aria-valuenow={contextUsagePercent}>
+              <span style={{ width: `${contextUsagePercent}%` }} />
+            </div>
           </summary>
           <div className="context-budget-detail">
             <p>

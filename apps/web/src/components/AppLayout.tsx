@@ -1,19 +1,30 @@
-import type { Dispatch, PointerEvent, SetStateAction } from "react";
-import type { AgentMode, AgentStep, CommandResult, FileTreeNode, ModelSelection, PatchFileChange, SourceLocation, TaskPlanItemStatus, UnifiedDiagnostic, VerificationIssueCategory } from "../api";
+import { lazy, Suspense, type Dispatch, type PointerEvent, type SetStateAction } from "react";
+import type { AgentMode, AgentStep, CommandResult, FileTreeNode, PatchFileChange, SourceLocation, TaskPlanItemStatus, UnifiedDiagnostic, VerificationIssueCategory } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
 import type { WorkbenchLeftPanel } from "../hooks/useWorkbenchLayout";
 import type { InlineEditChangeContext, InlineEditUpgradeRequest } from "../hooks/useInlineEdit";
-import GitWorkflowPanel from "../gitWorkflow/GitWorkflowPanel";
 import ChatPanel from "./ChatPanel";
-import CodeSearchPanel from "./CodeSearchPanel";
-import EditorPane from "./EditorPane";
 import FileTree from "./FileTree";
 import Icon from "./Icon";
-import PatchReviewPane from "./PatchReviewPane";
-import ProjectRulesPanel from "./ProjectRulesPanel";
-import ProjectMemoryPanel from "./ProjectMemoryPanel";
-import TerminalPanel, { type TerminalCommandCompletion, type TerminalCommandRequest } from "./TerminalPanel";
+import type { TerminalCommandCompletion, TerminalCommandRequest } from "./TerminalPanel";
+
+const CodeSearchPanel = lazy(() => import("./CodeSearchPanel"));
+const EditorPane = lazy(() => import("./EditorPane"));
+const GitWorkflowPanel = lazy(() => import("../gitWorkflow/GitWorkflowPanel"));
+const PatchReviewPane = lazy(() => import("./PatchReviewPane"));
+const ProjectMemoryPanel = lazy(() => import("./ProjectMemoryPanel"));
+const ProjectRulesPanel = lazy(() => import("./ProjectRulesPanel"));
+const TerminalPanel = lazy(() => import("./TerminalPanel"));
+
+function PanelLoading({ label, fill = false }: { label: string; fill?: boolean }) {
+  return (
+    <div className={fill ? "panel-loading fill" : "panel-loading"} role="status">
+      <span className="panel-loading-spinner" aria-hidden="true" />
+      <span>{label}</span>
+    </div>
+  );
+}
 
 type Props = {
   files: FileTreeNode[];
@@ -23,10 +34,15 @@ type Props = {
   terminalOpen: boolean;
   terminalCommandRequest: TerminalCommandRequest | null;
   leftPanel: WorkbenchLeftPanel;
+  leftPanelOpen: boolean;
+  chatPanelOpen: boolean;
+  focusMode: boolean;
   savingFile: boolean;
   setState: Dispatch<SetStateAction<AppState>>;
   setTerminalOpen: Dispatch<SetStateAction<boolean>>;
-  setLeftPanel: Dispatch<SetStateAction<WorkbenchLeftPanel>>;
+  onSelectLeftPanel: (panel: WorkbenchLeftPanel) => void;
+  onToggleChatPanel: () => void;
+  onToggleFocusMode: () => void;
   onOpenWorkspace: () => void;
   onPickWorkspace: () => void;
   onOpenFile: (path: string) => Promise<void>;
@@ -53,7 +69,7 @@ type Props = {
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
   onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
-  onUpdateModelSelection: (target: "chat" | "plan" | "act", selection: ModelSelection) => Promise<void>;
+  onOpenProviderSettings: () => void;
   onNewChat: () => void;
   onDeleteChatHistory: (path: string) => Promise<void>;
   onStopChat: () => void;
@@ -80,10 +96,15 @@ export default function AppLayout({
   terminalOpen,
   terminalCommandRequest,
   leftPanel,
+  leftPanelOpen,
+  chatPanelOpen,
+  focusMode,
   savingFile,
   setState,
   setTerminalOpen,
-  setLeftPanel,
+  onSelectLeftPanel,
+  onToggleChatPanel,
+  onToggleFocusMode,
   onOpenWorkspace,
   onPickWorkspace,
   onOpenFile,
@@ -110,7 +131,7 @@ export default function AppLayout({
   onApprovePlan,
   onInterruptTaskForReplan,
   onUpdateAgentMode,
-  onUpdateModelSelection,
+  onOpenProviderSettings,
   onNewChat,
   onDeleteChatHistory,
   onStopChat,
@@ -131,13 +152,14 @@ export default function AppLayout({
   // 优先展示当前正在运行的任务计划，历史任务详情仍在展开面板里维护。
   const activeTaskSession = state.taskSessions.find((session) => session.id === state.currentTaskSessionId) || state.selectedTaskSession || null;
   const visibleCheckpoint = state.lastCheckpoint && state.lastCheckpoint.id !== state.dismissedCheckpointId ? state.lastCheckpoint : null;
+  const leftPanelVisible = leftPanelOpen && !focusMode;
+  const chatPanelVisible = chatPanelOpen && !focusMode;
 
   return (
     <main className="app-shell">
       <header className="app-header">
-        <div>
+        <div className="app-header-brand">
           <h1>Mini AI Web Editor</h1>
-          <span>{state.workspaceRoot || "未选择项目文件夹"}</span>
         </div>
         <form
           className="workspace-picker"
@@ -150,6 +172,8 @@ export default function AppLayout({
             value={state.workspaceInput}
             disabled={state.loading}
             placeholder="项目文件夹绝对路径"
+            aria-label="项目文件夹路径"
+            title={state.workspaceRoot || "输入项目文件夹绝对路径"}
             onChange={(event) => setState((current) => ({ ...current, workspaceInput: event.target.value }))}
           />
           <button type="button" className="icon-button" disabled={state.loading} title="选择项目" aria-label="选择项目" onClick={() => void onPickWorkspace()}>
@@ -159,7 +183,13 @@ export default function AppLayout({
         <button type="button" className="terminal-toggle icon-button" title="切换终端 (Ctrl+`)" aria-label="切换终端" onClick={() => setTerminalOpen((current) => !current)}>
           <Icon name="terminal" />
         </button>
-        {state.loading && <strong>处理中...</strong>}
+        <button type="button" className={chatPanelVisible ? "icon-button active" : "icon-button"} title="切换智能体面板" aria-label="切换智能体面板" aria-pressed={chatPanelVisible} onClick={onToggleChatPanel}>
+          <Icon name="panel-right" />
+        </button>
+        <button type="button" className={focusMode ? "icon-button active" : "icon-button"} title="切换编辑器专注模式" aria-label="切换编辑器专注模式" aria-pressed={focusMode} onClick={onToggleFocusMode}>
+          <Icon name="focus" />
+        </button>
+        {state.loading && <strong className="app-header-status">处理中...</strong>}
       </header>
 
       {state.error && <div className="error-banner">{state.error}</div>}
@@ -194,55 +224,70 @@ export default function AppLayout({
       )}
 
       <section className="workbench">
-        <section className="workspace-layout" style={{ gridTemplateColumns: `48px minmax(220px, 260px) minmax(360px, 1fr) ${chatWidth}px` }}>
+        <section
+          className={`workspace-layout${leftPanelVisible ? "" : " left-panel-collapsed"}${chatPanelVisible ? "" : " chat-panel-collapsed"}${focusMode ? " focus-mode" : ""}`}
+          style={{ gridTemplateColumns: `48px ${leftPanelVisible ? "minmax(220px, 260px)" : "0px"} minmax(360px, 1fr) ${chatPanelVisible ? `${chatWidth}px` : "0px"}` }}
+        >
+          <button
+            type="button"
+            className="workspace-drawer-backdrop"
+            aria-label="关闭辅助面板"
+            onClick={() => {
+              if (leftPanelVisible) onSelectLeftPanel(leftPanel);
+              if (chatPanelVisible) onToggleChatPanel();
+            }}
+          />
           <nav className="activity-bar" aria-label="Primary">
-            <button type="button" className={leftPanel === "files" ? "active" : ""} title="文件树" aria-label="文件树" aria-pressed={leftPanel === "files"} onClick={() => setLeftPanel("files")}>
+            <button type="button" className={leftPanelVisible && leftPanel === "files" ? "active" : ""} title="文件树" aria-label="文件树" aria-pressed={leftPanelVisible && leftPanel === "files"} onClick={() => onSelectLeftPanel("files")}>
               <Icon name="folder-open" />
             </button>
-            <button type="button" className={leftPanel === "rules" ? "active" : ""} title="Project Rules" aria-label="Project Rules" aria-pressed={leftPanel === "rules"} onClick={() => setLeftPanel("rules")}>
+            <button type="button" className={leftPanelVisible && leftPanel === "rules" ? "active" : ""} title="Project Rules" aria-label="Project Rules" aria-pressed={leftPanelVisible && leftPanel === "rules"} onClick={() => onSelectLeftPanel("rules")}>
               <Icon name="rules" />
             </button>
-            <button type="button" className={leftPanel === "memory" ? "active" : ""} title="Project Memory" aria-label="Project Memory" aria-pressed={leftPanel === "memory"} onClick={() => setLeftPanel("memory")}>
+            <button type="button" className={leftPanelVisible && leftPanel === "memory" ? "active" : ""} title="Project Memory" aria-label="Project Memory" aria-pressed={leftPanelVisible && leftPanel === "memory"} onClick={() => onSelectLeftPanel("memory")}>
               <Icon name="memory" />
             </button>
-            <button type="button" className={leftPanel === "search" ? "active" : ""} title="代码搜索 (Ctrl+Shift+F)" aria-label="代码搜索" aria-pressed={leftPanel === "search"} onClick={() => setLeftPanel("search")}>
+            <button type="button" className={leftPanelVisible && leftPanel === "search" ? "active" : ""} title="代码搜索 (Ctrl+Shift+F)" aria-label="代码搜索" aria-pressed={leftPanelVisible && leftPanel === "search"} onClick={() => onSelectLeftPanel("search")}>
               <Icon name="search" />
             </button>
-            <button type="button" className={leftPanel === "git" ? "active" : ""} title="Git 工作流" aria-label="Git 工作流" aria-pressed={leftPanel === "git"} onClick={() => setLeftPanel("git")}>
+            <button type="button" className={leftPanelVisible && leftPanel === "git" ? "active" : ""} title="Git 工作流" aria-label="Git 工作流" aria-pressed={leftPanelVisible && leftPanel === "git"} onClick={() => onSelectLeftPanel("git")}>
               <Icon name="branch" />
             </button>
           </nav>
 
-          <aside className="left-sidebar">
-            {leftPanel === "files" ? (
-              <FileTree
-                nodes={files}
-                selectedPath={state.selectedPath}
-                showIgnored={state.showIgnoredFiles}
-                onOpenFile={onOpenFile}
-                onToggleShowIgnored={(showIgnored) => void onToggleShowIgnored(showIgnored)}
-              />
-            ) : leftPanel === "search" ? (
-              <CodeSearchPanel disabled={!state.workspaceRoot} onOpenFile={onOpenFile} />
-            ) : leftPanel === "rules" ? (
-              <ProjectRulesPanel disabled={!state.workspaceRoot} rules={state.projectRules} onRefresh={() => void onRefreshProjectRules()} />
-            ) : leftPanel === "memory" ? (
-              <ProjectMemoryPanel key={state.workspaceRoot} disabled={!state.workspaceRoot} workspaceRoot={state.workspaceRoot} />
-            ) : (
-              <GitWorkflowPanel
-                disabled={!state.workspaceRoot}
-                taskSessionId={state.currentTaskSessionId || state.selectedTaskSession?.id || null}
-                taskSessions={state.taskSessions}
-                onRefreshTaskSessions={onRefreshTaskSessions}
-              />
-            )}
+          <aside className="left-sidebar" aria-hidden={!leftPanelVisible}>
+            <Suspense fallback={<PanelLoading label="正在加载面板..." fill />}>
+              {leftPanel === "files" ? (
+                <FileTree
+                  nodes={files}
+                  selectedPath={state.selectedPath}
+                  showIgnored={state.showIgnoredFiles}
+                  onOpenFile={onOpenFile}
+                  onToggleShowIgnored={(showIgnored) => void onToggleShowIgnored(showIgnored)}
+                />
+              ) : leftPanel === "search" ? (
+                <CodeSearchPanel disabled={!state.workspaceRoot} onOpenFile={onOpenFile} />
+              ) : leftPanel === "rules" ? (
+                <ProjectRulesPanel disabled={!state.workspaceRoot} rules={state.projectRules} onRefresh={() => void onRefreshProjectRules()} />
+              ) : leftPanel === "memory" ? (
+                <ProjectMemoryPanel key={state.workspaceRoot} disabled={!state.workspaceRoot} workspaceRoot={state.workspaceRoot} />
+              ) : (
+                <GitWorkflowPanel
+                  disabled={!state.workspaceRoot}
+                  taskSessionId={state.currentTaskSessionId || state.selectedTaskSession?.id || null}
+                  taskSessions={state.taskSessions}
+                  onRefreshTaskSessions={onRefreshTaskSessions}
+                />
+              )}
+            </Suspense>
           </aside>
 
           <div className="editor-column">
-            {state.patch ? (
-              <PatchReviewPane patch={state.patch} loading={state.loading} autoFix={state.autoFix} onApply={onApplyPatch} onReject={onRejectPatch} onRunCommand={(command) => void onValidateAndFix(command)} onRegenerateFile={(file) => void onRegeneratePatchFile(file)} />
-            ) : (
-              <EditorPane
+            <Suspense fallback={<PanelLoading label="正在加载编辑器..." fill />}>
+              {state.patch ? (
+                <PatchReviewPane patch={state.patch} loading={state.loading} autoFix={state.autoFix} onApply={onApplyPatch} onReject={onRejectPatch} onRunCommand={(command) => void onValidateAndFix(command)} onRegenerateFile={(file) => void onRegeneratePatchFile(file)} />
+              ) : (
+                <EditorPane
                 path={state.selectedPath}
                 tabs={state.openFiles}
                 value={state.fileContent}
@@ -273,21 +318,24 @@ export default function AppLayout({
                     openFiles: current.openFiles.map((file) => (file.path === current.selectedPath ? { ...file, content: fileContent } : file))
                   }))
                 }
-              />
-            )}
+                />
+              )}
+            </Suspense>
             {terminalOpen && (
-              <TerminalPanel
-                workspaceRoot={state.workspaceRoot}
-                height={terminalHeight}
-                commandRequest={terminalCommandRequest}
-                onCommandComplete={onTerminalCommandComplete}
-                onClose={onCloseTerminal}
-                onStartResize={onStartTerminalResize}
-              />
+              <Suspense fallback={<PanelLoading label="正在加载终端..." />}>
+                <TerminalPanel
+                  workspaceRoot={state.workspaceRoot}
+                  height={terminalHeight}
+                  commandRequest={terminalCommandRequest}
+                  onCommandComplete={onTerminalCommandComplete}
+                  onClose={onCloseTerminal}
+                  onStartResize={onStartTerminalResize}
+                />
+              </Suspense>
             )}
           </div>
 
-          <div className="chat-column">
+          <div className="chat-column" aria-hidden={!chatPanelVisible}>
             <div className="chat-resizer" role="separator" aria-orientation="vertical" title="调整智能体面板宽度" onPointerDown={onStartChatResize} />
             <ChatPanel
               value={state.userRequest}
@@ -321,8 +369,7 @@ export default function AppLayout({
               onApprovePlan={onApprovePlan}
               onInterruptTaskForReplan={onInterruptTaskForReplan}
               onUpdateAgentMode={onUpdateAgentMode}
-              onUpdateModelSelection={onUpdateModelSelection}
-              onTaskModelOverrideChange={(selection) => setState((current) => ({ ...current, taskModelOverride: selection }))}
+              onOpenProviderSettings={onOpenProviderSettings}
               onRollbackCheckpoint={(checkpointId) => void onRollbackCheckpoint(checkpointId)}
               onNewChat={onNewChat}
               onDeleteHistory={(path) => void onDeleteChatHistory(path)}

@@ -1,4 +1,4 @@
-import type { AgentMode, AgentStep, Checkpoint, CommandPolicyResult, CommandResult, FileChatHistoryItem, FileChatMessage, FileTreeNode, GenerateEditResponse, ModelCatalogResponse, ModelSelection, ModelSelectionDefaults, ProjectRulesResponse, TaskSession, VerificationIssueCategory } from "./api";
+import type { AgentMode, AgentStep, Checkpoint, CommandPolicyResult, CommandResult, FileChatHistoryItem, FileChatMessage, FileTreeNode, GenerateEditResponse, ModelCatalogResponse, ModelSelection, ModelSelectionDefaults, ProjectRulesResponse, ProviderSettings, TaskSession, VerificationIssueCategory } from "./api";
 
 export type OpenFileTab = {
   path: string;
@@ -15,6 +15,7 @@ export type AppState = {
   agentMode: AgentMode;
   modelCatalog: ModelCatalogResponse | null;
   modelDefaults: ModelSelectionDefaults | null;
+  providerSettings: ProviderSettings[];
   taskModelOverride: ModelSelection | null;
   chatId: string;
   chatMessages: FileChatMessage[];
@@ -90,6 +91,7 @@ export const initialState: AppState = {
   agentMode: "act",
   modelCatalog: null,
   modelDefaults: null,
+  providerSettings: [],
   taskModelOverride: null,
   chatId: createChatId(),
   chatMessages: [],

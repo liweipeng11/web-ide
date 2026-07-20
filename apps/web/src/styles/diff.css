@@ -330,39 +330,8 @@
 }
 
 @media (max-width: 900px) {
-  .app-header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .workspace-picker {
-    justify-content: stretch;
-    min-width: 0;
-  }
-
-  .workspace-picker input {
-    max-width: none;
-    min-width: 0;
-  }
-
-  .workspace-layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: 170px minmax(260px, 1fr) 170px;
-  }
-
-  .workspace-layout[style] {
-    grid-template-columns: 1fr !important;
-  }
-
   .chat-resizer {
     display: none;
-  }
-
-  .file-tree,
-  .chat-panel {
-    border-left: 0;
-    border-right: 0;
-    max-height: none;
   }
 
   .editor-pane {

@@ -6,14 +6,53 @@ type UseWorkbenchLayoutOptions = {
   onSaveFile: () => Promise<unknown> | void;
 };
 
+type LayoutPreferences = {
+  chatWidth?: number;
+  terminalHeight?: number;
+  terminalOpen?: boolean;
+  leftPanel?: WorkbenchLeftPanel;
+  leftPanelOpen?: boolean;
+  chatPanelOpen?: boolean;
+  focusMode?: boolean;
+};
+
+const LAYOUT_PREFERENCES_KEY = "mini-ai-web-editor:layout";
+
+function readLayoutPreferences(): LayoutPreferences {
+  try {
+    return JSON.parse(window.localStorage.getItem(LAYOUT_PREFERENCES_KEY) || "{}") as LayoutPreferences;
+  } catch {
+    // 本地偏好损坏时回退到安全默认值，不影响工作台启动。
+    return {};
+  }
+}
+
 // 管理工作台壳层的尺寸、拖拽和快捷键，避免入口组件被界面状态淹没。
 export function useWorkbenchLayout({ onSaveFile }: UseWorkbenchLayoutOptions) {
-  const [chatWidth, setChatWidth] = useState(320);
-  const [terminalHeight, setTerminalHeight] = useState(220);
-  const [terminalOpen, setTerminalOpen] = useState(false);
-  const [leftPanel, setLeftPanel] = useState<WorkbenchLeftPanel>("files");
+  const initialPreferencesRef = useRef<LayoutPreferences | null>(null);
+  if (initialPreferencesRef.current === null) initialPreferencesRef.current = readLayoutPreferences();
+  const initialPreferences = initialPreferencesRef.current;
+  const compactViewport = window.innerWidth <= 1000;
+  const [chatWidth, setChatWidth] = useState(initialPreferences.chatWidth ?? 320);
+  const [terminalHeight, setTerminalHeight] = useState(initialPreferences.terminalHeight ?? 220);
+  const [terminalOpen, setTerminalOpen] = useState(initialPreferences.terminalOpen ?? false);
+  const [leftPanel, setLeftPanel] = useState<WorkbenchLeftPanel>(initialPreferences.leftPanel ?? "files");
+  const [leftPanelOpen, setLeftPanelOpen] = useState(initialPreferences.leftPanelOpen ?? !compactViewport);
+  const [chatPanelOpen, setChatPanelOpen] = useState(initialPreferences.chatPanelOpen ?? !compactViewport);
+  const [focusMode, setFocusMode] = useState(initialPreferences.focusMode ?? false);
   const resizingChat = useRef(false);
   const resizingTerminal = useRef(false);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        LAYOUT_PREFERENCES_KEY,
+        JSON.stringify({ chatWidth, terminalHeight, terminalOpen, leftPanel, leftPanelOpen, chatPanelOpen, focusMode } satisfies LayoutPreferences)
+      );
+    } catch {
+      // 隐私模式或存储额度不足时忽略持久化失败，界面状态仍在当前会话有效。
+    }
+  }, [chatPanelOpen, chatWidth, focusMode, leftPanel, leftPanelOpen, terminalHeight, terminalOpen]);
 
   useEffect(() => {
     function handlePointerMove(event: PointerEvent) {
@@ -70,6 +109,8 @@ export function useWorkbenchLayout({ onSaveFile }: UseWorkbenchLayoutOptions) {
       if (!isSearchShortcut) return;
 
       setLeftPanel("search");
+      setLeftPanelOpen(true);
+      setFocusMode(false);
     }
 
     window.addEventListener("keydown", handleKeyDown, { capture: true });
@@ -114,13 +155,40 @@ export function useWorkbenchLayout({ onSaveFile }: UseWorkbenchLayoutOptions) {
     setTerminalOpen(false);
   }
 
+  function handleSelectLeftPanel(panel: WorkbenchLeftPanel) {
+    // 再次点击当前活动入口时收起侧栏，切换入口时直接展示目标面板。
+    setFocusMode(false);
+    if (leftPanel === panel) {
+      setLeftPanelOpen((current) => !current);
+      return;
+    }
+
+    setLeftPanel(panel);
+    setLeftPanelOpen(true);
+  }
+
+  function handleToggleChatPanel() {
+    setFocusMode(false);
+    setChatPanelOpen((current) => !current);
+  }
+
+  function handleToggleFocusMode() {
+    // 专注模式仅临时隐藏辅助区域，退出后恢复用户之前的展开状态。
+    setFocusMode((current) => !current);
+  }
+
   return {
     chatWidth,
     terminalHeight,
     terminalOpen,
     setTerminalOpen,
     leftPanel,
-    setLeftPanel,
+    leftPanelOpen,
+    chatPanelOpen,
+    focusMode,
+    handleSelectLeftPanel,
+    handleToggleChatPanel,
+    handleToggleFocusMode,
     handleStartChatResize,
     handleStartTerminalResize,
     handleCloseTerminal

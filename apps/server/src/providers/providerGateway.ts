@@ -9,6 +9,11 @@ export class ProviderGateway {
     providers.forEach((provider) => this.providers.set(provider.id, provider));
   }
 
+  replaceProviders(providers: ModelProvider[]) {
+    this.providers.clear();
+    providers.forEach((provider) => this.providers.set(provider.id, provider));
+  }
+
   async listCatalog() {
     return Promise.all([...this.providers.values()].map(async (provider) => ({
       id: provider.id,

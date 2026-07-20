@@ -368,6 +368,36 @@ export type AgentMode = "plan" | "act";
 
 export type ModelSelection = { providerId: string; modelId: string };
 export type ModelSelectionDefaults = { chat: ModelSelection; plan: ModelSelection; act: ModelSelection };
+export type ProviderSettings = {
+  providerId: string;
+  name: string;
+  type: "openai-compatible";
+  baseUrl: string;
+  credentialConfigured: boolean;
+  credentialPreview: string;
+  models: string[];
+  enabled: boolean;
+};
+export type ProviderSettingsInput = {
+  providerId: string;
+  name: string;
+  type: "openai-compatible";
+  baseUrl: string;
+  apiKey: string;
+  models: string[];
+  enabled: boolean;
+};
+export type CreateProviderInput = {
+  name: string;
+  type: "openai-compatible";
+};
+export type ProviderConnectionTestResult = {
+  available: boolean;
+  message: string;
+  discoveredModelCount?: number;
+  /** 检测接口从 Provider `/models` 获取的模型 ID。 */
+  models: string[];
+};
 export type ModelDescriptor = {
   id: string;
   providerId: string;
@@ -388,6 +418,7 @@ export type ModelDescriptor = {
 export type ModelCatalogResponse = {
   providers: Array<{ id: string; health: { configured: boolean; available: boolean; message?: string }; models: ModelDescriptor[] }>;
   defaults: ModelSelectionDefaults;
+  providerSettings: ProviderSettings[];
 };
 
 export type TaskWorkflowType = "bugfix" | "feature" | "refactor" | "analysis-only";
@@ -716,6 +747,27 @@ export function fetchModelCatalog() {
 
 export function updateModelDefaults(defaults: ModelSelectionDefaults) {
   return request<{ defaults: ModelSelectionDefaults }>("/api/models/defaults", { method: "PUT", body: JSON.stringify(defaults) });
+}
+
+export function updateProviderSettings(settings: ProviderSettingsInput) {
+  return request<{ settings: ProviderSettings; providerSettings: ProviderSettings[]; defaults: ModelSelectionDefaults; providers: ModelCatalogResponse["providers"] }>("/api/models/provider-settings", {
+    method: "PUT",
+    body: JSON.stringify(settings)
+  });
+}
+
+export function createProvider(settings: CreateProviderInput) {
+  return request<{ settings: ProviderSettings; providerSettings: ProviderSettings[]; providers: ModelCatalogResponse["providers"] }>("/api/models/providers", {
+    method: "POST",
+    body: JSON.stringify(settings)
+  });
+}
+
+export function testProviderConnection(settings: Pick<ProviderSettingsInput, "providerId" | "baseUrl" | "apiKey">) {
+  return request<ProviderConnectionTestResult>("/api/models/provider-settings/test", {
+    method: "POST",
+    body: JSON.stringify(settings)
+  });
 }
 
 export function openWorkspace(workspaceRoot: string) {

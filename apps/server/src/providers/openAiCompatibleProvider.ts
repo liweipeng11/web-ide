@@ -21,7 +21,14 @@ function mapProviderError(error: unknown): ProviderError {
   return new ProviderError("unknown", error instanceof Error ? error.message : "模型 Provider 请求失败", false);
 }
 
-function createDescriptor(modelId: string): ModelDescriptor {
+export type OpenAiCompatibleRuntimeConfig = {
+  id: string;
+  baseUrl: string;
+  apiKey: string;
+  models: string[];
+};
+
+function createDescriptor(modelId: string, providerId: string): ModelDescriptor {
   const metadata = config.aiModelCatalog.find((entry) => entry.id === modelId);
   const capabilities = metadata?.capabilities && typeof metadata.capabilities === "object" && !Array.isArray(metadata.capabilities)
     ? metadata.capabilities as Record<string, unknown>
@@ -34,7 +41,7 @@ function createDescriptor(modelId: string): ModelDescriptor {
   const booleanValue = (value: unknown, fallback: boolean) => typeof value === "boolean" ? value : fallback;
   return {
     id: modelId,
-    providerId: "openai-compatible",
+    providerId,
     displayName: typeof metadata?.displayName === "string" && metadata.displayName.trim() ? metadata.displayName.trim() : modelId,
     capabilities: {
       contextWindowTokens: numberValue(capabilities.contextWindowTokens, config.aiContextWindowTokens),
@@ -57,14 +64,27 @@ function createDescriptor(modelId: string): ModelDescriptor {
 }
 
 export class OpenAiCompatibleProvider implements ModelProvider {
-  readonly id = "openai-compatible";
+  readonly id: string;
+
+  constructor(private readonly runtimeConfig?: OpenAiCompatibleRuntimeConfig) {
+    this.id = runtimeConfig?.id || "openai-compatible";
+  }
+
+  private get runtime(): OpenAiCompatibleRuntimeConfig {
+    return this.runtimeConfig || {
+      id: "openai-compatible",
+      baseUrl: config.aiBaseUrl,
+      apiKey: config.aiApiKey,
+      models: config.aiModels
+    };
+  }
 
   async listModels() {
-    return config.aiModels.map(createDescriptor);
+    return this.runtime.models.map((modelId) => createDescriptor(modelId, this.id));
   }
 
   async validateConfig(): Promise<ProviderHealth> {
-    return config.aiApiKey
+    return this.runtime.apiKey
       ? { configured: true, available: true }
       : { configured: false, available: false, message: "未配置 AI_API_KEY" };
   }
@@ -72,7 +92,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
   async complete(request: ModelRequest, signal?: AbortSignal): Promise<ModelResponse> {
     if (signal?.aborted) throw new ProviderError("cancelled", "模型请求已取消", false);
     try {
-      const response = await requestChatCompletion(toOpenAiChatCompletionBody(request), signal) as AgentCompletionResponse;
+      const response = await requestChatCompletion(toOpenAiChatCompletionBody(request), signal, this.runtime) as AgentCompletionResponse;
       return adaptOpenAiCompletionResponse(response);
     } catch (error) {
       throw mapProviderError(error);
@@ -117,7 +137,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
     };
 
     const body = { ...toOpenAiChatCompletionBody(request), stream: true, stream_options: { include_usage: true } };
-    void requestChatCompletionStream(body, (delta) => push({ type: "text_delta", delta }), signal, handleChunk)
+    void requestChatCompletionStream(body, (delta) => push({ type: "text_delta", delta }), signal, handleChunk, this.runtime)
       .then((answer) => {
         for (const current of toolCalls.values()) {
           let argumentsValue: Record<string, unknown> = {};

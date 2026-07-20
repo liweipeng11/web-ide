@@ -44,8 +44,14 @@ const AI_FETCH_ATTEMPTS_PER_URL = 2;
 const sensitiveLogFieldPattern = /(authorization|header|api[_-]?key|token|secret|password|userGoal|content|replacement|selectedText|prefix|suffix|snippet|output|requestBody|responseBody)/i;
 const sensitiveLogValuePattern = /(Bearer\s+)[^\s,;]+|((?:API[_-]?KEY|TOKEN|SECRET|PASSWORD)\s*=\s*)[^\s,;]+/gi;
 
-function getChatCompletionUrls() {
-  const normalizedBaseUrl = config.aiBaseUrl.replace(/\/$/, "");
+export type AiProviderConnection = { baseUrl: string; apiKey: string };
+
+function defaultConnection(): AiProviderConnection {
+  return { baseUrl: config.aiBaseUrl, apiKey: config.aiApiKey };
+}
+
+function getChatCompletionUrls(baseUrl: string) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
   const urls = [`${normalizedBaseUrl}/chat/completions`];
 
   try {
@@ -186,10 +192,10 @@ async function persistAiExchangeLog(entry: Omit<AiExchangeLog, "id" | "createdAt
   }
 }
 
-export async function requestChatCompletion(body: unknown, signal?: AbortSignal) {
+export async function requestChatCompletion(body: unknown, signal?: AbortSignal, connection: AiProviderConnection = defaultConnection()) {
   let lastErrorText = "";
 
-  for (const url of getChatCompletionUrls()) {
+  for (const url of getChatCompletionUrls(connection.baseUrl)) {
     let response: Response | null = null;
     let responseAttempt = 1;
 
@@ -202,7 +208,7 @@ export async function requestChatCompletion(body: unknown, signal?: AbortSignal)
         response = await fetch(url, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${config.aiApiKey}`,
+            Authorization: `Bearer ${connection.apiKey}`,
             "Content-Type": "application/json"
           },
           body: JSON.stringify(body),
@@ -394,10 +400,10 @@ export type OpenAiCompatibleStreamChunk = {
   };
 };
 
-export async function requestChatCompletionStream(body: unknown, onDelta: (delta: string) => void, signal?: AbortSignal, onChunk?: (chunk: OpenAiCompatibleStreamChunk) => void) {
+export async function requestChatCompletionStream(body: unknown, onDelta: (delta: string) => void, signal?: AbortSignal, onChunk?: (chunk: OpenAiCompatibleStreamChunk) => void, connection: AiProviderConnection = defaultConnection()) {
   let lastErrorText = "";
 
-  for (const url of getChatCompletionUrls()) {
+  for (const url of getChatCompletionUrls(connection.baseUrl)) {
     const startedAt = Date.now();
     let response: Response;
 
@@ -406,7 +412,7 @@ export async function requestChatCompletionStream(body: unknown, onDelta: (delta
       response = await fetch(url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${config.aiApiKey}`,
+          Authorization: `Bearer ${connection.apiKey}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify(body),

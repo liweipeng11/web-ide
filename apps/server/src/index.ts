@@ -33,11 +33,14 @@ import { createProjectMemoryRouter } from "./projectMemory/index.js";
 import { createCapabilityRouter } from "./capabilityRoutes.js";
 import { createModelRouter } from "./modelRoutes.js";
 import { resolveModelSelection } from "./modelSelectionStore.js";
-import { ProviderError } from "./providers/index.js";
+import { configureProviderGateway, ProviderError } from "./providers/index.js";
 import { withModelExecution } from "./modelExecutionContext.js";
 import { createLanguageServiceRouter, languageServiceGateway } from "./languageService/index.js";
 import { createInlineEditRouter } from "./inlineEdit/routes.js";
+import { initializeProviderSettings } from "./providerSettingsStore.js";
 
+const initialProviders = await initializeProviderSettings();
+configureProviderGateway(initialProviders.filter((provider) => provider.enabled));
 const app = express();
 const server = createServer(app);
 const workspaceChatKey = "__workspace_chat__";

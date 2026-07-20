@@ -55,20 +55,37 @@ function matchesFileQuery(path: string, query: string) {
   return parts.every((part) => normalizedPath.includes(part));
 }
 
+function pathContains(parentPath: string, childPath: string | null) {
+  if (!childPath) return false;
+  const normalizedParent = parentPath.replace(/\\/g, "/").replace(/\/$/, "");
+  const normalizedChild = childPath.replace(/\\/g, "/");
+  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}/`);
+}
+
 function TreeNode({ node, selectedPath, onOpenFile }: { node: FileTreeNode; selectedPath: string | null; onOpenFile: (path: string) => void }) {
+  const containsSelectedFile = node.type === "directory" && pathContains(node.path, selectedPath);
+  const [open, setOpen] = useState(containsSelectedFile);
+
+  useEffect(() => {
+    // 当前文件位于该目录下时自动展开祖先目录，确保选中项始终可见。
+    if (containsSelectedFile) setOpen(true);
+  }, [containsSelectedFile]);
+
   if (node.type === "directory") {
     return (
-      <li>
-        <details>
-          <summary>
+      <li className="tree-directory-item">
+        <details className="tree-directory" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+          <summary title={node.path}>
             <FolderIcon />
             <span className="tree-label">{node.name}</span>
           </summary>
-          <ul>
-            {node.children?.map((child) => (
-              <TreeNode key={child.path} node={child} selectedPath={selectedPath} onOpenFile={onOpenFile} />
-            ))}
-          </ul>
+          {open ? (
+            <ul>
+              {node.children?.map((child) => (
+                <TreeNode key={child.path} node={child} selectedPath={selectedPath} onOpenFile={onOpenFile} />
+              ))}
+            </ul>
+          ) : null}
         </details>
       </li>
     );
@@ -76,7 +93,7 @@ function TreeNode({ node, selectedPath, onOpenFile }: { node: FileTreeNode; sele
 
   return (
     <li>
-      <button className={selectedPath === node.path ? "tree-file selected" : "tree-file"} type="button" onClick={() => onOpenFile(node.path)}>
+      <button className={selectedPath === node.path ? "tree-file selected" : "tree-file"} type="button" title={node.path} aria-current={selectedPath === node.path ? "page" : undefined} onClick={() => onOpenFile(node.path)}>
         <FileIcon />
         <span className="tree-label">{node.name}</span>
       </button>
@@ -129,7 +146,7 @@ export default function FileTree({ nodes, selectedPath, showIgnored, onOpenFile,
         <div className="file-search-results">
           {searchResults.length > 0 ? (
             searchResults.map((file) => (
-              <button key={file.path} className={selectedPath === file.path ? "tree-file selected" : "tree-file"} type="button" onClick={() => onOpenFile(file.path)}>
+              <button key={file.path} className={selectedPath === file.path ? "tree-file selected" : "tree-file"} type="button" title={file.path} aria-current={selectedPath === file.path ? "page" : undefined} onClick={() => onOpenFile(file.path)}>
                 <FileIcon />
                 <span className="tree-label">{file.path}</span>
               </button>

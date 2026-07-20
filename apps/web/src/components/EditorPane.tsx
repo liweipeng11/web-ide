@@ -190,22 +190,29 @@ export default function EditorPane({ path, tabs, value, dirty, saving, onSave, o
           const tabDirty = tab.content !== tab.savedContent;
           const active = tab.path === path;
           return (
-            <button key={tab.path} type="button" role="tab" aria-selected={active} className={active ? "editor-tab active" : "editor-tab"} title={tab.path} onClick={() => onSelectTab(tab.path)}>
-              <span className="editor-tab-badge">{getFileBadge(tab.path)}</span><span className="editor-tab-name">{getFileName(tab.path)}</span>
-              {tabDirty ? <span className="editor-tab-dirty" aria-label="Unsaved changes" /> : null}
-              <span className="editor-tab-close" role="button" tabIndex={0} title="Close" aria-label={`Close ${getFileName(tab.path)}`} onClick={(event) => { event.stopPropagation(); onCloseTab(tab.path); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); onCloseTab(tab.path); } }}><Icon name="close" /></span>
-            </button>
+            <div key={tab.path} className={active ? "editor-tab active" : "editor-tab"}>
+              <button type="button" className="editor-tab-main" role="tab" aria-selected={active} title={tab.path} onClick={() => onSelectTab(tab.path)}>
+                <span className="editor-tab-badge">{getFileBadge(tab.path)}</span>
+                <span className="editor-tab-name">{getFileName(tab.path)}</span>
+                {tabDirty ? <span className="editor-tab-dirty" aria-label="Unsaved changes" /> : null}
+              </button>
+              <button type="button" className="editor-tab-close" title="Close" aria-label={`Close ${getFileName(tab.path)}`} onClick={() => onCloseTab(tab.path)}><Icon name="close" /></button>
+            </div>
           );
         }) : <span className="editor-empty-tab">No file open</span>}
       </div>
       <div className="editor-pathbar">
         <div className="editor-breadcrumb" title={path || ""}>{pathParts.length ? pathParts.map((part, index) => <span className={index === pathParts.length - 1 ? "current" : ""} key={`${part}-${index}`}>{part}</span>) : <span>Select a file</span>}</div>
         <div className="editor-actions">
-          {path && languageService.capability ? <span className={languageService.capability.degraded ? "lsp-state degraded" : "lsp-state"} title={languageService.capability.detail}>{languageService.capability.degraded ? `降级 · ${languageService.capability.source}` : `LSP · ${languageService.capability.languageId}`}</span> : null}
-          {inlineEditEnabled ? <button type="button" className="inline-edit-trigger" disabled={!path} title="AI 内联编辑（Ctrl/Cmd+I）" onClick={() => openInlineEditRef.current()}>AI 编辑</button> : null}
-          <button type="button" className="icon-button" disabled={!path} title="搜索工作区符号" aria-label="搜索工作区符号" onClick={() => { setSymbolPanelMode("search"); setSymbolSearchOpen((open) => !open); if (!symbolSearchOpen) void searchSymbols(""); }}><Icon name="search" /></button>
-          <span className="save-state">{saving ? "Saving..." : dirty ? "Unsaved" : "Saved"}</span>
-          <button type="button" className="icon-button" disabled={!path || !dirty || saving} title="Save file (Ctrl+S)" aria-label="Save file" onClick={onSave}><Icon name="save" /></button>
+          <div className="editor-status-group">
+            {path && languageService.capability ? <span className={languageService.capability.degraded ? "lsp-state degraded" : "lsp-state"} title={languageService.capability.detail}>{languageService.capability.degraded ? `降级 · ${languageService.capability.source}` : `LSP · ${languageService.capability.languageId}`}</span> : null}
+            <span className={`save-state ${saving ? "saving" : dirty ? "dirty" : "saved"}`}>{saving ? "保存中" : dirty ? "未保存" : "已保存"}</span>
+          </div>
+          <div className="editor-command-group">
+            {inlineEditEnabled ? <button type="button" className="inline-edit-trigger" disabled={!path} title="AI 内联编辑（Ctrl/Cmd+I）" onClick={() => openInlineEditRef.current()}>AI 编辑</button> : null}
+            <button type="button" className="icon-button" disabled={!path} title="搜索工作区符号" aria-label="搜索工作区符号" onClick={() => { setSymbolPanelMode("search"); setSymbolSearchOpen((open) => !open); if (!symbolSearchOpen) void searchSymbols(""); }}><Icon name="search" /></button>
+            <button type="button" className="icon-button" disabled={!path || !dirty || saving} title="保存文件 (Ctrl+S)" aria-label="保存文件" onClick={onSave}><Icon name="save" /></button>
+          </div>
         </div>
       </div>
       {symbolSearchOpen ? <div className="workspace-symbol-search">{symbolPanelMode === "search" ? <input autoFocus value={symbolQuery} placeholder="搜索工作区符号" onChange={(event) => void searchSymbols(event.target.value)} /> : <div className="workspace-symbol-heading">引用结果 · {symbols.length} 项</div>}<div className="workspace-symbol-results">{symbols.map((symbol, index) => <button type="button" key={`${symbol.name}:${symbol.location.filePath}:${symbol.location.line}:${index}`} onClick={() => { setSymbolSearchOpen(false); void navigateTo(symbol.location); }}><strong>{symbol.name}</strong><span>{symbol.kind} · {symbol.location.filePath}:{symbol.location.line}</span></button>)}</div></div> : null}

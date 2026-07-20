@@ -10,7 +10,9 @@ type IconName =
   | "edit"
   | "folder-open"
   | "history"
+  | "focus"
   | "memory"
+  | "panel-right"
   | "reject"
   | "rules"
   | "save"
@@ -35,7 +37,9 @@ const paths: Record<IconName, string[]> = {
   edit: ["M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17z", "M14 7l3 3"],
   "folder-open": ["M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5", "M3 9h18l-2 10H5z"],
   history: ["M3 12a9 9 0 1 0 3-6.7", "M3 4v5h5", "M12 7v5l3 2"],
+  focus: ["M8 3H3v5", "M16 3h5v5", "M21 16v5h-5", "M3 16v5h5"],
   memory: ["M9 4a3 3 0 0 0-3 3v1a3 3 0 0 0-2 5.2A3 3 0 0 0 7 18h2", "M15 4a3 3 0 0 1 3 3v1a3 3 0 0 1 2 5.2A3 3 0 0 1 17 18h-2", "M9 4v16", "M15 4v16", "M9 9h3", "M12 15h3"],
+  "panel-right": ["M4 4h16v16H4z", "M15 4v16"],
   reject: ["M6 6l12 12", "M18 6 6 18"],
   rules: ["M6 4h9l3 3v13H6z", "M14 4v4h4", "M9 11h6", "M9 15h6", "M9 19h4"],
   save: ["M5 4h12l2 2v14H5z", "M8 4v6h8V4", "M8 20v-6h8v6"],

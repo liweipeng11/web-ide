@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { decideApprovalRequest, fetchModelCatalog, updateModelDefaults, type AgentStep, type FileTreeNode, type ModelSelection, type PatchFileChange, type UnifiedDiagnostic } from "./api";
+import { createProvider, decideApprovalRequest, fetchModelCatalog, updateProviderSettings, type AgentStep, type CreateProviderInput, type FileTreeNode, type PatchFileChange, type ProviderSettings, type ProviderSettingsInput, type UnifiedDiagnostic } from "./api";
 import { initialState, type AppState } from "./appState";
 import AppLayout from "./components/AppLayout";
+import ProviderSettingsPage from "./components/models/ProviderSettingsPage";
 import { useChatSession } from "./hooks/useChatSession";
 import { useCommandCenter } from "./hooks/useCommandCenter";
 import { usePatchActions } from "./hooks/usePatchActions";
@@ -14,6 +15,7 @@ export default function App() {
   // App 只负责组合各领域 hook，避免继续堆积业务细节。
   const [files, setFiles] = useState<FileTreeNode[]>([]);
   const [state, setState] = useState<AppState>(initialState);
+  const [currentPath, setCurrentPath] = useState(window.location.pathname);
 
   const workspaceFiles = useWorkspaceFiles({ state, setState, setFiles });
   const layout = useWorkbenchLayout({ onSaveFile: workspaceFiles.handleSaveFile });
@@ -35,21 +37,51 @@ export default function App() {
   useEffect(() => {
     let active = true;
     fetchModelCatalog()
-      .then((catalog) => active && setState((current) => ({ ...current, modelCatalog: catalog, modelDefaults: catalog.defaults })))
+      .then((catalog) => active && setState((current) => ({ ...current, modelCatalog: catalog, modelDefaults: catalog.defaults, providerSettings: catalog.providerSettings })))
       .catch(() => undefined);
     return () => { active = false; };
   }, []);
 
-  async function handleUpdateModelSelection(target: "chat" | "plan" | "act", selection: ModelSelection) {
-    if (!state.modelDefaults) return;
-    const nextDefaults = { ...state.modelDefaults, [target]: selection };
-    setState((current) => ({ ...current, modelDefaults: nextDefaults, error: null }));
-    try {
-      const result = await updateModelDefaults(nextDefaults);
-      setState((current) => ({ ...current, modelDefaults: result.defaults }));
-    } catch (error) {
-      setState((current) => ({ ...current, modelDefaults: state.modelDefaults, error: error instanceof Error ? error.message : "模型选择保存失败" }));
-    }
+  useEffect(() => {
+    const handlePopState = () => setCurrentPath(window.location.pathname);
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+
+  async function handleUpdateProviderSettings(settings: ProviderSettingsInput) {
+    const result = await updateProviderSettings(settings);
+    setState((current) => ({
+      ...current,
+      providerSettings: result.providerSettings,
+      modelDefaults: result.defaults,
+      modelCatalog: current.modelCatalog ? {
+        ...current.modelCatalog,
+        providers: result.providers,
+        defaults: result.defaults,
+        providerSettings: result.providerSettings
+      } : current.modelCatalog,
+      error: null
+    }));
+  }
+
+  async function handleCreateProvider(input: CreateProviderInput): Promise<ProviderSettings> {
+    const result = await createProvider(input);
+    setState((current) => ({
+      ...current,
+      providerSettings: result.providerSettings,
+      modelCatalog: current.modelCatalog ? {
+        ...current.modelCatalog,
+        providers: result.providers,
+        providerSettings: result.providerSettings
+      } : current.modelCatalog
+    }));
+    return result.settings;
+  }
+
+  function navigateTo(path: string) {
+    window.history.pushState({}, "", path);
+    setCurrentPath(path);
   }
 
   async function handleApprovePlan(taskSessionId: string) {
@@ -162,6 +194,19 @@ export default function App() {
     }
   }
 
+  if (currentPath === "/settings/providers") {
+    return (
+      <ProviderSettingsPage
+        settings={state.providerSettings}
+        catalog={state.modelCatalog}
+        loading={state.loading}
+        onBack={() => navigateTo("/")}
+        onSave={handleUpdateProviderSettings}
+        onCreate={handleCreateProvider}
+      />
+    );
+  }
+
   return (
     <AppLayout
       files={files}
@@ -171,10 +216,15 @@ export default function App() {
       terminalOpen={layout.terminalOpen}
       terminalCommandRequest={commandCenter.terminalCommandRequest}
       leftPanel={layout.leftPanel}
+      leftPanelOpen={layout.leftPanelOpen}
+      chatPanelOpen={layout.chatPanelOpen}
+      focusMode={layout.focusMode}
       savingFile={workspaceFiles.savingFile}
       setState={setState}
       setTerminalOpen={layout.setTerminalOpen}
-      setLeftPanel={layout.setLeftPanel}
+      onSelectLeftPanel={layout.handleSelectLeftPanel}
+      onToggleChatPanel={layout.handleToggleChatPanel}
+      onToggleFocusMode={layout.handleToggleFocusMode}
       onOpenWorkspace={workspaceFiles.handleOpenWorkspace}
       onPickWorkspace={workspaceFiles.handlePickWorkspace}
       onOpenFile={workspaceFiles.handleOpenFile}
@@ -201,7 +251,7 @@ export default function App() {
       onApprovePlan={handleApprovePlan}
       onInterruptTaskForReplan={handleInterruptTaskForReplan}
       onUpdateAgentMode={taskSessions.handleUpdateAgentMode}
-      onUpdateModelSelection={handleUpdateModelSelection}
+      onOpenProviderSettings={() => navigateTo("/settings/providers")}
       onNewChat={chatSession.handleNewChat}
       onDeleteChatHistory={chatSession.handleDeleteChatHistory}
       onStopChat={chatSession.handleStopChat}
