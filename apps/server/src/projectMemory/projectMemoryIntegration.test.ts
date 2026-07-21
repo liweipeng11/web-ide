@@ -14,12 +14,12 @@ import { createProjectMemoryTestWorkspace } from "./fixtures/projectMemoryV2.fix
 import { getProjectMemory, updateProjectMemory } from "./projectMemoryService.js";
 import { createProjectMemoryRouter } from "./routes.js";
 
-test("Agent Runtime 默认从磁盘加载 Project Memory", async (context) => {
+test("Agent Runtime 默认从磁盘加载 Project Snapshot", async (context) => {
   const workspaceRoot = await createProjectMemoryTestWorkspace();
   context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
   await setWorkspaceRoot(workspaceRoot, { persist: false });
   await getProjectMemory({ workspaceRoot, sessions: [] });
-  await updateProjectMemory({ conventions: ["MEMORY_FROM_DISK_SENTINEL"] }, workspaceRoot);
+  await updateProjectMemory({ currentGoals: ["MEMORY_FROM_DISK_SENTINEL"] }, workspaceRoot);
   let systemPrompt = "";
 
   await runAgentRuntime({
@@ -41,7 +41,7 @@ test("任务计划和直接编辑默认注入磁盘 Project Memory", async (cont
   await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
   await fs.writeFile(path.join(workspaceRoot, "src", "app.ts"), "export const value = 1;\n", "utf8");
   await getProjectMemory({ workspaceRoot, sessions: [] });
-  await updateProjectMemory({ conventions: ["ALL_AI_PATHS_SENTINEL"] }, workspaceRoot);
+  await updateProjectMemory({ currentGoals: ["ALL_AI_PATHS_SENTINEL"] }, workspaceRoot);
   const originalApiKey = config.aiApiKey;
   const originalFetch = globalThis.fetch;
   const systemPrompts: string[] = [];
@@ -94,17 +94,17 @@ test("Project Memory HTTP API 支持读取、更新、刷新和参数校验", as
   const updated = await fetch(baseUrl, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ conventions: ["使用 pnpm"], currentGoals: ["完成 Project Memory"] })
+    body: JSON.stringify({ currentGoals: ["完成 Project Memory"], confirmedRisks: ["不得覆盖损坏文件"] })
   });
-  const updatedBody = await updated.json() as { memory: { conventions: string[]; currentGoals: string[]; projectSummarySource: string } };
-  assert.deepEqual(updatedBody.memory.conventions, ["使用 pnpm"]);
-  assert.deepEqual(updatedBody.memory.currentGoals, ["完成 Project Memory"]);
-  assert.equal(updatedBody.memory.projectSummarySource, "generated");
+  const updatedBody = await updated.json() as { memory: { snapshot: { currentGoals: string[]; confirmedRisks: string[]; projectSummarySource: string } } };
+  assert.deepEqual(updatedBody.memory.snapshot.currentGoals, ["完成 Project Memory"]);
+  assert.deepEqual(updatedBody.memory.snapshot.confirmedRisks, ["不得覆盖损坏文件"]);
+  assert.equal(updatedBody.memory.snapshot.projectSummarySource, "generated");
 
   const invalid = await fetch(baseUrl, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ conventions: "invalid" })
+    body: JSON.stringify({ currentGoals: "invalid" })
   });
   assert.equal(invalid.status, 400);
   assert.equal((await fetch(`${baseUrl}/refresh`, { method: "POST" })).status, 200);

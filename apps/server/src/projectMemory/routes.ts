@@ -13,7 +13,7 @@ function normalizeEditableInput(value: unknown): UpdateProjectMemoryInput {
     input.projectSummary = record.projectSummary;
   }
 
-  for (const field of ["conventions", "currentGoals", "confirmedRisks"] as const) {
+  for (const field of ["currentGoals", "confirmedRisks"] as const) {
     if (!(field in record)) continue;
     if (!Array.isArray(record[field]) || !record[field].every((item) => typeof item === "string")) {
       throw new HttpError(400, `${field} must be an array of strings`);

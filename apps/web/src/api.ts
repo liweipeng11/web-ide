@@ -618,21 +618,38 @@ export type ProjectMemoryTechStack = {
   scannedAt: number;
 };
 
-export type ProjectMemory = {
-  schemaVersion: number;
+export type ProjectSnapshot = {
   projectSummary: string;
   projectSummarySource: "generated" | "manual";
   techStack: ProjectMemoryTechStack;
-  conventions: string[];
   currentGoals: string[];
   recentChanges: Array<{ taskSessionId: string; summary: string; files: string[]; changedAt: number }>;
   pendingItems: Array<{ taskSessionId: string; summary: string; status: TaskSessionStatus; updatedAt: number }>;
   confirmedRisks: string[];
+};
+
+export type ProjectMemoryItem = {
+  id: string;
+  kind: "convention" | "decision" | "fact" | "risk";
+  content: string;
+  status: "candidate" | "active";
+  scope: { type: "project" | "path"; paths: string[] };
+  sourceRefs: Array<{ type: "schema_migration" | "task" | "user" | "file"; value: string }>;
+  createdBy: "migration" | "user" | "system";
+  confidence: number;
   createdAt: number;
   updatedAt: number;
 };
 
-export type UpdateProjectMemoryInput = Partial<Pick<ProjectMemory, "projectSummary" | "conventions" | "currentGoals" | "confirmedRisks">>;
+export type ProjectMemory = {
+  schemaVersion: number;
+  snapshot: ProjectSnapshot;
+  items: ProjectMemoryItem[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type UpdateProjectMemoryInput = Partial<Pick<ProjectSnapshot, "projectSummary" | "currentGoals" | "confirmedRisks">>;
 
 export type CommandResult = {
   command: string;

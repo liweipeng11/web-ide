@@ -8,12 +8,11 @@ type Props = {
 
 type MemoryDraft = {
   projectSummary: string;
-  conventions: string;
   currentGoals: string;
   confirmedRisks: string;
 };
 
-const emptyDraft: MemoryDraft = { projectSummary: "", conventions: "", currentGoals: "", confirmedRisks: "" };
+const emptyDraft: MemoryDraft = { projectSummary: "", currentGoals: "", confirmedRisks: "" };
 
 function toLines(values: string[]) {
   return values.join("\n");
@@ -25,10 +24,9 @@ function parseLines(value: string) {
 
 function createDraft(memory: ProjectMemory): MemoryDraft {
   return {
-    projectSummary: memory.projectSummary,
-    conventions: toLines(memory.conventions),
-    currentGoals: toLines(memory.currentGoals),
-    confirmedRisks: toLines(memory.confirmedRisks)
+    projectSummary: memory.snapshot.projectSummary,
+    currentGoals: toLines(memory.snapshot.currentGoals),
+    confirmedRisks: toLines(memory.snapshot.confirmedRisks)
   };
 }
 
@@ -46,7 +44,6 @@ export default function ProjectMemoryPanel({ disabled, workspaceRoot }: Props) {
     if (disabled || loading) return;
     setLoading(true);
     setMessage("");
-
     try {
       const result = refreshAnalysis ? await refreshProjectMemory() : await fetchProjectMemory();
       setMemory(result.memory);
@@ -60,13 +57,11 @@ export default function ProjectMemoryPanel({ disabled, workspaceRoot }: Props) {
   }
 
   useEffect(() => {
-    if (disabled) {
-      setMemory(null);
-      setDraft(emptyDraft);
-      return;
-    }
-    void loadMemory();
-    // 工作区可用状态变化时重新读取对应项目记忆。
+    setMemory(null);
+    setDraft(emptyDraft);
+    setMessage("");
+    if (!disabled) void loadMemory();
+    // 工作区切换时必须重新读取对应项目的数据。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, workspaceRoot]);
 
@@ -74,36 +69,36 @@ export default function ProjectMemoryPanel({ disabled, workspaceRoot }: Props) {
     if (disabled || loading) return;
     setLoading(true);
     setMessage("");
-
     try {
       const input: UpdateProjectMemoryInput = {
-        conventions: parseLines(draft.conventions),
         currentGoals: parseLines(draft.currentGoals),
         confirmedRisks: parseLines(draft.confirmedRisks)
       };
       // 只有用户真正改动简介时才切换为 manual，保存其他字段不会冻结自动摘要。
-      if (draft.projectSummary.trim() !== memory?.projectSummary) input.projectSummary = draft.projectSummary.trim();
+      if (draft.projectSummary.trim() !== memory?.snapshot.projectSummary) input.projectSummary = draft.projectSummary.trim();
       const result = await updateProjectMemory(input);
       setMemory(result.memory);
       setDraft(createDraft(result.memory));
-      setMessage("Project Memory 已保存。重启或新建聊天后仍会生效。");
+      setMessage("Project Snapshot 已保存。重启或新建聊天后仍会生效。");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "保存 Project Memory 失败");
+      setMessage(error instanceof Error ? error.message : "保存 Project Snapshot 失败");
     } finally {
       setLoading(false);
     }
   }
 
-  const stackItems = memory
-    ? [memory.techStack.packageManager, ...memory.techStack.languages, ...memory.techStack.frameworks, ...memory.techStack.buildTools].filter((item): item is string => Boolean(item))
+  const snapshot = memory?.snapshot;
+  const stackItems = snapshot
+    ? [snapshot.techStack.packageManager, ...snapshot.techStack.languages, ...snapshot.techStack.frameworks, ...snapshot.techStack.buildTools].filter((item): item is string => Boolean(item))
     : [];
+  const candidates = memory?.items.filter((item) => item.status === "candidate") || [];
 
   return (
     <section className="project-memory-panel settings-memory-panel">
       <div className="project-memory-heading">
         <div>
-          <h2>Project Memory</h2>
-          <p>{disabled ? "请先打开工作区" : memory ? `更新于 ${formatTime(memory.updatedAt)}` : "正在读取长期上下文"}</p>
+          <h2>Project Snapshot & Memory</h2>
+          <p>{disabled ? "请先打开工作区" : memory ? `Schema V${memory.schemaVersion}，更新于 ${formatTime(memory.updatedAt)}` : "正在读取项目上下文"}</p>
         </div>
         <button type="button" disabled={disabled || loading} onClick={() => void loadMemory(true)}>重新扫描</button>
       </div>
@@ -117,12 +112,7 @@ export default function ProjectMemoryPanel({ disabled, workspaceRoot }: Props) {
           <label>
             <span>项目简介</span>
             <textarea rows={4} value={draft.projectSummary} disabled={loading} onChange={(event) => setDraft((current) => ({ ...current, projectSummary: event.target.value }))} />
-            <small>{memory?.projectSummarySource === "manual" ? "手工维护，重新扫描不会覆盖" : "由项目扫描器生成"}</small>
-          </label>
-
-          <label>
-            <span>当前约定</span>
-            <textarea rows={5} value={draft.conventions} disabled={loading} placeholder="每行一条约定" onChange={(event) => setDraft((current) => ({ ...current, conventions: event.target.value }))} />
+            <small>{snapshot?.projectSummarySource === "manual" ? "手工维护，重新扫描不会覆盖" : "由项目扫描器生成"}</small>
           </label>
 
           <label>
@@ -135,12 +125,25 @@ export default function ProjectMemoryPanel({ disabled, workspaceRoot }: Props) {
             <textarea rows={4} value={draft.confirmedRisks} disabled={loading} placeholder="每行一条风险" onChange={(event) => setDraft((current) => ({ ...current, confirmedRisks: event.target.value }))} />
           </label>
 
-          <button type="button" className="project-memory-save" disabled={loading} onClick={() => void handleSave()}>保存长期记忆</button>
+          <button type="button" className="project-memory-save" disabled={loading} onClick={() => void handleSave()}>保存 Project Snapshot</button>
           {message && <p className="project-memory-message">{message}</p>}
 
           <div className="project-memory-facts">
+            <h3>候选 Memory</h3>
+            {candidates.length ? (
+              <>
+                <p>以下历史约定尚未成为可信规则。请在 Agent Rules 中核对后手工提升，未确认前仅作为背景。</p>
+                {candidates.map((item) => (
+                  <article key={item.id}>
+                    <strong>{item.content}</strong>
+                    <span>{item.kind} · {item.createdBy === "migration" ? "由旧版约定迁移" : "待确认"}</span>
+                  </article>
+                ))}
+              </>
+            ) : <p>暂无待确认的候选 Memory。</p>}
+
             <h3>最近改动</h3>
-            {memory?.recentChanges.length ? memory.recentChanges.map((change) => (
+            {snapshot?.recentChanges.length ? snapshot.recentChanges.map((change) => (
               <article key={change.taskSessionId}>
                 <strong>{change.summary}</strong>
                 <span>{change.files.join("、") || "未记录文件"}</span>
@@ -148,10 +151,10 @@ export default function ProjectMemoryPanel({ disabled, workspaceRoot }: Props) {
             )) : <p>暂无已同步改动。</p>}
 
             <h3>未完成事项</h3>
-            {memory?.pendingItems.length ? memory.pendingItems.map((item) => (
+            {snapshot?.pendingItems.length ? snapshot.pendingItems.map((item) => (
               <article key={item.taskSessionId}>
                 <strong>{item.summary}</strong>
-                <span>{item.status}</span>
+                <span>{item.status} · {formatTime(item.updatedAt)}</span>
               </article>
             )) : <p>暂无未完成事项。</p>}
           </div>

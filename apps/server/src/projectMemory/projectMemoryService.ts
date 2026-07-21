@@ -3,7 +3,8 @@ import { analyzeProject } from "../projectAnalyzer.js";
 import { listTaskSessions } from "../taskSessionStore.js";
 import type { TaskSession } from "../types.js";
 import { getWorkspaceRoot } from "../workspaceStore.js";
-import { normalizeProjectMemory, readProjectMemory, writeProjectMemory } from "./projectMemoryStore.js";
+import { normalizeProjectMemory } from "./projectMemoryMigration.js";
+import { readProjectMemory, writeProjectMemory } from "./projectMemoryStore.js";
 import { PROJECT_MEMORY_SCHEMA_VERSION, type ProjectMemory, type ProjectMemoryTechStack, type UpdateProjectMemoryInput } from "./types.js";
 import { buildProjectMemoryPrompt } from "./projectMemoryPrompt.js";
 
@@ -53,14 +54,16 @@ async function createInitialMemory(workspaceRoot: string): Promise<ProjectMemory
 
   return {
     schemaVersion: PROJECT_MEMORY_SCHEMA_VERSION,
-    projectSummary: buildProjectSummary(techStack),
-    projectSummarySource: "generated",
-    techStack,
-    conventions: [],
-    currentGoals: [],
-    recentChanges: [],
-    pendingItems: [],
-    confirmedRisks: [],
+    snapshot: {
+      projectSummary: buildProjectSummary(techStack),
+      projectSummarySource: "generated",
+      techStack,
+      currentGoals: [],
+      recentChanges: [],
+      pendingItems: [],
+      confirmedRisks: []
+    },
+    items: [],
     createdAt: now,
     updatedAt: now
   };
@@ -83,7 +86,7 @@ export function synchronizeProjectMemoryWithTasks(memory: ProjectMemory, session
     .filter(({ files }) => files.length > 0)
     .map(({ session, files }) => ({ taskSessionId: session.id, summary: session.userGoal, files, changedAt: session.updatedAt }));
   // 最近改动是长期事实：任务历史被清理后仍保留已同步摘要；同一任务的新事实覆盖旧快照。
-  const recentChangesByTask = new Map(memory.recentChanges.map((change) => [change.taskSessionId, change]));
+  const recentChangesByTask = new Map(memory.snapshot.recentChanges.map((change) => [change.taskSessionId, change]));
   sessionChanges.forEach((change) => recentChangesByTask.set(change.taskSessionId, change));
   const recentChanges = [...recentChangesByTask.values()].sort((left, right) => right.changedAt - left.changedAt).slice(0, 20);
   const pendingItems = ordered
@@ -91,10 +94,10 @@ export function synchronizeProjectMemoryWithTasks(memory: ProjectMemory, session
     .map((session) => ({ taskSessionId: session.id, summary: session.userGoal, status: session.status, updatedAt: session.updatedAt }))
     .slice(0, 20);
 
-  const unchanged = JSON.stringify(memory.recentChanges) === JSON.stringify(recentChanges) && JSON.stringify(memory.pendingItems) === JSON.stringify(pendingItems);
+  const unchanged = JSON.stringify(memory.snapshot.recentChanges) === JSON.stringify(recentChanges) && JSON.stringify(memory.snapshot.pendingItems) === JSON.stringify(pendingItems);
   if (unchanged) return memory;
 
-  return normalizeProjectMemory({ ...memory, recentChanges, pendingItems, updatedAt: Date.now() });
+  return normalizeProjectMemory({ ...memory, snapshot: { ...memory.snapshot, recentChanges, pendingItems }, updatedAt: Date.now() });
 }
 
 async function loadProjectMemory(options: { workspaceRoot: string; sessions?: TaskSession[]; syncTasks?: boolean }) {
@@ -123,8 +126,11 @@ export async function updateProjectMemory(input: UpdateProjectMemoryInput, works
     const current = await loadProjectMemory({ workspaceRoot: root });
     const next = normalizeProjectMemory({
       ...current,
-      ...input,
-      projectSummarySource: input.projectSummary === undefined ? current.projectSummarySource : "manual",
+      snapshot: {
+        ...current.snapshot,
+        ...input,
+        projectSummarySource: input.projectSummary === undefined ? current.snapshot.projectSummarySource : "manual"
+      },
       updatedAt: Date.now()
     });
     return writeProjectMemory(root, next);
@@ -136,16 +142,19 @@ export async function refreshProjectMemoryAnalysis(workspaceRoot?: string) {
   return enqueueMemoryOperation(root, async () => {
     const current = await loadProjectMemory({ workspaceRoot: root });
     const techStack = buildTechStack(await analyzeProject(root));
-    const previousGeneratedSummary = buildProjectSummary(current.techStack);
-    const shouldRefreshSummary = current.projectSummarySource === "generated" || current.projectSummary === previousGeneratedSummary;
+    const previousGeneratedSummary = buildProjectSummary(current.snapshot.techStack);
+    const shouldRefreshSummary = current.snapshot.projectSummarySource === "generated" || current.snapshot.projectSummary === previousGeneratedSummary;
     return writeProjectMemory(
       root,
       normalizeProjectMemory({
         ...current,
         // 旧版本通过内容比对识别自动摘要；明确手工维护的简介不会被重新扫描覆盖。
-        projectSummary: shouldRefreshSummary ? buildProjectSummary(techStack) : current.projectSummary,
-        projectSummarySource: shouldRefreshSummary ? "generated" : "manual",
-        techStack,
+        snapshot: {
+          ...current.snapshot,
+          projectSummary: shouldRefreshSummary ? buildProjectSummary(techStack) : current.snapshot.projectSummary,
+          projectSummarySource: shouldRefreshSummary ? "generated" : "manual",
+          techStack
+        },
         updatedAt: Date.now()
       })
     );

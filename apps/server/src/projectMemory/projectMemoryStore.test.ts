@@ -4,16 +4,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { createProjectMemoryTestWorkspace, createProjectMemoryV2Fixture } from "./fixtures/projectMemoryV2.fixture.js";
+import { createProjectMemoryTestWorkspace, createProjectMemoryV3Fixture } from "./fixtures/projectMemoryV2.fixture.js";
 import { readProjectMemory, writeProjectMemory } from "./projectMemoryStore.js";
 
 const execFileAsync = promisify(execFile);
 
-test("Schema V2 固定样本可持久化并在重启后完整恢复", async (context) => {
+test("Schema V3 可持久化并在重启后完整恢复", async (context) => {
   const workspaceRoot = await createProjectMemoryTestWorkspace();
   context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
-  const fixture = createProjectMemoryV2Fixture();
-
+  const fixture = createProjectMemoryV3Fixture();
   await writeProjectMemory(workspaceRoot, fixture);
 
   // 使用全新的 Node 进程读取，确保恢复行为不依赖当前进程中的写入队列或模块状态。
@@ -29,6 +28,10 @@ test("Schema V2 固定样本可持久化并在重启后完整恢复", async (con
   });
 
   assert.deepEqual(JSON.parse(stdout), fixture);
+  const persisted = JSON.parse(await fs.readFile(path.join(workspaceRoot, ".mini-ai", "state", "runtime", "project-memory.json"), "utf8"));
+  assert.equal(persisted.schemaVersion, 3);
+  assert.ok(persisted.snapshot);
+  assert.equal("conventions" in persisted, false);
 });
 
 test("损坏的 Project Memory 返回明确错误且不会覆盖原文件", async (context) => {
