@@ -3,9 +3,21 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
 import express from "express";
+import { config } from "../config.js";
 import type { InlineEditRequest } from "../contracts/inlineEdit.js";
 import { createInlineEditRouter } from "./routes.js";
 import type { InlineEditGenerator } from "./inlineEditService.js";
+
+const originalModelProviderGateway = config.featureFlags.modelProviderGateway;
+
+test.before(() => {
+  // 路由行为测试使用注入的 Mock Generator，不应依赖用户磁盘中的模型选择配置。
+  config.featureFlags.modelProviderGateway = false;
+});
+
+test.after(() => {
+  config.featureFlags.modelProviderGateway = originalModelProviderGateway;
+});
 
 const request: InlineEditRequest = {
   filePath: "src/example.ts",
