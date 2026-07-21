@@ -5,6 +5,8 @@ import { rankProjectMemoryItems } from "./memoryScoring.js";
 import { prepareProjectMemoryForRetrieval, recordProjectMemoryUsage } from "./projectMemoryService.js";
 import { recordMemoryRetrievalUsage } from "./memoryUsageService.js";
 import type { MemoryRetrievalContext, ProjectMemory, ProjectMemoryRetrievalResult } from "./types.js";
+import { isProjectMemoryFeatureEnabled } from "./projectMemoryFeatureFlags.js";
+import { recordMemoryRetrievalMetric } from "./memoryMetrics.js";
 
 const DEFAULT_MAX_ITEMS = 8;
 const DEFAULT_TOKEN_BUDGET = 1_200;
@@ -53,9 +55,10 @@ export function retrieveProjectMemory(memory: ProjectMemory, input: Partial<Memo
 /** 所有模型入口调用的统一服务；无工作区时维持空 Prompt 的旧行为。 */
 export async function getRelevantProjectMemory(input: Partial<MemoryRetrievalContext> & Pick<MemoryRetrievalContext, "userRequest">): Promise<ProjectMemoryRetrievalResult> {
   const context = normalizeMemoryRetrievalContext(input);
-  if (!getWorkspaceRoot()) {
+  if (!getWorkspaceRoot() || !isProjectMemoryFeatureEnabled("retrievalEnabled")) {
     return { prompt: "", selectedItems: [], estimatedTokens: 0, tokenBudget: context.tokenBudget, snapshotTokenBudget: 0, memoryTokenBudget: 0 };
   }
+  const startedAt = performance.now();
   const memory = await prepareProjectMemoryForRetrieval({ branch: context.branch });
   const allRanked = rankProjectMemoryItems(memory.items, context, Date.now(), 50);
   const ranked = allRanked.slice(0, context.maxItems);
@@ -69,7 +72,14 @@ export async function getRelevantProjectMemory(input: Partial<MemoryRetrievalCon
     snapshotTokenBudget: budgeted.snapshotTokenBudget,
     memoryTokenBudget: budgeted.memoryTokenBudget
   };
-  await recordProjectMemoryUsage(result.selectedItems.map((entry) => entry.item.id));
+  if (isProjectMemoryFeatureEnabled("usageLogEnabled")) {
+    await recordProjectMemoryUsage(result.selectedItems.map((entry) => entry.item.id));
+    recordMemoryRetrievalMetric({
+      latencyMs: performance.now() - startedAt,
+      estimatedTokens: result.estimatedTokens,
+      selectedItems: result.selectedItems
+    });
+  }
   // 可解释性记录失败不得阻断模型主流程。
   await recordMemoryRetrievalUsage({ context, rankedItems: allRanked, consideredItemIds: new Set(ranked.map((entry) => entry.item.id)), includedItemIds: included, estimatedTokens: result.estimatedTokens }).catch(() => undefined);
   return result;

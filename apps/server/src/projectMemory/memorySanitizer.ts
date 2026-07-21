@@ -1,5 +1,5 @@
 import { HttpError } from "../errors.js";
-import type { ProjectMemoryKind, ProjectMemoryScope, ProjectMemorySourceRef } from "./types.js";
+import type { ProjectMemory, ProjectMemoryKind, ProjectMemoryScope, ProjectMemorySourceRef } from "./types.js";
 
 export const MEMORY_CONTENT_MAX_LENGTH = 2_000;
 export const MEMORY_SOURCE_REF_MAX_LENGTH = 500;
@@ -12,14 +12,27 @@ const validSourceTypes = new Set<ProjectMemorySourceRef["type"]>(["schema_migrat
 const sensitivePatterns: Array<{ name: string; pattern: RegExp }> = [
   { name: "private_key", pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i },
   { name: "api_key", pattern: /\b(?:sk|pk|rk)-(?:live-|test-)?[a-z0-9_-]{16,}\b/i },
+  { name: "openai_api_key", pattern: /\bsk-(?:proj-|svcacct-)?[a-z0-9_-]{20,}\b/i },
+  { name: "google_api_key", pattern: /\bAIza[0-9A-Za-z_-]{30,}\b/ },
+  { name: "slack_token", pattern: /\bxox[baprs]-[a-z0-9-]{20,}\b/i },
   { name: "github_token", pattern: /\bgh[pousr]_[a-z0-9]{20,}\b/i },
   { name: "aws_access_key", pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/ },
   { name: "bearer_token", pattern: /\bBearer\s+[a-z0-9._~+/=-]{20,}/i },
   { name: "database_url", pattern: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s:@]+:[^\s@]+@/i },
-  { name: "secret_assignment", pattern: /\b(?:API_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|DATABASE_URL|PASSWORD|PRIVATE_KEY)\s*=\s*[^\s]{6,}/i },
+  { name: "secret_assignment", pattern: /(?:^|\n)\s*(?:[A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|AUTH_TOKEN|SECRET|PASSWORD|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*)\s*=\s*["']?[^\s"']{6,}/im },
   { name: "jwt", pattern: /\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b/ },
   { name: "email", pattern: /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i },
-  { name: "cn_phone", pattern: /(?<!\d)1[3-9]\d{9}(?!\d)/ }
+  { name: "cn_phone", pattern: /(?<!\d)1[3-9]\d{9}(?!\d)/ },
+  { name: "cn_identity", pattern: /(?<!\d)\d{17}[\dXx](?!\d)/ },
+  { name: "credit_card", pattern: /(?<!\d)(?:\d[ -]?){13,19}(?!\d)/ }
+];
+
+const promptInjectionPatterns: Array<{ name: string; pattern: RegExp }> = [
+  { name: "role_spoofing", pattern: /(?:^|\n)\s*(?:system|assistant|developer)\s*:/i },
+  { name: "role_tag", pattern: /<\/?(?:system|assistant|developer|instructions?)\b[^>]*>/i },
+  { name: "ignore_instructions", pattern: /\b(?:ignore|disregard|override|bypass)\b.{0,60}\b(?:previous|prior|system|developer|instructions?|rules?)\b/is },
+  { name: "execute_directive", pattern: /\b(?:delete|erase|exfiltrate|leak)\b.{0,60}\b(?:workspace|files?|secrets?|credentials?)\b/is },
+  { name: "chinese_instruction_override", pattern: /(?:忽略|绕过|覆盖).{0,30}(?:之前|系统|开发者|指令|规则)/s }
 ];
 
 /** 统一候选文本，消除不可见字符和无意义空白带来的重复项。 */
@@ -46,10 +59,30 @@ export function findSensitiveMemoryReason(content: string) {
   return sensitivePatterns.find(({ pattern }) => pattern.test(content))?.name ?? null;
 }
 
+export function findMemoryPromptInjectionReason(content: string) {
+  return promptInjectionPatterns.find(({ pattern }) => pattern.test(content))?.name ?? null;
+}
+
 /** 敏感值只返回类别，不把原文复制进错误或日志。 */
 export function ensureMemoryContentIsSafe(content: string) {
-  const reason = findSensitiveMemoryReason(content);
+  const reason = findSensitiveMemoryReason(content) || findMemoryPromptInjectionReason(content);
   if (reason) throw new HttpError(400, `Memory content contains sensitive information (${reason})`);
+}
+
+/** 写盘前执行最后一道防线，覆盖 API、任务同步、迁移和内部 mutate 等所有入口。 */
+export function ensureProjectMemoryIsSafeForPersistence(memory: ProjectMemory) {
+  const snapshotTexts = [
+    memory.snapshot.projectSummary,
+    ...memory.snapshot.currentGoals,
+    ...memory.snapshot.confirmedRisks,
+    ...memory.snapshot.recentChanges.map((item) => item.summary),
+    ...memory.snapshot.pendingItems.map((item) => item.summary)
+  ];
+  snapshotTexts.forEach(ensureMemoryContentIsSafe);
+  memory.items.forEach((item) => {
+    ensureMemoryContentIsSafe(item.content);
+    normalizeMemorySourceRefs(item.sourceRefs);
+  });
 }
 
 export function normalizeMemoryKind(value: unknown): ProjectMemoryKind {
@@ -96,6 +129,10 @@ export function normalizeMemorySourceRefs(value: unknown): ProjectMemorySourceRe
     };
     const contentHash = optionalValue("contentHash", 128);
     const filePath = optionalValue("filePath", MEMORY_SOURCE_REF_MAX_LENGTH)?.replace(/\\/g, "/");
+    // contentHash 是固定长度摘要，不包含原文；路径仍需防止把含凭据 URL 当作来源写入。
+    if (filePath && findSensitiveMemoryReason(filePath)) {
+      throw new HttpError(400, "Memory source metadata contains sensitive information");
+    }
     return {
       type: record.type as ProjectMemorySourceRef["type"],
       value: sourceValue,

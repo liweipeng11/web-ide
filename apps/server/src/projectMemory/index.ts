@@ -7,6 +7,10 @@ export { parseMemoryExtractionResult, storeMemoryExtractionResult } from "./memo
 export { applyMemoryLifecycle } from "./memoryLifecycleService.js";
 export { findSupersededMemoryIds, supersedeConflictingMemories } from "./memoryConflictService.js";
 export { clearMemoryValidationCache, validateMemoryItemSources, validateProjectMemory } from "./memoryValidationService.js";
+export { getMemoryMetricsSnapshot, recordMemoryTaskOutcome, resetMemoryMetrics } from "./memoryMetrics.js";
+export { runProjectMemoryEvaluation } from "./memoryEvaluation.js";
+export { defaultProjectMemoryFeatureFlags, isProjectMemoryFeatureEnabled, readProjectMemoryFeatureFlags } from "./projectMemoryFeatureFlags.js";
 export { getCurrentProjectMemoryPrompt, getProjectMemory, mutateProjectMemory, prepareProjectMemoryForRetrieval, recordProjectMemoryUsage, refreshProjectMemoryAnalysis, synchronizeProjectMemoryWithTasks, updateProjectMemory } from "./projectMemoryService.js";
 export { createProjectMemoryRouter } from "./routes.js";
 export type { CreateMemoryCandidateInput, MemoryExtractionResult, MemoryRetrievalContext, ProjectMemory, ProjectMemoryItem, ProjectMemoryPendingItem, ProjectMemoryRecentChange, ProjectMemoryRetrievalResult, ProjectMemoryTechStack, ProjectMemoryValidationStatus, ProjectSnapshot, ProjectSummarySource, ScoredProjectMemoryItem, UpdateMemoryCandidateInput, UpdateProjectMemoryInput } from "./types.js";
+export type { ProjectMemoryFeatureFlags } from "./projectMemoryFeatureFlags.js";

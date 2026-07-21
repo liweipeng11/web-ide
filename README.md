@@ -156,6 +156,18 @@ Project Memory 用于给 Agent 提供跨会话的稳定项目背景，数据写�
 
 在界面中可通过左侧活动栏的 **Project Memory** 面板编辑长期内容、重新扫描技术栈，并查看最近改动与未完成事项。自动生成的简介会随重新扫描更新，手工维护的简介不会被覆盖。
 
+阶段 6 增加了写盘前敏感信息与 Prompt Injection 拦截、跨分支隔离、脱敏召回日志、进程内聚合指标和确定性离线评测。可通过以下环境变量按顺序灰度或紧急回滚：
+
+```env
+PROJECT_MEMORY_V3_ENABLED=1
+PROJECT_MEMORY_AUTO_EXTRACTION_ENABLED=1
+PROJECT_MEMORY_RETRIEVAL_ENABLED=1
+PROJECT_MEMORY_VALIDATION_ENABLED=1
+PROJECT_MEMORY_USAGE_LOG_ENABLED=1
+```
+
+`PROJECT_MEMORY_V3_ENABLED=0` 是总回滚开关，会停止候选写入和所有模型入口的 Memory Prompt 注入。关闭子开关可分别停用自动抽取、召回、来源验证或使用日志。运行 `pnpm verify:stage6` 可执行安全/评测/指标/开关专项测试、服务端全量回归、双端类型检查和前端生产构建。
+
 ## External Context Gateway
 
 External Context Gateway 作为连续 Agent 和普通文件问答共用的外部信息接入层，提供：
@@ -390,9 +402,12 @@ GET /api/project-rules?path=apps/web/src/App.tsx
 GET   /api/project-memory
 PATCH /api/project-memory
 POST  /api/project-memory/refresh
+GET   /api/project-memory/metrics
+GET   /api/project-memory/evaluation
+GET   /api/project-memory/feature-flags
 ```
 
-`PATCH` 可更新 `projectSummary`、`conventions`、`currentGoals` 和 `confirmedRisks`；`refresh` 会重新扫描技术栈，同时保留手工维护的长期内容。
+`PATCH` 可更新 `projectSummary`、`currentGoals` 和 `confirmedRisks`；`refresh` 会重新扫描技术栈，同时保留手工维护的长期内容。其余三个只读端点分别返回不含 Memory 正文的聚合指标、固定评测结果和当前灰度开关。
 
 ### AI Edit
 

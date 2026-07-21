@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 import path from "node:path";
 import { readFeatureFlags } from "./featureFlags.js";
+import { readProjectMemoryFeatureFlags } from "./projectMemory/projectMemoryFeatureFlags.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), "../../.env") });
 dotenv.config();
@@ -97,5 +98,6 @@ export const config = {
   stateFilePath: process.env.STATE_FILE_PATH || path.join(process.env.STATE_DIRECTORY || defaultStateDirectory, "state.json"),
   legacyStateFilePath: path.join(legacyStateDirectory, "state.json"),
   serverPort: Number(process.env.SERVER_PORT || 3001),
-  featureFlags: readFeatureFlags()
+  featureFlags: readFeatureFlags(),
+  projectMemoryFeatureFlags: readProjectMemoryFeatureFlags()
 };

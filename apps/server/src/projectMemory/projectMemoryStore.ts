@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { HttpError } from "../errors.js";
+import { ensureProjectMemoryIsSafeForPersistence } from "./memorySanitizer.js";
 import { migrateProjectMemory, normalizeProjectMemory } from "./projectMemoryMigration.js";
 import type { ProjectMemory } from "./types.js";
 
@@ -40,6 +41,7 @@ export async function readProjectMemory(workspaceRoot: string): Promise<ProjectM
 export async function writeProjectMemory(workspaceRoot: string, memory: ProjectMemory): Promise<ProjectMemory> {
   const targetPath = memoryPath(workspaceRoot);
   const normalized = normalizeProjectMemory(memory);
+  ensureProjectMemoryIsSafeForPersistence(normalized);
   const previous = writeQueues.get(targetPath) || Promise.resolve();
   const next = previous.catch(() => undefined).then(async () => {
     await fs.mkdir(path.dirname(targetPath), { recursive: true });

@@ -667,10 +667,10 @@ export type MemoryUsageRecord = {
   estimatedTokens: number;
   entries: Array<{
     itemId: string;
-    content: string;
+    contentPreview: string;
     score: number | null;
     reasons: string[];
-    sourceRefs: ProjectMemoryItem["sourceRefs"];
+    sourceTypes: Array<ProjectMemoryItem["sourceRefs"][number]["type"]>;
     validationStatus: ProjectMemoryItem["validationStatus"];
     includedInPrompt: boolean;
     exclusionReason?: "token_budget" | "item_limit";

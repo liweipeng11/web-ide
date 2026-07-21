@@ -1,6 +1,5 @@
 import { useState } from "react";
 import type { MemoryUsageRecord } from "../../api";
-import { MemorySourceList } from "./MemorySourceList";
 import { explainRetrievalReason, formatMemoryTime, validationLabels } from "./memoryViewModel";
 
 export function MemoryUsagePanel({ records }: { records: MemoryUsageRecord[] }) {
@@ -15,10 +14,10 @@ export function MemoryUsagePanel({ records }: { records: MemoryUsageRecord[] }) 
         <div className="memory-card-list">{selected?.entries.length ? selected.entries.map((entry) => (
           <article className="memory-card" key={entry.itemId}>
             <div className="memory-card-heading"><span className={entry.includedInPrompt ? "included" : "excluded"}>{entry.includedInPrompt ? "已进入最终 Prompt" : "未进入最终 Prompt"}</span><small>相关性 {entry.score ?? "-"} · {validationLabels[entry.validationStatus]}</small></div>
-            <strong>{entry.content}</strong>
+            <strong>{entry.contentPreview}</strong>
             <div className="memory-reasons">{entry.reasons.map((reason) => <span key={reason}>{explainRetrievalReason(reason)}</span>)}</div>
             {!entry.includedInPrompt && <p>未进入原因：{entry.exclusionReason === "item_limit" ? "超过条目上限" : "超出 Token 预算"}</p>}
-            <MemorySourceList sources={entry.sourceRefs} />
+            <small>来源类型：{entry.sourceTypes.join("、") || "未记录"}</small>
           </article>
         )) : <div className="memory-empty">本轮没有相关 Memory 进入排序。</div>}</div>
       </>}

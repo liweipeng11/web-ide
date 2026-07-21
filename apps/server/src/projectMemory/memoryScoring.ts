@@ -61,7 +61,11 @@ export function scoreProjectMemoryItem(item: ProjectMemoryItem, context: MemoryR
   }
 
   if (context.branch) {
-    const branchMatches = item.sourceRefs.some((ref) => normalizeText(ref.value) === normalizeText(context.branch!)) || normalizeText(item.content).includes(normalizeText(context.branch));
+    const branchSources = item.sourceRefs.filter((ref) => ref.type === "branch");
+    const branchMatches = item.sourceRefs.some((ref) => normalizeText(ref.value) === normalizeText(context.branch!))
+      || (!branchSources.length && normalizeText(item.content).includes(normalizeText(context.branch)));
+    // 有明确分支来源时必须隔离；不能让其他关键词抵消跨分支风险。
+    if (branchSources.length && !branchMatches) return null;
     if (branchMatches) {
       relevanceScore += 18;
       reasons.push("branch");

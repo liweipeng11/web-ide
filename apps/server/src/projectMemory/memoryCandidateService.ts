@@ -11,6 +11,8 @@ import {
 } from "./memorySanitizer.js";
 import type { CreateMemoryCandidateInput, ProjectMemoryItem, UpdateMemoryCandidateInput } from "./types.js";
 import { supersedeConflictingMemories } from "./memoryConflictService.js";
+import { recordMemoryCandidateMetric } from "./memoryMetrics.js";
+import { readProjectMemoryFeatureFlags } from "./projectMemoryFeatureFlags.js";
 
 export type MemoryCandidateMutationResult = {
   candidate: ProjectMemoryItem;
@@ -71,6 +73,7 @@ export async function listMemoryItems(workspaceRoot?: string) {
 
 /** 所有来源（用户、系统、迁移）统一经过安全检查和精确去重后才能成为候选。 */
 export async function createMemoryCandidate(input: CreateMemoryCandidateInput, workspaceRoot?: string): Promise<MemoryCandidateMutationResult> {
+  if (!readProjectMemoryFeatureFlags().v3Enabled) throw new HttpError(503, "Project Memory V3 is disabled");
   const normalized = normalizeCandidateInput(input);
   let result: MemoryCandidateMutationResult | null = null;
   await mutateProjectMemory((memory) => {
@@ -84,8 +87,10 @@ export async function createMemoryCandidate(input: CreateMemoryCandidateInput, w
     result = { candidate, created: true, conflictIds: findConflictIds(memory.items, candidate) };
     return { ...memory, items: [candidate, ...memory.items] };
   }, workspaceRoot);
-  if (!result) throw new Error("Failed to create memory candidate");
-  return result;
+  const finalResult = result as MemoryCandidateMutationResult | null;
+  if (!finalResult) throw new Error("Failed to create memory candidate");
+  if (finalResult.created && readProjectMemoryFeatureFlags().usageLogEnabled) recordMemoryCandidateMetric("created");
+  return finalResult;
 }
 
 export async function updateMemoryCandidate(id: string, input: UpdateMemoryCandidateInput, workspaceRoot?: string) {
@@ -146,6 +151,7 @@ export async function acceptMemoryCandidate(id: string, workspaceRoot?: string) 
   }, workspaceRoot);
   const accepted = saved.items.find((item) => item.id === id);
   if (!accepted) throw new Error("Failed to accept memory candidate");
+  if (readProjectMemoryFeatureFlags().usageLogEnabled) recordMemoryCandidateMetric("accepted");
   return accepted;
 }
 
@@ -162,6 +168,7 @@ export async function rejectMemoryCandidate(id: string, workspaceRoot?: string) 
         : item)
     };
   }, workspaceRoot);
+  if (readProjectMemoryFeatureFlags().usageLogEnabled) recordMemoryCandidateMetric("rejected");
 }
 
 export async function deleteMemoryItem(id: string, workspaceRoot?: string) {

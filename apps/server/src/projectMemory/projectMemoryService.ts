@@ -9,6 +9,9 @@ import { PROJECT_MEMORY_SCHEMA_VERSION, type ProjectMemory, type ProjectMemoryTe
 import { buildProjectMemoryPrompt } from "./projectMemoryPrompt.js";
 import { applyMemoryLifecycle } from "./memoryLifecycleService.js";
 import { validateProjectMemory } from "./memoryValidationService.js";
+import { recordMemoryValidationMetric } from "./memoryMetrics.js";
+import { ensureMemoryContentIsSafe, findMemoryPromptInjectionReason, findSensitiveMemoryReason } from "./memorySanitizer.js";
+import { isProjectMemoryFeatureEnabled } from "./projectMemoryFeatureFlags.js";
 
 const memoryOperationQueues = new Map<string, Promise<unknown>>();
 
@@ -86,6 +89,8 @@ export function synchronizeProjectMemoryWithTasks(memory: ProjectMemory, session
   const sessionChanges = ordered
     .map((session) => ({ session, files: getAppliedFiles(session) }))
     .filter(({ files }) => files.length > 0)
+    // 不把任务目标中的凭据或伪造指令同步进长期 Snapshot。
+    .filter(({ session }) => !findSensitiveMemoryReason(session.userGoal) && !findMemoryPromptInjectionReason(session.userGoal))
     .map(({ session, files }) => ({ taskSessionId: session.id, summary: session.userGoal, files, changedAt: session.updatedAt }));
   // 最近改动是长期事实：任务历史被清理后仍保留已同步摘要；同一任务的新事实覆盖旧快照。
   const recentChangesByTask = new Map(memory.snapshot.recentChanges.map((change) => [change.taskSessionId, change]));
@@ -93,6 +98,7 @@ export function synchronizeProjectMemoryWithTasks(memory: ProjectMemory, session
   const recentChanges = [...recentChangesByTask.values()].sort((left, right) => right.changedAt - left.changedAt).slice(0, 20);
   const pendingItems = ordered
     .filter((session) => session.status !== "success" && session.status !== "cancelled")
+    .filter((session) => !findSensitiveMemoryReason(session.userGoal) && !findMemoryPromptInjectionReason(session.userGoal))
     .map((session) => ({ taskSessionId: session.id, summary: session.userGoal, status: session.status, updatedAt: session.updatedAt }))
     .slice(0, 20);
 
@@ -123,6 +129,9 @@ export async function getProjectMemory(options: { workspaceRoot?: string; sessio
 }
 
 export async function updateProjectMemory(input: UpdateProjectMemoryInput, workspaceRoot?: string) {
+  [input.projectSummary, ...(input.currentGoals || []), ...(input.confirmedRisks || [])]
+    .filter((value): value is string => value !== undefined)
+    .forEach(ensureMemoryContentIsSafe);
   const root = requireWorkspaceRoot(workspaceRoot);
   return enqueueMemoryOperation(root, async () => {
     const current = await loadProjectMemory({ workspaceRoot: root });
@@ -164,11 +173,20 @@ export async function prepareProjectMemoryForRetrieval(options: { workspaceRoot?
     const lifecycle = applyMemoryLifecycle(current, {
       completedTaskSummaries: new Set(completed.map((session) => session.userGoal))
     });
-    const validated = await validateProjectMemory(lifecycle, {
-      workspaceRoot: root,
-      currentBranch: options.branch,
-      taskIds: sessions.length ? new Set(sessions.map((session) => session.id)) : undefined
-    });
+    const validated = isProjectMemoryFeatureEnabled("validationEnabled")
+      ? await validateProjectMemory(lifecycle, {
+        workspaceRoot: root,
+        currentBranch: options.branch,
+        taskIds: sessions.length ? new Set(sessions.map((session) => session.id)) : undefined
+      })
+      : { memory: lifecycle, results: [] };
+    if (isProjectMemoryFeatureEnabled("usageLogEnabled")) {
+      recordMemoryValidationMetric(
+        validated.results.filter((result) => result.status === "valid").length,
+        validated.results.length,
+        validated.memory
+      );
+    }
     const next = normalizeProjectMemory(validated.memory);
     if (JSON.stringify(next) === JSON.stringify(current)) return current;
     return writeProjectMemory(root, { ...next, updatedAt: Date.now() });
@@ -213,6 +231,6 @@ export async function refreshProjectMemoryAnalysis(workspaceRoot?: string) {
 
 /** 所有模型入口复用同一加载逻辑，确保没有工作区时保持原有无记忆行为。 */
 export async function getCurrentProjectMemoryPrompt() {
-  if (!getWorkspaceRoot()) return "";
+  if (!getWorkspaceRoot() || !isProjectMemoryFeatureEnabled("retrievalEnabled")) return "";
   return buildProjectMemoryPrompt(await getProjectMemory());
 }

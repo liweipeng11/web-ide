@@ -6,6 +6,9 @@ import { listMemoryUsageRecords } from "./memoryUsageService.js";
 import { normalizeMemoryConfidence, normalizeMemorySourceRefs } from "./memorySanitizer.js";
 import { getProjectMemory, refreshProjectMemoryAnalysis, updateProjectMemory } from "./projectMemoryService.js";
 import type { CreateMemoryCandidateInput, ProjectMemorySourceRef, UpdateMemoryCandidateInput, UpdateProjectMemoryInput } from "./types.js";
+import { getMemoryMetricsSnapshot } from "./memoryMetrics.js";
+import { runProjectMemoryEvaluation } from "./memoryEvaluation.js";
+import { readProjectMemoryFeatureFlags } from "./projectMemoryFeatureFlags.js";
 
 function asInputRecord(value: unknown, message: string) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new HttpError(400, message);
@@ -115,6 +118,18 @@ export function createProjectMemoryRouter() {
   router.get("/usage", asyncRoute(async (request, response) => {
     const rawLimit = typeof request.query.limit === "string" ? Number(request.query.limit) : 10;
     response.json({ records: await listMemoryUsageRecords(undefined, Number.isFinite(rawLimit) ? rawLimit : 10) });
+  }));
+
+  router.get("/metrics", asyncRoute(async (_request, response) => {
+    response.json({ metrics: getMemoryMetricsSnapshot() });
+  }));
+
+  router.get("/evaluation", asyncRoute(async (_request, response) => {
+    response.json({ evaluation: runProjectMemoryEvaluation() });
+  }));
+
+  router.get("/feature-flags", asyncRoute(async (_request, response) => {
+    response.json({ featureFlags: readProjectMemoryFeatureFlags() });
   }));
 
   router.post("/candidates", asyncRoute(async (request, response) => {

@@ -6,6 +6,7 @@ import {
   normalizeMemorySourceRefs
 } from "./memorySanitizer.js";
 import type { MemoryExtractionResult, ProjectMemoryItem, ProjectMemorySourceRef } from "./types.js";
+import { isProjectMemoryFeatureEnabled } from "./projectMemoryFeatureFlags.js";
 
 const MAX_EXTRACTED_CANDIDATES = 20;
 
@@ -57,6 +58,9 @@ export async function storeMemoryExtractionResult(
   trustedSourceRefs: ProjectMemorySourceRef[],
   workspaceRoot?: string
 ): Promise<StoreMemoryExtractionResult> {
+  if (!isProjectMemoryFeatureEnabled("autoExtractionEnabled")) {
+    return { candidates: [], duplicateCount: 0, rejectedCount: 0, error: "Project Memory auto extraction is disabled" };
+  }
   try {
     const parsed = parseMemoryExtractionResult(value);
     const trusted = new Set(normalizeMemorySourceRefs(trustedSourceRefs).map(sourceKey));

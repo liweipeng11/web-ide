@@ -119,10 +119,10 @@ export type PromoteMemoryInput = {
 
 export type MemoryUsageEntry = {
   itemId: string;
-  content: string;
+  contentPreview: string;
   score: number | null;
   reasons: string[];
-  sourceRefs: ProjectMemorySourceRef[];
+  sourceTypes: ProjectMemorySourceRef["type"][];
   validationStatus: ProjectMemoryValidationStatus;
   includedInPrompt: boolean;
   exclusionReason?: "token_budget" | "item_limit";
