@@ -5,7 +5,8 @@ import test from "node:test";
 import { setWorkspaceRoot } from "../workspaceStore.js";
 import { createProjectMemoryTask, createProjectMemoryTestWorkspace } from "./fixtures/projectMemoryV2.fixture.js";
 import { readProjectMemory } from "./projectMemoryStore.js";
-import { getProjectMemory, refreshProjectMemoryAnalysis, synchronizeProjectMemoryWithTasks, updateProjectMemory } from "./projectMemoryService.js";
+import { getProjectMemory, mutateProjectMemory, prepareProjectMemoryForRetrieval, recordProjectMemoryUsage, refreshProjectMemoryAnalysis, synchronizeProjectMemoryWithTasks, updateProjectMemory } from "./projectMemoryService.js";
+import { clearMemoryValidationCache } from "./memoryValidationService.js";
 
 test("首次读取会扫描项目并持久化 Project Memory", async (context) => {
   const workspaceRoot = await createProjectMemoryTestWorkspace();
@@ -110,4 +111,37 @@ test("重新扫描更新自动简介但保护手工简介", async (context) => {
   const manual = await refreshProjectMemoryAnalysis(workspaceRoot);
   assert.equal(manual.snapshot.projectSummary, "手工项目简介");
   assert.equal(manual.snapshot.projectSummarySource, "manual");
+});
+
+test("召回准备会持久化失效来源，并节流记录实际使用时间", async (context) => {
+  clearMemoryValidationCache();
+  const workspaceRoot = await createProjectMemoryTestWorkspace();
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const initial = await getProjectMemory({ workspaceRoot, sessions: [] });
+  const now = Date.now();
+  await mutateProjectMemory((memory) => ({
+    ...memory,
+    items: [{
+      id: "missing-source",
+      kind: "fact",
+      content: "authentication source fact",
+      status: "active",
+      scope: { type: "project", paths: [] },
+      sourceRefs: [{ type: "file", value: "src/missing.ts" }],
+      createdBy: "user",
+      confidence: 1,
+      createdAt: now,
+      updatedAt: now,
+      validationStatus: "unverified"
+    }, ...memory.items]
+  }), workspaceRoot);
+
+  const prepared = await prepareProjectMemoryForRetrieval({ workspaceRoot });
+  assert.equal(prepared.items.find((item) => item.id === "missing-source")?.status, "stale");
+  await recordProjectMemoryUsage(["missing-source"], workspaceRoot, now + 1_000);
+  await recordProjectMemoryUsage(["missing-source"], workspaceRoot, now + 2_000);
+  const stored = await readProjectMemory(workspaceRoot);
+  assert.equal(stored?.items.find((item) => item.id === "missing-source")?.lastUsedAt, now + 1_000);
+  assert.equal(initial.schemaVersion, stored?.schemaVersion);
 });

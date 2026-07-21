@@ -7,6 +7,8 @@ import { normalizeProjectMemory } from "./projectMemoryMigration.js";
 import { readProjectMemory, writeProjectMemory } from "./projectMemoryStore.js";
 import { PROJECT_MEMORY_SCHEMA_VERSION, type ProjectMemory, type ProjectMemoryTechStack, type UpdateProjectMemoryInput } from "./types.js";
 import { buildProjectMemoryPrompt } from "./projectMemoryPrompt.js";
+import { applyMemoryLifecycle } from "./memoryLifecycleService.js";
+import { validateProjectMemory } from "./memoryValidationService.js";
 
 const memoryOperationQueues = new Map<string, Promise<unknown>>();
 
@@ -146,8 +148,43 @@ export async function mutateProjectMemory(
   return enqueueMemoryOperation(root, async () => {
     const current = await loadProjectMemory({ workspaceRoot: root });
     const next = normalizeProjectMemory(await mutate(current));
+    // 无变化时不刷新 updatedAt 或重写文件，验证缓存命中和使用时间节流依赖这一点。
+    if (JSON.stringify(next) === JSON.stringify(current)) return current;
     return writeProjectMemory(root, { ...next, updatedAt: Date.now() });
   });
+}
+
+/** 召回前统一执行生命周期与来源验证；任何验证故障都只会降低可信度。 */
+export async function prepareProjectMemoryForRetrieval(options: { workspaceRoot?: string; branch?: string } = {}) {
+  const root = requireWorkspaceRoot(options.workspaceRoot);
+  return enqueueMemoryOperation(root, async () => {
+    const sessions = await listTaskSessions({ includeDiffView: false });
+    const current = await loadProjectMemory({ workspaceRoot: root, sessions });
+    const completed = sessions.filter((session) => session.status === "success");
+    const lifecycle = applyMemoryLifecycle(current, {
+      completedTaskSummaries: new Set(completed.map((session) => session.userGoal))
+    });
+    const validated = await validateProjectMemory(lifecycle, {
+      workspaceRoot: root,
+      currentBranch: options.branch,
+      taskIds: sessions.length ? new Set(sessions.map((session) => session.id)) : undefined
+    });
+    const next = normalizeProjectMemory(validated.memory);
+    if (JSON.stringify(next) === JSON.stringify(current)) return current;
+    return writeProjectMemory(root, { ...next, updatedAt: Date.now() });
+  });
+}
+
+/** 高频召回只按五分钟粒度记录使用时间，避免每次模型调用都触发磁盘写入。 */
+export async function recordProjectMemoryUsage(itemIds: string[], workspaceRoot?: string, now = Date.now()) {
+  if (!itemIds.length) return;
+  const selected = new Set(itemIds);
+  await mutateProjectMemory((memory) => ({
+    ...memory,
+    items: memory.items.map((item) => selected.has(item.id) && now - (item.lastUsedAt ?? 0) >= 5 * 60_000
+      ? { ...item, lastUsedAt: now }
+      : item)
+  }), workspaceRoot);
 }
 
 export async function refreshProjectMemoryAnalysis(workspaceRoot?: string) {

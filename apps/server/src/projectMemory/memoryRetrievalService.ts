@@ -2,7 +2,7 @@ import { ConservativeTokenEstimator } from "../contextBudget/index.js";
 import { getWorkspaceRoot } from "../workspaceStore.js";
 import { buildBudgetedProjectMemoryPrompt } from "./memoryPromptBudget.js";
 import { rankProjectMemoryItems } from "./memoryScoring.js";
-import { getProjectMemory } from "./projectMemoryService.js";
+import { prepareProjectMemoryForRetrieval, recordProjectMemoryUsage } from "./projectMemoryService.js";
 import type { MemoryRetrievalContext, ProjectMemory, ProjectMemoryRetrievalResult } from "./types.js";
 
 const DEFAULT_MAX_ITEMS = 8;
@@ -55,7 +55,9 @@ export async function getRelevantProjectMemory(input: Partial<MemoryRetrievalCon
   if (!getWorkspaceRoot()) {
     return { prompt: "", selectedItems: [], estimatedTokens: 0, tokenBudget: context.tokenBudget, snapshotTokenBudget: 0, memoryTokenBudget: 0 };
   }
-  return retrieveProjectMemory(await getProjectMemory(), context);
+  const result = retrieveProjectMemory(await prepareProjectMemoryForRetrieval({ branch: context.branch }), context);
+  await recordProjectMemoryUsage(result.selectedItems.map((entry) => entry.item.id));
+  return result;
 }
 
 export async function getRelevantProjectMemoryPrompt(input: Partial<MemoryRetrievalContext> & Pick<MemoryRetrievalContext, "userRequest">) {

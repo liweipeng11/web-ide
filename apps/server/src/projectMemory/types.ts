@@ -42,8 +42,9 @@ export type ProjectSnapshot = {
 };
 
 export type ProjectMemoryKind = "convention" | "decision" | "fact" | "risk";
-export type ProjectMemoryStatus = "candidate" | "active";
+export type ProjectMemoryStatus = "candidate" | "active" | "stale" | "rejected" | "superseded" | "archived";
 export type ProjectMemoryCreatedBy = "migration" | "user" | "system";
+export type ProjectMemoryValidationStatus = "unverified" | "valid" | "possibly_stale" | "invalid" | "superseded" | "archived";
 
 export type ProjectMemoryScope = {
   type: "project" | "path";
@@ -51,8 +52,11 @@ export type ProjectMemoryScope = {
 };
 
 export type ProjectMemorySourceRef = {
-  type: "schema_migration" | "task" | "user" | "file";
+  type: "schema_migration" | "task" | "user" | "file" | "symbol" | "dependency" | "git_commit" | "branch";
   value: string;
+  /** 文件来源可携带采集时的 SHA-256；符号来源可指明所属文件。 */
+  contentHash?: string;
+  filePath?: string;
 };
 
 export type CreateMemoryCandidateInput = {
@@ -88,6 +92,11 @@ export type ProjectMemoryItem = {
   confidence: number;
   createdAt: number;
   updatedAt: number;
+  lastUsedAt?: number;
+  lastValidatedAt?: number;
+  validationStatus: ProjectMemoryValidationStatus;
+  expiresAt?: number;
+  supersededBy?: string;
 };
 
 export type ProjectMemory = {

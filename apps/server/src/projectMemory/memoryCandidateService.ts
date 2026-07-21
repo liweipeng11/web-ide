@@ -10,6 +10,7 @@ import {
   normalizeMemorySourceRefs
 } from "./memorySanitizer.js";
 import type { CreateMemoryCandidateInput, ProjectMemoryItem, UpdateMemoryCandidateInput } from "./types.js";
+import { supersedeConflictingMemories } from "./memoryConflictService.js";
 
 export type MemoryCandidateMutationResult = {
   candidate: ProjectMemoryItem;
@@ -43,7 +44,7 @@ function findConflictIds(items: ProjectMemoryItem[], candidate: ProjectMemoryIte
     .map((item) => item.id);
 }
 
-function normalizeCandidateInput(input: CreateMemoryCandidateInput): Omit<ProjectMemoryItem, "id" | "status" | "createdAt" | "updatedAt"> {
+function normalizeCandidateInput(input: CreateMemoryCandidateInput): Omit<ProjectMemoryItem, "id" | "status" | "createdAt" | "updatedAt" | "validationStatus"> {
   const content = normalizeMemoryContent(input.content);
   ensureMemoryContentIsSafe(content);
   if (input.createdBy !== "migration" && input.createdBy !== "user" && input.createdBy !== "system") {
@@ -75,7 +76,7 @@ export async function createMemoryCandidate(input: CreateMemoryCandidateInput, w
       return memory;
     }
     const now = Date.now();
-    const candidate: ProjectMemoryItem = { ...normalized, id: crypto.randomUUID(), status: "candidate", createdAt: now, updatedAt: now };
+    const candidate: ProjectMemoryItem = { ...normalized, id: crypto.randomUUID(), status: "candidate", createdAt: now, updatedAt: now, validationStatus: "unverified" };
     result = { candidate, created: true, conflictIds: findConflictIds(memory.items, candidate) };
     return { ...memory, items: [candidate, ...memory.items] };
   }, workspaceRoot);
@@ -112,20 +113,25 @@ export async function acceptMemoryCandidate(id: string, workspaceRoot?: string) 
     if (!candidate) throw new HttpError(404, "Memory candidate not found");
     if (candidate.status !== "candidate") throw new HttpError(409, "Memory item is not awaiting confirmation");
     const accepted: ProjectMemoryItem = { ...candidate, status: "active", updatedAt: Date.now() };
-    return { ...memory, items: memory.items.map((item) => item.id === id ? accepted : item) };
+    return supersedeConflictingMemories({ ...memory, items: memory.items.map((item) => item.id === id ? accepted : item) }, id);
   }, workspaceRoot);
   const accepted = saved.items.find((item) => item.id === id);
   if (!accepted) throw new Error("Failed to accept memory candidate");
   return accepted;
 }
 
-/** 阶段 2 尚未引入 rejected 生命周期，拒绝操作采用物理移除以保证不会被召回。 */
+/** 拒绝项保留审计记录，但后续召回会严格排除。 */
 export async function rejectMemoryCandidate(id: string, workspaceRoot?: string) {
   await mutateProjectMemory((memory) => {
     const candidate = memory.items.find((item) => item.id === id);
     if (!candidate) throw new HttpError(404, "Memory candidate not found");
     if (candidate.status !== "candidate") throw new HttpError(409, "Only candidate memory can be rejected");
-    return { ...memory, items: memory.items.filter((item) => item.id !== id) };
+    return {
+      ...memory,
+      items: memory.items.map((item) => item.id === id
+        ? { ...item, status: "rejected" as const, validationStatus: "invalid" as const, updatedAt: Date.now() }
+        : item)
+    };
   }, workspaceRoot);
 }
 

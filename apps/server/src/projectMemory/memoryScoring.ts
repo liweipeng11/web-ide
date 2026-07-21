@@ -32,6 +32,8 @@ function lexicalMatches(query: string, candidate: string) {
 
 /** 确定性评分只依赖输入上下文和记忆字段，不使用随机数或数组原始顺序。 */
 export function scoreProjectMemoryItem(item: ProjectMemoryItem, context: MemoryRetrievalContext, now = Date.now()): ScoredProjectMemoryItem | null {
+  // 生命周期终态和已验证失效项绝不能进入 Prompt；candidate 仍可作为明确标注的未确认背景。
+  if ((item.status !== "active" && item.status !== "candidate") || item.validationStatus === "invalid") return null;
   const reasons: string[] = [];
   let relevanceScore = 0;
   const searchable = [item.content, ...item.scope.paths, ...item.sourceRefs.map((ref) => ref.value)].join(" ");
@@ -72,11 +74,12 @@ export function scoreProjectMemoryItem(item: ProjectMemoryItem, context: MemoryR
   const kindWeight = { risk: 12, decision: 10, convention: 7, fact: 5 }[item.kind];
   const sourceWeight = { user: 6, system: 3, migration: 1 }[item.createdBy];
   const statusWeight = item.status === "active" ? 8 : -8;
+  const validationWeight = item.validationStatus === "valid" ? 4 : item.validationStatus === "possibly_stale" ? -20 : 0;
   const confidenceWeight = Math.round(Math.max(0, Math.min(1, item.confidence)) * 8);
   const ageDays = Math.max(0, (now - item.updatedAt) / 86_400_000);
   const recencyWeight = Math.max(-12, 5 - Math.floor(ageDays / 30));
-  const score = relevanceScore + kindWeight + sourceWeight + statusWeight + confidenceWeight + recencyWeight;
-  reasons.push(`kind:${item.kind}`, `source:${item.createdBy}`, `status:${item.status}`);
+  const score = relevanceScore + kindWeight + sourceWeight + statusWeight + validationWeight + confidenceWeight + recencyWeight;
+  reasons.push(`kind:${item.kind}`, `source:${item.createdBy}`, `status:${item.status}`, `validation:${item.validationStatus}`);
   return { item, score, reasons };
 }
 

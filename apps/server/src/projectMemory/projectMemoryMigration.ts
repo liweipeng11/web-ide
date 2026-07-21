@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { PROJECT_MEMORY_SCHEMA_VERSION, type ProjectMemory, type ProjectMemoryCreatedBy, type ProjectMemoryItem, type ProjectMemoryKind, type ProjectMemoryPendingItem, type ProjectMemoryRecentChange, type ProjectMemoryScope, type ProjectMemorySourceRef, type ProjectMemoryStatus, type ProjectMemoryTechStack, type ProjectSnapshot } from "./types.js";
+import { PROJECT_MEMORY_SCHEMA_VERSION, type ProjectMemory, type ProjectMemoryCreatedBy, type ProjectMemoryItem, type ProjectMemoryKind, type ProjectMemoryPendingItem, type ProjectMemoryRecentChange, type ProjectMemoryScope, type ProjectMemorySourceRef, type ProjectMemoryStatus, type ProjectMemoryTechStack, type ProjectMemoryValidationStatus, type ProjectSnapshot } from "./types.js";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -95,20 +95,23 @@ function normalizeScope(value: unknown): ProjectMemoryScope {
 }
 
 function normalizeSourceRefs(value: unknown): ProjectMemorySourceRef[] {
-  const validTypes = new Set<ProjectMemorySourceRef["type"]>(["schema_migration", "task", "user", "file"]);
+  const validTypes = new Set<ProjectMemorySourceRef["type"]>(["schema_migration", "task", "user", "file", "symbol", "dependency", "git_commit", "branch"]);
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const record = item as UnknownRecord;
     const type = validTypes.has(record.type as ProjectMemorySourceRef["type"]) ? record.type as ProjectMemorySourceRef["type"] : null;
     const refValue = normalizeString(record.value, 500);
-    return type && refValue ? [{ type, value: refValue }] : [];
+    const contentHash = normalizeString(record.contentHash, 128);
+    const filePath = normalizeString(record.filePath, 500);
+    return type && refValue ? [{ type, value: refValue, ...(contentHash ? { contentHash } : {}), ...(filePath ? { filePath } : {}) }] : [];
   }).slice(0, 20);
 }
 
 function normalizeMemoryItems(value: unknown, now: number): ProjectMemoryItem[] {
   const validKinds = new Set<ProjectMemoryKind>(["convention", "decision", "fact", "risk"]);
-  const validStatuses = new Set<ProjectMemoryStatus>(["candidate", "active"]);
+  const validStatuses = new Set<ProjectMemoryStatus>(["candidate", "active", "stale", "rejected", "superseded", "archived"]);
+  const validValidationStatuses = new Set<ProjectMemoryValidationStatus>(["unverified", "valid", "possibly_stale", "invalid", "superseded", "archived"]);
   const validCreators = new Set<ProjectMemoryCreatedBy>(["migration", "user", "system"]);
   if (!Array.isArray(value)) return [];
   const normalized = value.flatMap((item) => {
@@ -127,7 +130,14 @@ function normalizeMemoryItems(value: unknown, now: number): ProjectMemoryItem[] 
       createdBy: validCreators.has(record.createdBy as ProjectMemoryCreatedBy) ? record.createdBy as ProjectMemoryCreatedBy : "system" as const,
       confidence: typeof record.confidence === "number" && Number.isFinite(record.confidence) ? Math.min(1, Math.max(0, record.confidence)) : 0.5,
       createdAt,
-      updatedAt: normalizeTimestamp(record.updatedAt, createdAt)
+      updatedAt: normalizeTimestamp(record.updatedAt, createdAt),
+      ...(record.lastUsedAt === undefined ? {} : { lastUsedAt: normalizeTimestamp(record.lastUsedAt, createdAt) }),
+      ...(record.lastValidatedAt === undefined ? {} : { lastValidatedAt: normalizeTimestamp(record.lastValidatedAt, createdAt) }),
+      validationStatus: validValidationStatuses.has(record.validationStatus as ProjectMemoryValidationStatus)
+        ? record.validationStatus as ProjectMemoryValidationStatus
+        : "unverified" as const,
+      ...(record.expiresAt === undefined ? {} : { expiresAt: normalizeTimestamp(record.expiresAt, createdAt) }),
+      ...(normalizeString(record.supersededBy, 200) ? { supersededBy: normalizeString(record.supersededBy, 200) } : {})
     }];
   });
   // 内容、类型和作用域相同的原子记忆只保留较新的记录。
@@ -154,7 +164,8 @@ function migrateLegacyMemory(record: UnknownRecord, version: 1 | 2, now: number)
     createdBy: "migration",
     confidence: 0.5,
     createdAt,
-    updatedAt: normalizeTimestamp(record.updatedAt, createdAt)
+    updatedAt: normalizeTimestamp(record.updatedAt, createdAt),
+    validationStatus: "unverified"
   }));
   return normalizeProjectMemoryV3({
     schemaVersion: PROJECT_MEMORY_SCHEMA_VERSION,

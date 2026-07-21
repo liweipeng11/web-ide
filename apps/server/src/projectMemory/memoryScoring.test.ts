@@ -17,6 +17,7 @@ function item(id: string, content: string, overrides: Partial<ProjectMemoryItem>
     confidence: 0.9,
     createdAt: NOW - 100_000,
     updatedAt: NOW - 100_000,
+    validationStatus: "unverified",
     ...overrides
   };
 }

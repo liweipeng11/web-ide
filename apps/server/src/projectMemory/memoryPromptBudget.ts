@@ -79,6 +79,8 @@ function compactItem(scored: ScoredProjectMemoryItem) {
     sourceRefs: item.sourceRefs,
     createdBy: item.createdBy,
     confidence: item.confidence,
+    validationStatus: item.validationStatus,
+    lastValidatedAt: item.lastValidatedAt,
     updatedAt: item.updatedAt,
     retrieval: { score: scored.score, reasons: scored.reasons }
   };

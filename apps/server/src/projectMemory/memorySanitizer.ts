@@ -7,7 +7,7 @@ export const MEMORY_SOURCE_REF_MAX_ITEMS = 20;
 export const MEMORY_SCOPE_PATH_MAX_ITEMS = 30;
 
 const validKinds = new Set<ProjectMemoryKind>(["convention", "decision", "fact", "risk"]);
-const validSourceTypes = new Set<ProjectMemorySourceRef["type"]>(["schema_migration", "task", "user", "file"]);
+const validSourceTypes = new Set<ProjectMemorySourceRef["type"]>(["schema_migration", "task", "user", "file", "symbol", "dependency", "git_commit", "branch"]);
 
 const sensitivePatterns: Array<{ name: string; pattern: RegExp }> = [
   { name: "private_key", pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i },
@@ -87,7 +87,21 @@ export function normalizeMemorySourceRefs(value: unknown): ProjectMemorySourceRe
     const sourceValue = record.value.trim();
     if (sourceValue.length > MEMORY_SOURCE_REF_MAX_LENGTH) throw new HttpError(400, "Memory source value is too long");
     if (findSensitiveMemoryReason(sourceValue)) throw new HttpError(400, "Memory source value contains sensitive information");
-    return { type: record.type as ProjectMemorySourceRef["type"], value: sourceValue };
+    const optionalValue = (key: "contentHash" | "filePath", maxLength: number) => {
+      if (record[key] === undefined) return undefined;
+      if (typeof record[key] !== "string" || !record[key].trim() || record[key].trim().length > maxLength) {
+        throw new HttpError(400, `Memory source ${key} is invalid`);
+      }
+      return record[key].trim();
+    };
+    const contentHash = optionalValue("contentHash", 128);
+    const filePath = optionalValue("filePath", MEMORY_SOURCE_REF_MAX_LENGTH)?.replace(/\\/g, "/");
+    return {
+      type: record.type as ProjectMemorySourceRef["type"],
+      value: sourceValue,
+      ...(contentHash ? { contentHash } : {}),
+      ...(filePath ? { filePath } : {})
+    };
   });
 }
 

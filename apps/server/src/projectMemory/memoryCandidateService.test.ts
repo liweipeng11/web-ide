@@ -34,7 +34,7 @@ test("创建候选会规范化、精确去重并记录来源", async (context) =
   assert.equal((await listMemoryCandidates(workspaceRoot)).length, 1);
 });
 
-test("候选只有用户接受后才激活，拒绝后立即移除", async (context) => {
+test("候选只有用户接受后才激活，拒绝后保留审计状态但不再列出", async (context) => {
   const workspaceRoot = await createWorkspace(context);
   const first = await createMemoryCandidate({
     kind: "fact",
@@ -57,7 +57,7 @@ test("候选只有用户接受后才激活，拒绝后立即移除", async (cont
   }, workspaceRoot);
   await rejectMemoryCandidate(second.candidate.id, workspaceRoot);
   const memory = await getProjectMemory({ workspaceRoot, syncTasks: false });
-  assert.ok(!memory.items.some((item) => item.id === second.candidate.id));
+  assert.equal(memory.items.find((item) => item.id === second.candidate.id)?.status, "rejected");
   assert.equal((await listMemoryCandidates(workspaceRoot)).length, 0);
 });
 

@@ -39,3 +39,19 @@ test("统一上下文规范化会去重、限制边界并保留调用方线索",
   assert.equal(context.maxItems, 50);
   assert.equal(context.tokenBudget, 8_000);
 });
+
+test("失效、被替代、拒绝和归档项不会进入 Prompt", () => {
+  const base = createProjectMemoryV3Fixture();
+  const template = base.items[0]!;
+  const statuses = ["stale", "superseded", "rejected", "archived"] as const;
+  const memory = createProjectMemoryV3Fixture({ items: statuses.map((status) => ({
+    ...template,
+    id: status,
+    status,
+    validationStatus: status === "stale" ? "invalid" : status === "superseded" ? "superseded" : status === "archived" ? "archived" : "invalid",
+    content: `authentication ${status}`
+  })) });
+  const result = retrieveProjectMemory(memory, { userRequest: "authentication", tokenBudget: 500 });
+  assert.equal(result.selectedItems.length, 0);
+  statuses.forEach((status) => assert.doesNotMatch(result.prompt, new RegExp(`authentication ${status}`)));
+});
