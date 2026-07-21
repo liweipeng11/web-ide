@@ -98,5 +98,33 @@ export type ProjectMemory = {
   updatedAt: number;
 };
 
+/** 当前模型调用的召回线索；调用方只提供已知信息，召回层负责统一默认值。 */
+export type MemoryRetrievalContext = {
+  userRequest: string;
+  contextPaths: string[];
+  plannedFiles: string[];
+  languages: string[];
+  frameworks: string[];
+  branch?: string;
+  maxItems: number;
+  tokenBudget: number;
+};
+
+export type ScoredProjectMemoryItem = {
+  item: ProjectMemoryItem;
+  score: number;
+  reasons: string[];
+};
+
+/** 保留选择原因和预算数据，便于测试、日志与后续管理界面追踪召回。 */
+export type ProjectMemoryRetrievalResult = {
+  prompt: string;
+  selectedItems: ScoredProjectMemoryItem[];
+  estimatedTokens: number;
+  tokenBudget: number;
+  snapshotTokenBudget: number;
+  memoryTokenBudget: number;
+};
+
 // 自动扫描与任务事实字段不接受外部覆盖，避免客户端伪造当前工作区状态。
 export type UpdateProjectMemoryInput = Partial<Pick<ProjectSnapshot, "projectSummary" | "currentGoals" | "confirmedRisks">>;

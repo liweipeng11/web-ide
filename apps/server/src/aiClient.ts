@@ -21,7 +21,7 @@ import type { AgentStep, AiEditResult, ChatContextFile, FileChatMessage, FilePat
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { agentToolSchemas, createAgentToolRuntime, executeAgentToolCall, type AgentContext, type AgentToolCall } from "./agentTools.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import { getCurrentProjectMemoryPrompt } from "./projectMemory/index.js";
+import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
 import { getActiveModelId } from "./modelExecutionContext.js";
 
 type ChatMessage = {
@@ -1276,7 +1276,7 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
     Promise.resolve(null).then(formatCommandFailureForPrompt),
     getProjectFactsForPrompt(),
     getProjectRulesForPrompt(contextPaths),
-    getCurrentProjectMemoryPrompt()
+    getRelevantProjectMemoryPrompt({ userRequest, contextPaths, plannedFiles: contextPaths })
   ]);
   const agentContext: AgentContext = {
     userGoal: userRequest,
@@ -1526,7 +1526,7 @@ export async function generateAiEdit(filePath: string | null, content: string, u
     Promise.resolve(null).then(formatCommandFailureForPrompt),
     getProjectFactsForPrompt(),
     getProjectRulesForPrompt([filePath]),
-    getCurrentProjectMemoryPrompt()
+    getRelevantProjectMemoryPrompt({ userRequest, contextPaths: [filePath], plannedFiles: [filePath] })
   ]);
   logAi(runId, "start", { userGoal: userRequest, selectedFile: filePath, selectedFileChars: content.length });
 
@@ -1596,7 +1596,7 @@ export async function generateFileChatReply(contextFiles: ChatContextFile[], his
     getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt),
     getProjectFactsForPrompt(),
     getProjectRulesForPrompt(contextPaths),
-    getCurrentProjectMemoryPrompt()
+    getRelevantProjectMemoryPrompt({ userRequest, contextPaths, plannedFiles: contextPaths })
   ]);
 
   const agentContext: AgentContext = {
@@ -1639,7 +1639,7 @@ async function buildFileChatMessages(contextFiles: ChatContextFile[], history: F
     getLastFailedCommandResultForChat(chatId).then(formatCommandFailureForPrompt),
     getProjectFactsForPrompt(),
     getProjectRulesForPrompt(contextPaths),
-    getCurrentProjectMemoryPrompt()
+    getRelevantProjectMemoryPrompt({ userRequest, contextPaths, plannedFiles: contextPaths })
   ]);
 
   return [

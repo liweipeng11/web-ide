@@ -10,7 +10,7 @@ import { config } from "./config.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { AgentMessage as PersistedAgentMessage, AgentStep, PendingAgentToolCall } from "./types.js";
 import { buildTaskWorkflowRuntimePrompt, type TaskWorkflowSnapshot } from "./taskWorkflow/index.js";
-import { getCurrentProjectMemoryPrompt } from "./projectMemory/index.js";
+import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
 import { adaptOpenAiCompletionResponse, toOpenAiChatCompletionBody, type ModelDescriptor, type ModelMessage, type ModelRequest, type ModelResponse, type ModelToolCall } from "./contracts/index.js";
 import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "./observability/index.js";
 import { getPendingPatch } from "./patchStore.js";
@@ -169,8 +169,13 @@ function getWorkflowToolBlockReason(toolName: string, agentContext: AgentContext
   return null;
 }
 
-async function loadProjectMemoryPrompt() {
-  return getCurrentProjectMemoryPrompt();
+async function loadProjectMemoryPrompt(userRequest: string, agentContext?: AgentContext) {
+  const contextPaths = [...new Set([...(agentContext?.relevantFiles || []), ...(agentContext?.filesRead || []), ...(agentContext?.searchResultFiles || [])])];
+  return getRelevantProjectMemoryPrompt({
+    userRequest,
+    contextPaths,
+    plannedFiles: agentContext?.relevantFiles || []
+  });
 }
 
 function createInitialMessages(userRequest: string, mode: AgentMode, workflow?: TaskWorkflowSnapshot, projectMemoryPrompt = "") {
@@ -319,7 +324,7 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
   const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
   const runId = options.runId || createAiRunId("agent-resume");
   const persistedMessages = options.persistedMessages || (options.taskSessionId ? await listAgentMessages(options.taskSessionId) : []);
-  const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt());
+  const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt(options.userRequest, options.agentContext));
   const messages = restoreRuntimeMessages(options.userRequest, mode, persistedMessages, options.workflow, projectMemoryPrompt);
   const agentContext = options.agentContext || options.pendingToolCall.agentContext || createDefaultAgentContext(options.userRequest);
   const generatedPatchIds: string[] = [];
@@ -384,7 +389,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     ? await providerGateway.assertCompatible({ providerId, modelId }, mode === "act" ? "act" : "plan")
     : undefined);
   const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);
-  const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt());
+  const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt(options.userRequest, agentContext));
   const messages: ModelMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
   messages.forEach((message, index) => {
     message.id ??= `runtime-${runId}-${index + 1}`;
