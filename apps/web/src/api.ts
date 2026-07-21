@@ -650,6 +650,17 @@ export type ProjectMemory = {
 };
 
 export type UpdateProjectMemoryInput = Partial<Pick<ProjectSnapshot, "projectSummary" | "currentGoals" | "confirmedRisks">>;
+export type CreateMemoryCandidateInput = Pick<ProjectMemoryItem, "kind" | "content"> & {
+  scope?: ProjectMemoryItem["scope"];
+  sourceRefs?: Array<{ type: "user"; value: string }>;
+  confidence?: number;
+};
+export type UpdateMemoryCandidateInput = Partial<Pick<ProjectMemoryItem, "kind" | "content" | "scope">>;
+export type MemoryCandidateMutationResult = {
+  candidate: ProjectMemoryItem;
+  created: boolean;
+  conflictIds: string[];
+};
 
 export type CommandResult = {
   command: string;
@@ -872,6 +883,30 @@ export function updateProjectMemory(input: UpdateProjectMemoryInput) {
 
 export function refreshProjectMemory() {
   return request<{ memory: ProjectMemory }>("/api/project-memory/refresh", { method: "POST", body: JSON.stringify({}) });
+}
+
+export function fetchMemoryCandidates() {
+  return request<{ candidates: ProjectMemoryItem[] }>("/api/project-memory/candidates");
+}
+
+export function createMemoryCandidate(input: CreateMemoryCandidateInput) {
+  return request<MemoryCandidateMutationResult>("/api/project-memory/candidates", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateMemoryCandidate(id: string, input: UpdateMemoryCandidateInput) {
+  return request<{ candidate: ProjectMemoryItem }>(`/api/project-memory/candidates/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function acceptMemoryCandidate(id: string) {
+  return request<{ candidate: ProjectMemoryItem }>(`/api/project-memory/candidates/${encodeURIComponent(id)}/accept`, { method: "POST", body: JSON.stringify({}) });
+}
+
+export function rejectMemoryCandidate(id: string) {
+  return request<void>(`/api/project-memory/candidates/${encodeURIComponent(id)}/reject`, { method: "POST", body: JSON.stringify({}) });
+}
+
+export function deleteMemoryItem(id: string) {
+  return request<void>(`/api/project-memory/items/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export function fetchCommandPolicy(command: string) {

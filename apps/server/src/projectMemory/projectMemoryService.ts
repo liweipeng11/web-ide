@@ -137,6 +137,19 @@ export async function updateProjectMemory(input: UpdateProjectMemoryInput, works
   });
 }
 
+/** 在同一工作区队列内读改写，供候选记忆等子域安全更新 V3 数据。 */
+export async function mutateProjectMemory(
+  mutate: (memory: ProjectMemory) => ProjectMemory | Promise<ProjectMemory>,
+  workspaceRoot?: string
+) {
+  const root = requireWorkspaceRoot(workspaceRoot);
+  return enqueueMemoryOperation(root, async () => {
+    const current = await loadProjectMemory({ workspaceRoot: root });
+    const next = normalizeProjectMemory(await mutate(current));
+    return writeProjectMemory(root, { ...next, updatedAt: Date.now() });
+  });
+}
+
 export async function refreshProjectMemoryAnalysis(workspaceRoot?: string) {
   const root = requireWorkspaceRoot(workspaceRoot);
   return enqueueMemoryOperation(root, async () => {

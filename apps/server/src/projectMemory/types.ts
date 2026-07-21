@@ -55,6 +55,27 @@ export type ProjectMemorySourceRef = {
   value: string;
 };
 
+export type CreateMemoryCandidateInput = {
+  kind: ProjectMemoryKind;
+  content: string;
+  scope?: ProjectMemoryScope;
+  sourceRefs: ProjectMemorySourceRef[];
+  createdBy: ProjectMemoryCreatedBy;
+  confidence: number;
+};
+
+// 用户只能修订候选的业务内容，来源、创建者和时间等审计字段由服务端维护。
+export type UpdateMemoryCandidateInput = Partial<Pick<ProjectMemoryItem, "kind" | "content" | "scope">>;
+
+export type MemoryExtractionResult = {
+  candidates: Array<{
+    kind: ProjectMemoryKind;
+    content: string;
+    confidence: number;
+    sourceRefs: ProjectMemorySourceRef[];
+  }>;
+};
+
 /** 原子记忆始终是历史事实；即使为 active，也不能替代 Project Rules。 */
 export type ProjectMemoryItem = {
   id: string;
