@@ -217,8 +217,9 @@ export default function EditorPane({ path, tabs, value, dirty, saving, onSave, o
       </div>
       {symbolSearchOpen ? <div className="workspace-symbol-search">{symbolPanelMode === "search" ? <input autoFocus value={symbolQuery} placeholder="搜索工作区符号" onChange={(event) => void searchSymbols(event.target.value)} /> : <div className="workspace-symbol-heading">引用结果 · {symbols.length} 项</div>}<div className="workspace-symbol-results">{symbols.map((symbol, index) => <button type="button" key={`${symbol.name}:${symbol.location.filePath}:${symbol.location.line}:${index}`} onClick={() => { setSymbolSearchOpen(false); void navigateTo(symbol.location); }}><strong>{symbol.name}</strong><span>{symbol.kind} · {symbol.location.filePath}:{symbol.location.line}</span></button>)}</div></div> : null}
       {inlineEdit.draft ? <InlineEditWidget instruction={inlineEdit.instruction} status={inlineEdit.status} generatedCharacters={inlineEdit.generatedCharacters} streamedReplacement={inlineEdit.streamedReplacement} candidate={inlineEdit.candidate} conflict={inlineConflict} error={inlineEdit.error} onInstructionChange={inlineEdit.setInstruction} onGenerate={() => void inlineEdit.generate()} onAccept={() => acceptInlineEdit(false)} onAcceptAndValidate={() => acceptInlineEdit(true)} onReject={inlineEdit.reset} onStop={inlineEdit.stop} /> : null}
-      <Editor
-        height="100%" language={getLanguage(path)} path={path || "empty.txt"} value={value}
+      <div className="editor-host">
+        <Editor
+          height="100%" language={getLanguage(path)} path={path || "empty.txt"} value={value}
         onMount={(editor, monaco) => {
           editorRef.current = editor;
           monacoRef.current = monaco;
@@ -270,8 +271,9 @@ export default function EditorPane({ path, tabs, value, dirty, saving, onSave, o
           editor.addAction({ id: "inline-edit.fix-diagnostic", label: "使用 AI 内联修复", run: (_editor, payload?: { diagnostic?: UnifiedDiagnostic }) => { const diagnostic = payload?.diagnostic; if (diagnostic) openInlineEditRef.current(`修复诊断：${diagnostic.message}`, diagnostic.range); } });
         }}
         onChange={(nextValue) => onChange(nextValue ?? "")}
-        options={{ minimap: { enabled: false }, fontSize: 12, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true }}
-      />
+          options={{ minimap: { enabled: false }, fontSize: 12, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true }}
+        />
+      </div>
     </section>
   );
 }

@@ -444,9 +444,16 @@
 }
 
 .editor-column {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
+}
+
+.editor-column.terminal-open {
+  /* 编辑器与终端各占一条布局轨道，终端展开时不覆盖 Monaco 内容。 */
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .editor-pane {
@@ -455,6 +462,14 @@
   flex: 1 1 auto;
   flex-direction: column;
   min-width: 0;
+}
+
+.editor-host {
+  /* Monaco 只填充标签栏和路径栏之外的空间，避免内容延伸到终端区域。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .editor-tabbar {
@@ -624,6 +639,8 @@
   flex: 0 0 auto;
   flex-direction: column;
   min-height: 120px;
+  min-width: 0;
+  overflow: hidden;
   position: relative;
 }
 

@@ -268,7 +268,7 @@ export default function AppLayout({
             </Suspense>
           </aside>
 
-          <div className="editor-column">
+          <div className={terminalOpen ? "editor-column terminal-open" : "editor-column"}>
             <Suspense fallback={<PanelLoading label="正在加载编辑器..." fill />}>
               {state.patch ? (
                 <PatchReviewPane patch={state.patch} loading={state.loading} autoFix={state.autoFix} onApply={onApplyPatch} onReject={onRejectPatch} onRunCommand={(command) => void onValidateAndFix(command)} onRegenerateFile={(file) => void onRegeneratePatchFile(file)} />
