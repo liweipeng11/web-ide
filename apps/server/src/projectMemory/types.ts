@@ -97,6 +97,45 @@ export type ProjectMemoryItem = {
   validationStatus: ProjectMemoryValidationStatus;
   expiresAt?: number;
   supersededBy?: string;
+  /** 提升后保留审计信息，并从 Memory Prompt 中排除，避免与 Project Rule 重复注入。 */
+  promotedTo?: ProjectMemoryPromotion;
+};
+
+export type ProjectMemoryPromotion = {
+  rulePath: string;
+  scope: "project" | "path";
+  paths: string[];
+  alwaysApply: boolean;
+  promotedAt: number;
+};
+
+export type PromoteMemoryInput = {
+  ruleFile: string;
+  scope: ProjectMemoryPromotion["scope"];
+  paths: string[];
+  alwaysApply: boolean;
+  confirmed: boolean;
+};
+
+export type MemoryUsageEntry = {
+  itemId: string;
+  content: string;
+  score: number | null;
+  reasons: string[];
+  sourceRefs: ProjectMemorySourceRef[];
+  validationStatus: ProjectMemoryValidationStatus;
+  includedInPrompt: boolean;
+  exclusionReason?: "token_budget" | "item_limit";
+};
+
+export type MemoryUsageRecord = {
+  id: string;
+  createdAt: number;
+  requestSummary: string;
+  contextPaths: string[];
+  tokenBudget: number;
+  estimatedTokens: number;
+  entries: MemoryUsageEntry[];
 };
 
 export type ProjectMemory = {

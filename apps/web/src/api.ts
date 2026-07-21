@@ -632,13 +632,57 @@ export type ProjectMemoryItem = {
   id: string;
   kind: "convention" | "decision" | "fact" | "risk";
   content: string;
-  status: "candidate" | "active";
+  status: "candidate" | "active" | "stale" | "rejected" | "superseded" | "archived";
   scope: { type: "project" | "path"; paths: string[] };
-  sourceRefs: Array<{ type: "schema_migration" | "task" | "user" | "file"; value: string }>;
+  sourceRefs: Array<{
+    type: "schema_migration" | "task" | "user" | "file" | "symbol" | "dependency" | "git_commit" | "branch";
+    value: string;
+    contentHash?: string;
+    filePath?: string;
+  }>;
   createdBy: "migration" | "user" | "system";
   confidence: number;
   createdAt: number;
   updatedAt: number;
+  lastUsedAt?: number;
+  lastValidatedAt?: number;
+  validationStatus: "unverified" | "valid" | "possibly_stale" | "invalid" | "superseded" | "archived";
+  expiresAt?: number;
+  supersededBy?: string;
+  promotedTo?: {
+    rulePath: string;
+    scope: "project" | "path";
+    paths: string[];
+    alwaysApply: boolean;
+    promotedAt: number;
+  };
+};
+
+export type MemoryUsageRecord = {
+  id: string;
+  createdAt: number;
+  requestSummary: string;
+  contextPaths: string[];
+  tokenBudget: number;
+  estimatedTokens: number;
+  entries: Array<{
+    itemId: string;
+    content: string;
+    score: number | null;
+    reasons: string[];
+    sourceRefs: ProjectMemoryItem["sourceRefs"];
+    validationStatus: ProjectMemoryItem["validationStatus"];
+    includedInPrompt: boolean;
+    exclusionReason?: "token_budget" | "item_limit";
+  }>;
+};
+
+export type PromoteMemoryInput = {
+  ruleFile: string;
+  scope: "project" | "path";
+  paths: string[];
+  alwaysApply: boolean;
+  confirmed: boolean;
 };
 
 export type ProjectMemory = {
@@ -889,6 +933,14 @@ export function fetchMemoryCandidates() {
   return request<{ candidates: ProjectMemoryItem[] }>("/api/project-memory/candidates");
 }
 
+export function fetchMemoryItems() {
+  return request<{ items: ProjectMemoryItem[] }>("/api/project-memory/items");
+}
+
+export function fetchMemoryUsage(limit = 10) {
+  return request<{ records: MemoryUsageRecord[] }>(`/api/project-memory/usage?limit=${encodeURIComponent(limit)}`);
+}
+
 export function createMemoryCandidate(input: CreateMemoryCandidateInput) {
   return request<MemoryCandidateMutationResult>("/api/project-memory/candidates", { method: "POST", body: JSON.stringify(input) });
 }
@@ -907,6 +959,27 @@ export function rejectMemoryCandidate(id: string) {
 
 export function deleteMemoryItem(id: string) {
   return request<void>(`/api/project-memory/items/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function updateMemoryItem(id: string, input: UpdateMemoryCandidateInput) {
+  return request<{ item: ProjectMemoryItem }>(`/api/project-memory/items/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
+export function deleteMemoryItems(ids: string[]) {
+  return request<{ deletedCount: number }>("/api/project-memory/items/bulk-delete", {
+    method: "POST",
+    body: JSON.stringify({ ids, confirmed: true })
+  });
+}
+
+export function promoteMemoryItem(id: string, input: PromoteMemoryInput) {
+  return request<{ item: ProjectMemoryItem; rulePath: string }>(`/api/project-memory/items/${encodeURIComponent(id)}/promote`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
 }
 
 export function fetchCommandPolicy(command: string) {

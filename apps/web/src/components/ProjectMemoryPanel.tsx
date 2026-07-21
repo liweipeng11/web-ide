@@ -1,165 +1,104 @@
 import { useEffect, useState } from "react";
-import { fetchProjectMemory, refreshProjectMemory, updateProjectMemory, type ProjectMemory, type UpdateProjectMemoryInput } from "../api";
+import {
+  acceptMemoryCandidate,
+  deleteMemoryItems,
+  fetchMemoryUsage,
+  fetchProjectMemory,
+  promoteMemoryItem,
+  refreshProjectMemory,
+  rejectMemoryCandidate,
+  updateMemoryCandidate,
+  updateMemoryItem,
+  updateProjectMemory,
+  type MemoryUsageRecord,
+  type ProjectMemory,
+  type PromoteMemoryInput,
+  type UpdateMemoryCandidateInput,
+  type UpdateProjectMemoryInput
+} from "../api";
+import { MemoryCandidateList } from "./projectMemory/MemoryCandidateList";
+import { MemoryItemList } from "./projectMemory/MemoryItemList";
+import { MemoryUsagePanel } from "./projectMemory/MemoryUsagePanel";
+import { ProjectSnapshotSection } from "./projectMemory/ProjectSnapshotSection";
+import { formatMemoryTime } from "./projectMemory/memoryViewModel";
 
-type Props = {
-  disabled: boolean;
-  workspaceRoot: string;
-};
-
-type MemoryDraft = {
-  projectSummary: string;
-  currentGoals: string;
-  confirmedRisks: string;
-};
-
+type Props = { disabled: boolean; workspaceRoot: string };
+type MemoryDraft = { projectSummary: string; currentGoals: string; confirmedRisks: string };
 const emptyDraft: MemoryDraft = { projectSummary: "", currentGoals: "", confirmedRisks: "" };
 
-function toLines(values: string[]) {
-  return values.join("\n");
-}
-
-function parseLines(value: string) {
-  return [...new Set(value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))];
-}
-
 function createDraft(memory: ProjectMemory): MemoryDraft {
-  return {
-    projectSummary: memory.snapshot.projectSummary,
-    currentGoals: toLines(memory.snapshot.currentGoals),
-    confirmedRisks: toLines(memory.snapshot.confirmedRisks)
-  };
-}
-
-function formatTime(value: number) {
-  return new Date(value).toLocaleString();
+  return { projectSummary: memory.snapshot.projectSummary, currentGoals: memory.snapshot.currentGoals.join("\n"), confirmedRisks: memory.snapshot.confirmedRisks.join("\n") };
 }
 
 export default function ProjectMemoryPanel({ disabled, workspaceRoot }: Props) {
   const [memory, setMemory] = useState<ProjectMemory | null>(null);
+  const [usage, setUsage] = useState<MemoryUsageRecord[]>([]);
   const [draft, setDraft] = useState<MemoryDraft>(emptyDraft);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  async function loadMemory(refreshAnalysis = false) {
-    if (disabled || loading) return;
+  async function load(refreshAnalysis = false) {
+    if (disabled) return;
     setLoading(true);
-    setMessage("");
+    setError("");
     try {
-      const result = refreshAnalysis ? await refreshProjectMemory() : await fetchProjectMemory();
-      setMemory(result.memory);
-      setDraft(createDraft(result.memory));
-      setMessage(refreshAnalysis ? "项目技术栈已重新扫描。" : "");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "加载 Project Memory 失败");
+      const [memoryResult, usageResult] = await Promise.all([refreshAnalysis ? refreshProjectMemory() : fetchProjectMemory(), fetchMemoryUsage(10)]);
+      setMemory(memoryResult.memory);
+      setDraft(createDraft(memoryResult.memory));
+      setUsage(usageResult.records);
+      if (refreshAnalysis) setMessage("项目画像已重新扫描；手工简介和 Memory 未被覆盖。");
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "加载 Project Memory 失败");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    setMemory(null);
-    setDraft(emptyDraft);
-    setMessage("");
-    if (!disabled) void loadMemory();
-    // 工作区切换时必须重新读取对应项目的数据。
+    setMemory(null); setUsage([]); setDraft(emptyDraft); setError(""); setMessage("");
+    if (!disabled) void load();
+    // 工作区切换时必须丢弃上一项目的管理状态。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [disabled, workspaceRoot]);
 
-  async function handleSave() {
-    if (disabled || loading) return;
-    setLoading(true);
-    setMessage("");
+  async function runMutation(action: () => Promise<unknown>, successMessage: string) {
+    if (loading) return;
+    setLoading(true); setError(""); setMessage("");
     try {
-      const input: UpdateProjectMemoryInput = {
-        currentGoals: parseLines(draft.currentGoals),
-        confirmedRisks: parseLines(draft.confirmedRisks)
-      };
-      // 只有用户真正改动简介时才切换为 manual，保存其他字段不会冻结自动摘要。
-      if (draft.projectSummary.trim() !== memory?.snapshot.projectSummary) input.projectSummary = draft.projectSummary.trim();
-      const result = await updateProjectMemory(input);
-      setMemory(result.memory);
-      setDraft(createDraft(result.memory));
-      setMessage("Project Snapshot 已保存。重启或新建聊天后仍会生效。");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "保存 Project Snapshot 失败");
+      await action();
+      const [memoryResult, usageResult] = await Promise.all([fetchProjectMemory(), fetchMemoryUsage(10)]);
+      setMemory(memoryResult.memory); setDraft(createDraft(memoryResult.memory)); setUsage(usageResult.records); setMessage(successMessage);
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "操作失败");
+      throw mutationError;
     } finally {
       setLoading(false);
     }
   }
 
-  const snapshot = memory?.snapshot;
-  const stackItems = snapshot
-    ? [snapshot.techStack.packageManager, ...snapshot.techStack.languages, ...snapshot.techStack.frameworks, ...snapshot.techStack.buildTools].filter((item): item is string => Boolean(item))
-    : [];
+  async function handleDelete(ids: string[]) {
+    if (!window.confirm(`确认永久删除选中的 ${ids.length} 条 Memory？此操作不会删除已生成的 Project Rule。`)) return;
+    await runMutation(() => deleteMemoryItems(ids), `已删除 ${ids.length} 条 Memory。`);
+  }
+
   const candidates = memory?.items.filter((item) => item.status === "candidate") || [];
+  const managedItems = memory?.items.filter((item) => item.status !== "candidate") || [];
 
   return (
     <section className="project-memory-panel settings-memory-panel">
-      <div className="project-memory-heading">
-        <div>
-          <h2>Project Snapshot & Memory</h2>
-          <p>{disabled ? "请先打开工作区" : memory ? `Schema V${memory.schemaVersion}，更新于 ${formatTime(memory.updatedAt)}` : "正在读取项目上下文"}</p>
-        </div>
-        <button type="button" disabled={disabled || loading} onClick={() => void loadMemory(true)}>重新扫描</button>
-      </div>
-
-      {!disabled && (
-        <div className="project-memory-scroll">
-          <div className="project-memory-stack" aria-label="技术栈">
-            {stackItems.map((item) => <span key={item}>{item}</span>)}
-          </div>
-
-          <label>
-            <span>项目简介</span>
-            <textarea rows={4} value={draft.projectSummary} disabled={loading} onChange={(event) => setDraft((current) => ({ ...current, projectSummary: event.target.value }))} />
-            <small>{snapshot?.projectSummarySource === "manual" ? "手工维护，重新扫描不会覆盖" : "由项目扫描器生成"}</small>
-          </label>
-
-          <label>
-            <span>当前阶段目标</span>
-            <textarea rows={4} value={draft.currentGoals} disabled={loading} placeholder="每行一个目标" onChange={(event) => setDraft((current) => ({ ...current, currentGoals: event.target.value }))} />
-          </label>
-
-          <label>
-            <span>已确认风险</span>
-            <textarea rows={4} value={draft.confirmedRisks} disabled={loading} placeholder="每行一条风险" onChange={(event) => setDraft((current) => ({ ...current, confirmedRisks: event.target.value }))} />
-          </label>
-
-          <button type="button" className="project-memory-save" disabled={loading} onClick={() => void handleSave()}>保存 Project Snapshot</button>
-          {message && <p className="project-memory-message">{message}</p>}
-
-          <div className="project-memory-facts">
-            <h3>候选 Memory</h3>
-            {candidates.length ? (
-              <>
-                <p>以下历史约定尚未成为可信规则。请在 Agent Rules 中核对后手工提升，未确认前仅作为背景。</p>
-                {candidates.map((item) => (
-                  <article key={item.id}>
-                    <strong>{item.content}</strong>
-                    <span>{item.kind} · {item.createdBy === "migration" ? "由旧版约定迁移" : "待确认"}</span>
-                  </article>
-                ))}
-              </>
-            ) : <p>暂无待确认的候选 Memory。</p>}
-
-            <h3>最近改动</h3>
-            {snapshot?.recentChanges.length ? snapshot.recentChanges.map((change) => (
-              <article key={change.taskSessionId}>
-                <strong>{change.summary}</strong>
-                <span>{change.files.join("、") || "未记录文件"}</span>
-              </article>
-            )) : <p>暂无已同步改动。</p>}
-
-            <h3>未完成事项</h3>
-            {snapshot?.pendingItems.length ? snapshot.pendingItems.map((item) => (
-              <article key={item.taskSessionId}>
-                <strong>{item.summary}</strong>
-                <span>{item.status} · {formatTime(item.updatedAt)}</span>
-              </article>
-            )) : <p>暂无未完成事项。</p>}
-          </div>
-        </div>
-      )}
+      <div className="project-memory-heading"><div><h2>Project Snapshot & Memory</h2><p>{disabled ? "请先打开工作区" : memory ? `Schema V${memory.schemaVersion} · 更新于 ${formatMemoryTime(memory.updatedAt)}` : "正在读取项目上下文"}</p></div><button type="button" disabled={disabled || loading} onClick={() => void load(true)}>重新扫描</button></div>
+      {disabled ? <div className="memory-state">打开工作区后才能查看和管理 Project Memory。</div> : error && !memory ? <div className="memory-state error"><strong>Project Memory 无法加载</strong><p>{error}</p><button type="button" disabled={loading} onClick={() => void load()}>重试</button></div> : !memory ? <div className="memory-state">正在加载 Project Memory…</div> : <div className="project-memory-scroll">
+        {(error || message) && <div className={`project-memory-message ${error ? "error" : "success"}`} role="status">{error || message}</div>}
+        <ProjectSnapshotSection memory={memory} draft={draft} busy={loading} onDraftChange={setDraft} onSave={(input: UpdateProjectMemoryInput) => {
+          // 只在简介确实变更时提交该字段，避免仅保存目标就把自动摘要冻结为手工内容。
+          if (input.projectSummary === memory.snapshot.projectSummary) delete input.projectSummary;
+          return runMutation(() => updateProjectMemory(input), "Project Snapshot 已保存。");
+        }} />
+        <MemoryCandidateList items={candidates} busy={loading} onAccept={(id) => runMutation(() => acceptMemoryCandidate(id), "候选 Memory 已接受并转为有效。") } onReject={async (id) => { if (window.confirm("确认拒绝这条候选 Memory？拒绝记录会保留用于审计。")) await runMutation(() => rejectMemoryCandidate(id), "候选 Memory 已拒绝。"); }} onUpdate={(id, input: UpdateMemoryCandidateInput) => runMutation(() => updateMemoryCandidate(id, input), "候选 Memory 已更新。") } />
+        <MemoryItemList items={managedItems} busy={loading} onUpdate={(id, input) => runMutation(() => updateMemoryItem(id, input), "Memory 已更新并等待重新验证。") } onDelete={handleDelete} onPromote={(id, input: PromoteMemoryInput) => runMutation(() => promoteMemoryItem(id, input), "Memory 已提升为 Project Rule，后续不会重复注入。") } />
+        <MemoryUsagePanel records={usage} />
+      </div>}
     </section>
   );
 }

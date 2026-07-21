@@ -1,6 +1,8 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { HttpError } from "../errors.js";
-import { acceptMemoryCandidate, createMemoryCandidate, deleteMemoryItem, listMemoryCandidates, rejectMemoryCandidate, updateMemoryCandidate } from "./memoryCandidateService.js";
+import { acceptMemoryCandidate, createMemoryCandidate, deleteMemoryItem, deleteMemoryItems, listMemoryCandidates, listMemoryItems, rejectMemoryCandidate, updateActiveMemoryItem, updateMemoryCandidate } from "./memoryCandidateService.js";
+import { normalizePromotionInput, promoteMemoryToRule } from "./memoryPromotionService.js";
+import { listMemoryUsageRecords } from "./memoryUsageService.js";
 import { normalizeMemoryConfidence, normalizeMemorySourceRefs } from "./memorySanitizer.js";
 import { getProjectMemory, refreshProjectMemoryAnalysis, updateProjectMemory } from "./projectMemoryService.js";
 import type { CreateMemoryCandidateInput, ProjectMemorySourceRef, UpdateMemoryCandidateInput, UpdateProjectMemoryInput } from "./types.js";
@@ -77,6 +79,16 @@ function requireRouteId(value: string | string[]) {
   return value;
 }
 
+function normalizeBulkDeleteInput(value: unknown) {
+  const record = asInputRecord(value, "Bulk delete input must be an object");
+  ensureAllowedFields(record, ["ids", "confirmed"]);
+  if (record.confirmed !== true) throw new HttpError(400, "Bulk delete requires explicit confirmation");
+  if (!Array.isArray(record.ids) || !record.ids.length || record.ids.length > 100 || !record.ids.every((id) => typeof id === "string" && id.trim() && id.length <= 200)) {
+    throw new HttpError(400, "ids must contain 1 to 100 valid memory ids");
+  }
+  return [...new Set(record.ids as string[])];
+}
+
 export function createProjectMemoryRouter() {
   const router = Router();
 
@@ -96,6 +108,15 @@ export function createProjectMemoryRouter() {
     response.json({ candidates: await listMemoryCandidates() });
   }));
 
+  router.get("/items", asyncRoute(async (_request, response) => {
+    response.json({ items: await listMemoryItems() });
+  }));
+
+  router.get("/usage", asyncRoute(async (request, response) => {
+    const rawLimit = typeof request.query.limit === "string" ? Number(request.query.limit) : 10;
+    response.json({ records: await listMemoryUsageRecords(undefined, Number.isFinite(rawLimit) ? rawLimit : 10) });
+  }));
+
   router.post("/candidates", asyncRoute(async (request, response) => {
     const result = await createMemoryCandidate(normalizeUserCandidateInput(request.body));
     response.status(result.created ? 201 : 200).json(result);
@@ -112,6 +133,18 @@ export function createProjectMemoryRouter() {
   router.post("/candidates/:id/reject", asyncRoute(async (request, response) => {
     await rejectMemoryCandidate(requireRouteId(request.params.id));
     response.status(204).end();
+  }));
+
+  router.post("/items/bulk-delete", asyncRoute(async (request, response) => {
+    response.json({ deletedCount: await deleteMemoryItems(normalizeBulkDeleteInput(request.body)) });
+  }));
+
+  router.patch("/items/:id", asyncRoute(async (request, response) => {
+    response.json({ item: await updateActiveMemoryItem(requireRouteId(request.params.id), normalizeCandidateUpdate(request.body)) });
+  }));
+
+  router.post("/items/:id/promote", asyncRoute(async (request, response) => {
+    response.status(201).json(await promoteMemoryToRule(requireRouteId(request.params.id), normalizePromotionInput(request.body)));
   }));
 
   router.delete("/items/:id", asyncRoute(async (request, response) => {

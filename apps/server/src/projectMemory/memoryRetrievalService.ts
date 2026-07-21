@@ -3,6 +3,7 @@ import { getWorkspaceRoot } from "../workspaceStore.js";
 import { buildBudgetedProjectMemoryPrompt } from "./memoryPromptBudget.js";
 import { rankProjectMemoryItems } from "./memoryScoring.js";
 import { prepareProjectMemoryForRetrieval, recordProjectMemoryUsage } from "./projectMemoryService.js";
+import { recordMemoryRetrievalUsage } from "./memoryUsageService.js";
 import type { MemoryRetrievalContext, ProjectMemory, ProjectMemoryRetrievalResult } from "./types.js";
 
 const DEFAULT_MAX_ITEMS = 8;
@@ -55,8 +56,22 @@ export async function getRelevantProjectMemory(input: Partial<MemoryRetrievalCon
   if (!getWorkspaceRoot()) {
     return { prompt: "", selectedItems: [], estimatedTokens: 0, tokenBudget: context.tokenBudget, snapshotTokenBudget: 0, memoryTokenBudget: 0 };
   }
-  const result = retrieveProjectMemory(await prepareProjectMemoryForRetrieval({ branch: context.branch }), context);
+  const memory = await prepareProjectMemoryForRetrieval({ branch: context.branch });
+  const allRanked = rankProjectMemoryItems(memory.items, context, Date.now(), 50);
+  const ranked = allRanked.slice(0, context.maxItems);
+  const budgeted = buildBudgetedProjectMemoryPrompt(memory, ranked, { tokenBudget: context.tokenBudget, context });
+  const included = new Set(budgeted.includedItemIds);
+  const result: ProjectMemoryRetrievalResult = {
+    prompt: budgeted.prompt,
+    selectedItems: ranked.filter((entry) => included.has(entry.item.id)),
+    estimatedTokens: budgeted.estimatedTokens,
+    tokenBudget: context.tokenBudget,
+    snapshotTokenBudget: budgeted.snapshotTokenBudget,
+    memoryTokenBudget: budgeted.memoryTokenBudget
+  };
   await recordProjectMemoryUsage(result.selectedItems.map((entry) => entry.item.id));
+  // 可解释性记录失败不得阻断模型主流程。
+  await recordMemoryRetrievalUsage({ context, rankedItems: allRanked, consideredItemIds: new Set(ranked.map((entry) => entry.item.id)), includedItemIds: included, estimatedTokens: result.estimatedTokens }).catch(() => undefined);
   return result;
 }
 

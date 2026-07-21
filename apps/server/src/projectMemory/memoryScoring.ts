@@ -33,7 +33,7 @@ function lexicalMatches(query: string, candidate: string) {
 /** 确定性评分只依赖输入上下文和记忆字段，不使用随机数或数组原始顺序。 */
 export function scoreProjectMemoryItem(item: ProjectMemoryItem, context: MemoryRetrievalContext, now = Date.now()): ScoredProjectMemoryItem | null {
   // 生命周期终态和已验证失效项绝不能进入 Prompt；candidate 仍可作为明确标注的未确认背景。
-  if ((item.status !== "active" && item.status !== "candidate") || item.validationStatus === "invalid") return null;
+  if ((item.status !== "active" && item.status !== "candidate") || item.validationStatus === "invalid" || item.promotedTo) return null;
   const reasons: string[] = [];
   let relevanceScore = 0;
   const searchable = [item.content, ...item.scope.paths, ...item.sourceRefs.map((ref) => ref.value)].join(" ");
@@ -83,10 +83,10 @@ export function scoreProjectMemoryItem(item: ProjectMemoryItem, context: MemoryR
   return { item, score, reasons };
 }
 
-export function rankProjectMemoryItems(items: ProjectMemoryItem[], context: MemoryRetrievalContext, now = Date.now()) {
+export function rankProjectMemoryItems(items: ProjectMemoryItem[], context: MemoryRetrievalContext, now = Date.now(), maxItems = context.maxItems) {
   return items
     .map((item) => scoreProjectMemoryItem(item, context, now))
     .filter((item): item is ScoredProjectMemoryItem => item !== null)
     .sort((left, right) => right.score - left.score || right.item.updatedAt - left.item.updatedAt || left.item.id.localeCompare(right.item.id))
-    .slice(0, Math.max(0, context.maxItems));
+    .slice(0, Math.max(0, maxItems));
 }

@@ -65,6 +65,10 @@ export async function listMemoryCandidates(workspaceRoot?: string) {
   return memory.items.filter((item) => item.status === "candidate");
 }
 
+export async function listMemoryItems(workspaceRoot?: string) {
+  return (await getProjectMemory({ workspaceRoot })).items;
+}
+
 /** 所有来源（用户、系统、迁移）统一经过安全检查和精确去重后才能成为候选。 */
 export async function createMemoryCandidate(input: CreateMemoryCandidateInput, workspaceRoot?: string): Promise<MemoryCandidateMutationResult> {
   const normalized = normalizeCandidateInput(input);
@@ -107,6 +111,31 @@ export async function updateMemoryCandidate(id: string, input: UpdateMemoryCandi
   return updated;
 }
 
+/** 管理界面只允许修订业务字段，来源、状态、置信度与审计时间仍由服务端控制。 */
+export async function updateActiveMemoryItem(id: string, input: UpdateMemoryCandidateInput, workspaceRoot?: string) {
+  const saved = await mutateProjectMemory((memory) => {
+    const current = memory.items.find((item) => item.id === id);
+    if (!current) throw new HttpError(404, "Memory item not found");
+    if (current.status !== "active") throw new HttpError(409, "Only active memory can be edited");
+    const next: ProjectMemoryItem = {
+      ...current,
+      kind: input.kind === undefined ? current.kind : normalizeMemoryKind(input.kind),
+      content: input.content === undefined ? current.content : normalizeMemoryContent(input.content),
+      scope: input.scope === undefined ? current.scope : normalizeMemoryScope(input.scope),
+      validationStatus: "unverified",
+      lastValidatedAt: undefined,
+      updatedAt: Date.now()
+    };
+    ensureMemoryContentIsSafe(next.content);
+    const duplicate = memory.items.find((item) => item.id !== id && itemKey(item) === itemKey(next));
+    if (duplicate) throw new HttpError(409, "An equivalent memory item already exists");
+    return { ...memory, items: memory.items.map((item) => item.id === id ? next : item) };
+  }, workspaceRoot);
+  const updated = saved.items.find((item) => item.id === id);
+  if (!updated) throw new Error("Failed to update active memory");
+  return updated;
+}
+
 export async function acceptMemoryCandidate(id: string, workspaceRoot?: string) {
   const saved = await mutateProjectMemory((memory) => {
     const candidate = memory.items.find((item) => item.id === id);
@@ -140,4 +169,17 @@ export async function deleteMemoryItem(id: string, workspaceRoot?: string) {
     if (!memory.items.some((item) => item.id === id)) throw new HttpError(404, "Memory item not found");
     return { ...memory, items: memory.items.filter((item) => item.id !== id) };
   }, workspaceRoot);
+}
+
+/** 批量清理要求调用方明确给出 ID，不接受“清空全部”式模糊操作。 */
+export async function deleteMemoryItems(ids: string[], workspaceRoot?: string) {
+  const selected = new Set(ids);
+  if (!selected.size) throw new HttpError(400, "At least one memory id is required");
+  let deletedCount = 0;
+  await mutateProjectMemory((memory) => {
+    deletedCount = memory.items.filter((item) => selected.has(item.id)).length;
+    if (deletedCount !== selected.size) throw new HttpError(404, "One or more memory items were not found");
+    return { ...memory, items: memory.items.filter((item) => !selected.has(item.id)) };
+  }, workspaceRoot);
+  return deletedCount;
 }

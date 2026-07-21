@@ -120,6 +120,10 @@ function normalizeMemoryItems(value: unknown, now: number): ProjectMemoryItem[] 
     const content = normalizeString(record.content, 2_000);
     if (!content) return [];
     const createdAt = normalizeTimestamp(record.createdAt, now);
+    const promotedRecord = record.promotedTo && typeof record.promotedTo === "object" && !Array.isArray(record.promotedTo)
+      ? record.promotedTo as UnknownRecord
+      : null;
+    const promotedRulePath = normalizeString(promotedRecord?.rulePath, 500);
     return [{
       id: normalizeString(record.id, 200) || stableMigrationId(content),
       kind: validKinds.has(record.kind as ProjectMemoryKind) ? record.kind as ProjectMemoryKind : "fact" as const,
@@ -138,6 +142,15 @@ function normalizeMemoryItems(value: unknown, now: number): ProjectMemoryItem[] 
         : "unverified" as const,
       ...(record.expiresAt === undefined ? {} : { expiresAt: normalizeTimestamp(record.expiresAt, createdAt) }),
       ...(normalizeString(record.supersededBy, 200) ? { supersededBy: normalizeString(record.supersededBy, 200) } : {})
+      ,...(promotedRecord && promotedRulePath ? {
+        promotedTo: {
+          rulePath: promotedRulePath,
+          scope: promotedRecord.scope === "path" ? "path" as const : "project" as const,
+          paths: normalizeStringArray(promotedRecord.paths, 30, 500),
+          alwaysApply: promotedRecord.alwaysApply === true,
+          promotedAt: normalizeTimestamp(promotedRecord.promotedAt, createdAt)
+        }
+      } : {})
     }];
   });
   // 内容、类型和作用域相同的原子记忆只保留较新的记录。
