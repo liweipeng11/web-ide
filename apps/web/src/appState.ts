@@ -72,11 +72,12 @@ export function createClientErrorStep(message: string): AgentStep {
   };
 }
 
-export function createCommandAgentStep(command: string, status: NonNullable<Extract<AgentStep, { type: "command" }>["status"]>, policy?: CommandPolicyResult, result?: CommandResult | null): AgentStep {
+export function createCommandAgentStep(command: string, status: NonNullable<Extract<AgentStep, { type: "command" }>["status"]>, policy?: CommandPolicyResult, result?: CommandResult | null, executionId?: string): AgentStep {
   return {
     id: `command:${Date.now()}:${crypto.randomUUID()}`,
     type: "command",
     command,
+    executionId,
     status,
     policy,
     result,

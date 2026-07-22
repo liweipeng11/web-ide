@@ -38,6 +38,7 @@ import { withModelExecution } from "./modelExecutionContext.js";
 import { createLanguageServiceRouter, languageServiceGateway } from "./languageService/index.js";
 import { createInlineEditRouter } from "./inlineEdit/routes.js";
 import { initializeProviderSettings } from "./providerSettingsStore.js";
+import { createCommandExecutionRouter } from "./commandExecution/commandExecutionRoutes.js";
 
 const initialProviders = await initializeProviderSettings();
 configureProviderGateway(initialProviders.filter((provider) => provider.enabled));
@@ -64,6 +65,7 @@ app.use(express.json({ limit: "5mb" }));
 app.use("/api", createCapabilityRouter({ flags: config.featureFlags }));
 if (config.featureFlags.modelProviderGateway) app.use("/api", createModelRouter());
 app.use("/api", createSearchRouter());
+app.use("/api", createCommandExecutionRouter({ onStarted: (taskSessionId, command) => addTaskSessionCommand(taskSessionId, command).then(() => undefined) }));
 app.use("/api/git-workflow", createGitWorkflowRouter());
 app.use("/api/vue2-template", createVue2TemplateRouter());
 app.use("/api/project-memory", createProjectMemoryRouter());

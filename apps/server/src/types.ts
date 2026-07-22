@@ -251,6 +251,7 @@ export type AgentStep = {
   | {
       type: "command";
       command: string;
+      executionId?: string;
       policy?: CommandPolicyResult;
       status?: "suggested" | "running" | "success" | "failed" | "blocked" | "cancelled";
       result?: CommandResult | null;

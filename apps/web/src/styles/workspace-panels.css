@@ -800,6 +800,18 @@ body.resizing-terminal .terminal-resizer::after {
   gap: 10px;
 }
 
+.terminal-execution-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.terminal-execution-actions button {
+  font-size: 10px;
+  min-height: 24px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
 .editor-status-group,
 .editor-command-group {
   align-items: center;

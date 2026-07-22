@@ -2,7 +2,14 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { type PointerEvent, useEffect, useRef, useState } from "react";
-import type { CommandResult } from "../api";
+import {
+  fetchCommandExecutionOutput,
+  fetchCommandExecutions,
+  moveCommandExecutionToBackground,
+  stopCommandExecution,
+  type CommandExecution,
+  type CommandResult
+} from "../api";
 import Icon from "./Icon";
 
 type Props = {
@@ -16,13 +23,14 @@ type Props = {
 
 export type TerminalCommandRequest = {
   id: string;
-  command: string;
-  chatId?: string;
+  execution: CommandExecution;
 };
 
 export type TerminalCommandCompletion = {
   id: string;
+  execution?: CommandExecution;
   result: CommandResult | null;
+  phase?: "ready" | "finished";
   error?: string;
 };
 
@@ -30,345 +38,208 @@ type ServerMessage =
   | { type: "ready"; cwd: string; shell: string }
   | { type: "output"; data: string }
   | { type: "exit"; exitCode: number; signal?: number }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string }
+  | { type: "command.started" | "command.ready" | "command.finished"; execution: CommandExecution }
+  | { type: "command.output"; id: string; cursor: number; data: string }
+  | { type: "command.error"; id: string; message: string };
 
-type ActiveCommand = {
-  id: string;
-  command: string;
-  marker: string;
-  output: string;
-  startedAt: string;
-  chatId?: string;
-  timeoutId: number;
-  settleTimeoutId: number | null;
-  longRunning: boolean;
-  reportedSnapshot: boolean;
-};
-
+const terminalStates = new Set<CommandExecution["state"]>(["succeeded", "failed", "cancelled"]);
 const maxCapturedOutputLength = 80_000;
-const maxResultOutputLength = 12_000;
-const maxResultPreviewLength = 4_000;
-const commandTimeoutMs = 120_000;
-const longRunningSettleMs = 3_000;
 
 function getTerminalUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/terminal`;
 }
 
-function appendCapturedOutput(current: string, chunk: string) {
-  const next = current + chunk;
-
-  if (next.length <= maxCapturedOutputLength) {
-    return next;
-  }
-
-  return next.slice(next.length - maxCapturedOutputLength);
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function stripAnsi(value: string) {
-  return value
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\r(?!\n)/g, "\n")
-    .replace(/\n{3,}/g, "\n\n");
-}
-
-function commandLooksLongRunning(command: string) {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:(?:(?:--prefix|--dir|--cwd|-C)(?:=\S+|\s+\S+))\s+)*(?:run\s+)?(?:dev|start|serve|preview|watch)\b|(?:^|\s)(?:npx\s+)?(?:vite|next\s+dev|webpack-dev-server|vue-cli-service\s+serve)(?:\s|$)/i.test(command);
-}
-
-function tail(value: string, maxLength: number) {
-  return value.length > maxLength ? value.slice(value.length - maxLength) : value;
-}
-
-function detectUrl(output: string) {
-  const candidates = output.match(/https?:\/\/[^\s<>"'`]+/gi) || [];
-
-  for (const candidate of candidates) {
-    const value = candidate.replace(/[)},.;!?]+$/, "");
-
-    try {
-      const url = new URL(value);
-      if (["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"].includes(url.hostname.toLowerCase())) return value;
-    } catch {
-      // 终端输出可能包含不完整 URL；忽略无效项，避免将普通文档链接误判为本地服务。
-    }
-  }
-
-  return undefined;
-}
-
-function createCommandResult(command: string, cwd: string, exitCode: number | null, output: string, startedAt: string, chatId?: string, finishedAt = new Date().toISOString(), waitTimedOut = false): CommandResult {
-  const cleanedOutput = stripAnsi(output).trim();
-  const detectedUrl = detectUrl(cleanedOutput);
-  const longRunning = commandLooksLongRunning(command);
-  const status = detectedUrl && longRunning ? "running" : exitCode === 0 ? "success" : exitCode === null ? "timeout" : "failed";
-  const preview = tail(cleanedOutput, maxResultPreviewLength);
-  const summary = [
-    status === "running" && detectedUrl ? `Development server is running at ${detectedUrl}.` : "",
-    status === "timeout" ? `Command timed out after ${commandTimeoutMs / 1000} seconds.` : "",
-    status === "success" ? "Command completed successfully." : "",
-    status === "failed" ? `Command failed with exit code ${exitCode}.` : "",
-    preview ? `Output preview:\n${preview}` : ""
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+function executionResult(execution: CommandExecution, output: string): CommandResult {
+  const status: CommandResult["status"] = execution.state === "succeeded"
+    ? "success"
+    : execution.state === "running"
+      ? "running"
+      : "failed";
+  const summary = execution.readiness === "ready" && execution.readyUrl
+    ? `服务已就绪：${execution.readyUrl}`
+    : status === "success"
+      ? "命令执行成功。"
+      : status === "running"
+        ? "命令仍在后台运行。"
+        : execution.state === "cancelled"
+          ? "命令已停止。"
+          : `命令执行失败${execution.exitCode === null ? "" : `，退出码 ${execution.exitCode}`}。`;
 
   return {
-    command,
-    chatId,
-    cwd,
-    exitCode,
-    stdout: tail(cleanedOutput, maxResultOutputLength),
+    command: execution.command,
+    chatId: execution.chatId,
+    cwd: execution.cwd,
+    exitCode: execution.exitCode,
+    stdout: output,
     stderr: "",
     summary,
     status,
-    detectedUrl,
-    detectedUrls: detectedUrl ? [detectedUrl] : [],
-    waitTimedOut,
-    outputTruncated: cleanedOutput.length > maxResultOutputLength,
-    startedAt,
-    finishedAt
+    detectedUrl: execution.readyUrl,
+    detectedUrls: execution.detectedUrls,
+    waitTimedOut: execution.waitTimedOut,
+    outputTruncated: execution.outputTruncated,
+    startedAt: execution.startedAt,
+    finishedAt: execution.finishedAt || execution.readyAt || new Date().toISOString()
   };
 }
 
-function shellLooksLikePowerShell(shell: string) {
-  return /powershell|pwsh/i.test(shell);
-}
-
-function shellLooksLikeCmd(shell: string) {
-  return /(?:^|[\\/])cmd(?:\.exe)?$/i.test(shell) || /^cmd(?:\.exe)?$/i.test(shell);
-}
-
-function wrapCommandForCompletion(command: string, requestId: string, shell: string) {
-  const markerPrefix = "__AI_CMD_DONE_";
-  const marker = `${markerPrefix}${requestId}:`;
-
-  if (shellLooksLikePowerShell(shell)) {
-    return {
-      marker,
-      input: `${command}; $codexStatus = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }; $codexM = '${markerPrefix}'; Write-Output ($codexM + '${requestId}' + ':' + $codexStatus)\r`
-    };
-  }
-
-  if (shellLooksLikeCmd(shell)) {
-    return {
-      marker,
-      input: `set __codex_m=${markerPrefix} & ${command} & echo %__codex_m%${requestId}:%ERRORLEVEL%\r`
-    };
-  }
-
-  return {
-    marker,
-    input: `{ ${command}; }; __codex_status=$?; __codex_m=${markerPrefix}; printf '\\n%s%s:%s\\n' "$__codex_m" "${requestId}" "$__codex_status"\r`
-  };
-}
-
+/** 终端只展示并控制服务端 execution；手工输入仍通过独立 PTY 协议发送。 */
 export default function TerminalPanel({ workspaceRoot, height, commandRequest, onClose, onStartResize, onCommandComplete }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  const lastCommandRequestIdRef = useRef("");
-  const activeCommandRef = useRef<ActiveCommand | null>(null);
-  const terminalCwdRef = useRef("");
-  const terminalShellRef = useRef("");
+  const reconnectTimerRef = useRef<number | null>(null);
+  const disposedRef = useRef(false);
+  const cursorByExecutionRef = useRef(new Map<string, number>());
+  const outputByExecutionRef = useRef(new Map<string, string>());
+  const subscribedIdsRef = useRef(new Set<string>());
+  const reportedReadyRef = useRef(new Set<string>());
+  const reportedFinishedRef = useRef(new Set<string>());
   const [status, setStatus] = useState<"connecting" | "connected" | "closed">("closed");
-  const [terminalReady, setTerminalReady] = useState(false);
-  const [runningCommand, setRunningCommand] = useState(false);
+  const [activeExecution, setActiveExecution] = useState<CommandExecution | null>(null);
 
-  function completeActiveCommand(exitCode: number | null, output: string) {
-    const activeCommand = activeCommandRef.current;
+  function writeExecutionOutput(id: string, cursor: number, data: string) {
+    const knownCursor = cursorByExecutionRef.current.get(id) || 0;
+    const endCursor = cursor + data.length;
+    if (endCursor <= knownCursor) return;
 
-    if (!activeCommand) return;
+    const unseen = knownCursor > cursor ? data.slice(knownCursor - cursor) : data;
+    cursorByExecutionRef.current.set(id, endCursor);
+    const nextOutput = (outputByExecutionRef.current.get(id) || "") + unseen;
+    outputByExecutionRef.current.set(id, nextOutput.slice(-maxCapturedOutputLength));
+    terminalRef.current?.write(unseen);
+  }
 
-    window.clearTimeout(activeCommand.timeoutId);
-    if (activeCommand.settleTimeoutId) {
-      window.clearTimeout(activeCommand.settleTimeoutId);
-    }
-    activeCommandRef.current = null;
-    setRunningCommand(false);
+  function reportExecution(execution: CommandExecution, phase: "ready" | "finished") {
+    const reported = phase === "ready" ? reportedReadyRef.current : reportedFinishedRef.current;
+    if (reported.has(execution.id)) return;
+    reported.add(execution.id);
     onCommandComplete?.({
-      id: activeCommand.id,
-      result: createCommandResult(activeCommand.command, terminalCwdRef.current || workspaceRoot, exitCode, output, activeCommand.startedAt, activeCommand.chatId)
+      id: execution.id,
+      execution,
+      phase,
+      result: executionResult(execution, outputByExecutionRef.current.get(execution.id) || "")
     });
   }
 
-  function failActiveCommand(message: string) {
-    const activeCommand = activeCommandRef.current;
+  async function subscribeExecution(execution: CommandExecution) {
+    setActiveExecution(execution);
+    subscribedIdsRef.current.add(execution.id);
+    const cursor = cursorByExecutionRef.current.get(execution.id) || 0;
 
-    if (!activeCommand) return;
-
-    window.clearTimeout(activeCommand.timeoutId);
-    if (activeCommand.settleTimeoutId) {
-      window.clearTimeout(activeCommand.settleTimeoutId);
-    }
-    activeCommandRef.current = null;
-    setRunningCommand(false);
-    onCommandComplete?.({ id: activeCommand.id, result: null, error: message });
-  }
-
-  function timeoutActiveCommand(message: string) {
-    const activeCommand = activeCommandRef.current;
-
-    if (!activeCommand) return;
-
-    window.clearTimeout(activeCommand.timeoutId);
-    if (activeCommand.settleTimeoutId) {
-      window.clearTimeout(activeCommand.settleTimeoutId);
-    }
-    activeCommandRef.current = null;
-    setRunningCommand(false);
-    // 等待 completion marker 超时仍保留命令和输出，供任务记录与后续诊断使用。
-    onCommandComplete?.({
-      id: activeCommand.id,
-      result: createCommandResult(activeCommand.command, terminalCwdRef.current || workspaceRoot, null, activeCommand.output, activeCommand.startedAt, activeCommand.chatId, new Date().toISOString(), true),
-      error: message
-    });
-  }
-
-  function reportLongRunningSnapshot() {
-    const activeCommand = activeCommandRef.current;
-
-    if (!activeCommand || !activeCommand.longRunning || activeCommand.reportedSnapshot || !activeCommand.output.trim()) return;
-
-    activeCommand.reportedSnapshot = true;
-    onCommandComplete?.({
-      id: activeCommand.id,
-      result: createCommandResult(activeCommand.command, terminalCwdRef.current || workspaceRoot, null, activeCommand.output, activeCommand.startedAt, activeCommand.chatId)
-    });
-  }
-
-  function scheduleLongRunningSnapshot() {
-    const activeCommand = activeCommandRef.current;
-
-    if (!activeCommand?.longRunning || activeCommand.reportedSnapshot) return;
-
-    if (activeCommand.settleTimeoutId) {
-      window.clearTimeout(activeCommand.settleTimeoutId);
+    // WebSocket 可能在断线期间丢失事件，订阅前先用 HTTP cursor 补拉。
+    try {
+      const { output } = await fetchCommandExecutionOutput(execution.id, cursor);
+      writeExecutionOutput(execution.id, output.cursor, output.data);
+    } catch (error) {
+      terminalRef.current?.writeln(`\r\n[execution error] ${error instanceof Error ? error.message : "无法补拉命令输出"}`);
     }
 
-    activeCommand.settleTimeoutId = window.setTimeout(reportLongRunningSnapshot, longRunningSettleMs);
-  }
-
-  function captureTerminalOutput(data: string) {
-    const activeCommand = activeCommandRef.current;
-
-    if (!activeCommand) return;
-
-    const nextOutput = appendCapturedOutput(activeCommand.output, data);
-    const markerMatch = nextOutput.match(new RegExp(`\\r?\\n?${escapeRegExp(activeCommand.marker)}(-?\\d+)`));
-
-    if (!markerMatch || markerMatch.index === undefined) {
-      activeCommand.output = nextOutput;
-      scheduleLongRunningSnapshot();
-      return;
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "command.subscribe", id: execution.id, cursor: cursorByExecutionRef.current.get(execution.id) || 0 }));
     }
-
-    const exitCode = Number.parseInt(markerMatch[1], 10);
-    completeActiveCommand(Number.isFinite(exitCode) ? exitCode : null, nextOutput.slice(0, markerMatch.index));
   }
 
   useEffect(() => {
-    if (!containerRef.current || !workspaceRoot) {
-      return;
-    }
-
+    if (!containerRef.current || !workspaceRoot) return;
+    disposedRef.current = false;
     const terminal = new Terminal({
       cursorBlink: true,
       fontFamily: '"Cascadia Code", "SFMono-Regular", Consolas, monospace',
       fontSize: 12,
-      theme: {
-        background: "#111827",
-        foreground: "#e5edf7",
-        cursor: "#f8fafc",
-        selectionBackground: "#334155"
-      }
+      theme: { background: "#111827", foreground: "#e5edf7", cursor: "#f8fafc", selectionBackground: "#334155" }
     });
     const fitAddon = new FitAddon();
-    const socket = new WebSocket(getTerminalUrl());
-
     terminal.loadAddon(fitAddon);
     terminal.open(containerRef.current);
     terminal.focus();
-
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
-    socketRef.current = socket;
-    terminalCwdRef.current = "";
-    terminalShellRef.current = "";
-    setStatus("connecting");
-    setTerminalReady(false);
 
     const fit = () => {
       fitAddon.fit();
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
-      }
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
     };
 
-    const fitSoon = () => window.setTimeout(fit, 0);
-    fitSoon();
+    const connect = () => {
+      if (disposedRef.current) return;
+      setStatus("connecting");
+      const socket = new WebSocket(getTerminalUrl());
+      socketRef.current = socket;
+      socket.addEventListener("open", () => {
+        setStatus("connected");
+        fit();
+        for (const id of subscribedIdsRef.current) {
+          const cursor = cursorByExecutionRef.current.get(id) || 0;
+          // 重连后先通过 HTTP 补齐断线窗口，再从新的 cursor 恢复实时订阅。
+          void fetchCommandExecutionOutput(id, cursor).then(({ output }) => {
+            writeExecutionOutput(id, output.cursor, output.data);
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "command.subscribe", id, cursor: cursorByExecutionRef.current.get(id) || 0 }));
+            }
+          }).catch((error) => {
+            terminal.writeln(`\r\n[execution error] ${error instanceof Error ? error.message : "无法恢复命令输出"}`);
+          });
+        }
+      });
+      socket.addEventListener("message", (event) => {
+        let message: ServerMessage;
+        try {
+          message = JSON.parse(event.data) as ServerMessage;
+        } catch {
+          return;
+        }
+        if (message.type === "ready") {
+          terminal.writeln(`Connected to ${message.shell} in ${message.cwd}`);
+        } else if (message.type === "output") {
+          terminal.write(message.data);
+        } else if (message.type === "error") {
+          terminal.writeln(`\r\nTerminal error: ${message.error}`);
+        } else if (message.type === "exit") {
+          terminal.writeln(`\r\nProcess exited with code ${message.exitCode}`);
+        } else if (message.type === "command.output") {
+          writeExecutionOutput(message.id, message.cursor, message.data);
+        } else if (message.type === "command.error") {
+          terminal.writeln(`\r\n[execution error] ${message.message}`);
+          onCommandComplete?.({ id: message.id, result: null, error: message.message });
+        } else {
+          setActiveExecution(message.execution);
+          if (message.type === "command.ready") reportExecution(message.execution, "ready");
+          if (message.type === "command.finished") reportExecution(message.execution, "finished");
+        }
+      });
+      socket.addEventListener("close", () => {
+        if (socketRef.current === socket) socketRef.current = null;
+        setStatus("closed");
+        if (!disposedRef.current) reconnectTimerRef.current = window.setTimeout(connect, 1000);
+      });
+    };
 
     const inputDisposable = terminal.onData((data) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "input", data }));
-      }
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "input", data }));
     });
-
-    socket.addEventListener("open", () => {
-      setStatus("connected");
-      fit();
-    });
-
-    socket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data) as ServerMessage;
-
-      if (message.type === "ready") {
-        terminalCwdRef.current = message.cwd;
-        terminalShellRef.current = message.shell;
-        setTerminalReady(true);
-        terminal.writeln(`Connected to ${message.shell} in ${message.cwd}`);
-        return;
-      }
-
-      if (message.type === "output") {
-        captureTerminalOutput(message.data);
-        terminal.write(message.data);
-        return;
-      }
-
-      if (message.type === "error") {
-        terminal.writeln(`\r\nTerminal error: ${message.error}`);
-        return;
-      }
-
-      terminal.writeln(`\r\nProcess exited with code ${message.exitCode}`);
-    });
-
-    socket.addEventListener("close", () => {
-      setStatus("closed");
-      setTerminalReady(false);
-    });
-
-    const resizeObserver = new ResizeObserver(fitSoon);
+    const resizeObserver = new ResizeObserver(() => window.setTimeout(fit, 0));
     resizeObserver.observe(containerRef.current);
+    connect();
+
+    // 页面刷新后恢复最近一条仍在运行的 execution 与已有日志。
+    void fetchCommandExecutions({ state: "running" }).then(({ executions }) => {
+      const latest = executions.sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+      if (latest) void subscribeExecution(latest);
+    }).catch(() => undefined);
 
     return () => {
+      disposedRef.current = true;
+      if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
       resizeObserver.disconnect();
       inputDisposable.dispose();
-      if (activeCommandRef.current) {
-        window.clearTimeout(activeCommandRef.current.timeoutId);
-        if (activeCommandRef.current.settleTimeoutId) {
-          window.clearTimeout(activeCommandRef.current.settleTimeoutId);
-        }
-        activeCommandRef.current = null;
-      }
-      socket.close();
+      socketRef.current?.close();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -377,109 +248,41 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
   }, [workspaceRoot]);
 
   useEffect(() => {
-    window.setTimeout(() => {
-      const terminal = terminalRef.current;
-      const fitAddon = fitAddonRef.current;
-      const socket = socketRef.current;
-
-      if (!terminal || !fitAddon || socket?.readyState !== WebSocket.OPEN) return;
-
-      fitAddon.fit();
-      socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
-    }, 0);
+    window.setTimeout(() => fitAddonRef.current?.fit(), 0);
   }, [height]);
 
-  async function handleRunCommand(command: string, request?: TerminalCommandRequest) {
-    const trimmedCommand = command.trim();
+  useEffect(() => {
+    if (!commandRequest || subscribedIdsRef.current.has(commandRequest.id)) return;
+    terminalRef.current?.writeln(`\r\n> ${commandRequest.execution.command}\r\n`);
+    void subscribeExecution(commandRequest.execution);
+  }, [commandRequest]);
 
-    if (!trimmedCommand || runningCommand) return false;
-
-    if (activeCommandRef.current?.reportedSnapshot) {
-      activeCommandRef.current = null;
-      setRunningCommand(false);
-    }
-
-    if (activeCommandRef.current) return false;
-
-    const socket = socketRef.current;
-    const terminal = terminalRef.current;
-
-    if (!terminal || socket?.readyState !== WebSocket.OPEN || !terminalReady || !terminalShellRef.current) {
-      if (request) {
-        onCommandComplete?.({ id: request.id, result: null, error: "Terminal is not ready yet." });
-      }
-      return false;
-    }
-
-    setRunningCommand(true);
-
-    try {
-      if (request) {
-        const wrappedCommand = wrapCommandForCompletion(trimmedCommand, request.id, terminalShellRef.current);
-        const timeoutId = window.setTimeout(() => {
-          if (activeCommandRef.current?.reportedSnapshot) {
-            activeCommandRef.current = null;
-            setRunningCommand(false);
-            return;
-          }
-
-          terminal.writeln(`\r\n[command error] Command timed out after ${commandTimeoutMs / 1000} seconds while waiting for completion marker.`);
-          timeoutActiveCommand("Command timed out while waiting for terminal completion.");
-        }, commandTimeoutMs);
-
-        activeCommandRef.current = {
-          id: request.id,
-          command: trimmedCommand,
-          marker: wrappedCommand.marker,
-          output: "",
-          startedAt: new Date().toISOString(),
-          chatId: request.chatId,
-          timeoutId,
-          settleTimeoutId: null,
-          longRunning: commandLooksLongRunning(trimmedCommand),
-          reportedSnapshot: false
-        };
-        socket.send(JSON.stringify({ type: "input", data: wrappedCommand.input }));
-      } else {
-        socket.send(JSON.stringify({ type: "input", data: `${trimmedCommand}\r` }));
-        setRunningCommand(false);
-      }
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to run command";
-      terminal.writeln(`\r\n[command error] ${message}`);
-      if (request) {
-        onCommandComplete?.({ id: request.id, result: null, error: message });
-      }
-      setRunningCommand(false);
-      activeCommandRef.current = null;
-      return false;
-    }
+  async function handleStop() {
+    if (!activeExecution) return;
+    const { execution } = await stopCommandExecution(activeExecution.id);
+    setActiveExecution(execution);
   }
 
-  useEffect(() => {
-    const socket = socketRef.current;
+  async function handleBackground() {
+    if (!activeExecution) return;
+    const { execution } = await moveCommandExecutionToBackground(activeExecution.id);
+    setActiveExecution(execution);
+  }
 
-    if (!commandRequest || !workspaceRoot || runningCommand || !terminalReady || !terminalRef.current || socket?.readyState !== WebSocket.OPEN) return;
-    if (lastCommandRequestIdRef.current === commandRequest.id) return;
-
-    void handleRunCommand(commandRequest.command, commandRequest).then((started) => {
-      if (started) {
-        lastCommandRequestIdRef.current = commandRequest.id;
-      }
-    });
-  }, [commandRequest, runningCommand, status, terminalReady, workspaceRoot]);
-
+  const canControl = activeExecution && !terminalStates.has(activeExecution.state);
   return (
     <section className="terminal-panel" style={{ height }}>
       <div className="terminal-resizer" role="separator" aria-orientation="horizontal" title="Resize terminal" onPointerDown={onStartResize} />
       <div className="terminal-header">
         <h2>Terminal</h2>
-        <span>{workspaceRoot || "Open a workspace to start a terminal"}</span>
+        <span>{activeExecution ? `${activeExecution.command} · ${activeExecution.state}/${activeExecution.readiness}` : workspaceRoot || "Open a workspace to start a terminal"}</span>
+        <div className="terminal-execution-actions">
+          {canControl && activeExecution.mode !== "background" && <button type="button" onClick={() => void handleBackground()}>转入后台</button>}
+          {canControl && <button type="button" onClick={() => void handleStop()}>停止</button>}
+          {activeExecution && <button type="button" onClick={() => void subscribeExecution(activeExecution)}>重新打开</button>}
+        </div>
         <strong data-status={status}>{status}</strong>
-        <button type="button" className="terminal-close icon-button" title="关闭终端 (Ctrl+`)" aria-label="关闭终端" onClick={onClose}>
-          <Icon name="close" />
-        </button>
+        <button type="button" className="terminal-close icon-button" title="关闭终端 (Ctrl+`)" aria-label="关闭终端" onClick={onClose}><Icon name="close" /></button>
       </div>
       <div className="terminal-body" ref={containerRef} />
     </section>

@@ -1,5 +1,5 @@
 import { useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { fetchCommandPolicy, recordTaskSessionCommand, streamGenerateEdit, validateAndFix, type AutoValidationResponse, type CommandResult, type VerificationIssueCategory } from "../api";
+import { fetchCommandPolicy, recordTaskSessionCommand, startCommandExecution, streamGenerateEdit, validateAndFix, type AutoValidationResponse, type CommandResult, type VerificationIssueCategory } from "../api";
 import { createClientErrorStep, createCommandAgentStep, type AppState, type CommandSuggestion } from "../appState";
 import type { TerminalCommandCompletion, TerminalCommandRequest } from "../components/TerminalPanel";
 
@@ -350,17 +350,25 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
         return null;
       }
 
-      setState((current) => ({
-        ...current,
-        agentSteps: [...current.agentSteps, createCommandAgentStep(suggestion.command, "running", policy, null)]
-      }));
-
+      const runningStep = createCommandAgentStep(suggestion.command, "running", policy, null);
+      setState((current) => ({ ...current, agentSteps: [...current.agentSteps, runningStep] }));
       setTerminalOpen(true);
-      const requestId = crypto.randomUUID();
+      const { execution } = await startCommandExecution({
+        command: suggestion.command,
+        cwd: state.workspaceRoot,
+        chatId: state.chatId,
+        taskSessionId: state.currentTaskSessionId,
+        mode: "auto",
+        confirmed
+      });
       const result = await new Promise<CommandResult | null>((resolve) => {
-        terminalCommandResolvers.current[requestId] = resolve;
-        terminalCommandTaskSessions.current[requestId] = state.currentTaskSessionId;
-        setTerminalCommandRequest({ id: requestId, command: suggestion.command, chatId: state.chatId });
+        terminalCommandResolvers.current[execution.id] = resolve;
+        terminalCommandTaskSessions.current[execution.id] = state.currentTaskSessionId;
+        setState((current) => ({
+          ...current,
+          agentSteps: current.agentSteps.map((step) => step.id === runningStep.id && step.type === "command" ? { ...step, executionId: execution.id } : step)
+        }));
+        setTerminalCommandRequest({ id: execution.id, execution });
       });
 
       if (!result) {
@@ -372,18 +380,18 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
         return null;
       }
 
-      const status = result.status === "success" || result.status === "running" ? "success" : "failed";
+      const status = result.status === "success" ? "success" : result.status === "running" ? "running" : "failed";
       const visibleResult = commandResultForAgentStep(result);
 
       setState((current) => ({
         ...current,
         loading: false,
-        agentSteps: [...current.agentSteps, createCommandAgentStep(suggestion.command, status, policy, visibleResult)]
+        agentSteps: current.agentSteps.map((step) => step.type === "command" && step.executionId === execution.id ? { ...step, status, result: visibleResult } : step)
       }));
 
       if (status === "failed") {
         await generateAutoFixPatch(result);
-      } else {
+      } else if (status === "success") {
         setState((current) => ({ ...current, autoFix: null }));
       }
 
@@ -402,6 +410,7 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
 
   function handleTerminalCommandComplete(completion: TerminalCommandCompletion) {
     const resolve = terminalCommandResolvers.current[completion.id];
+    const wasAwaiting = Boolean(resolve);
 
     if (resolve) {
       resolve(completion.result);
@@ -409,14 +418,25 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
     }
 
     const taskSessionId = terminalCommandTaskSessions.current[completion.id];
-    delete terminalCommandTaskSessions.current[completion.id];
+    if (completion.phase === "finished") delete terminalCommandTaskSessions.current[completion.id];
 
-    if (taskSessionId && completion.result) {
+    if (completion.phase === "finished" && taskSessionId && completion.result) {
       void recordTaskSessionCommand(taskSessionId, completion.result.command, completion.result).then(() => refreshTaskSessions(taskSessionId));
     }
 
+    if (completion.result) {
+      const status = completion.result.status === "success" ? "success" : completion.result.status === "running" ? "running" : completion.execution?.state === "cancelled" ? "cancelled" : "failed";
+      const visibleResult = commandResultForAgentStep(completion.result);
+      setState((current) => ({
+        ...current,
+        loading: false,
+        agentSteps: current.agentSteps.map((step) => step.type === "command" && step.executionId === completion.id ? { ...step, status, result: visibleResult } : step)
+      }));
+
+      if (completion.phase === "finished" && status === "failed" && !wasAwaiting) void generateAutoFixPatch(completion.result);
+    }
+
     if (completion.error) {
-      // 超时错误与结构化结果可同时存在；结果已用于解析、展示和任务记录，错误仅提示等待结束原因。
       setState((current) => ({ ...current, loading: false, error: completion.error || null }));
     }
   }

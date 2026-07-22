@@ -307,6 +307,7 @@ export type AgentStep = {
   | {
       type: "command";
       command: string;
+      executionId?: string;
       policy?: CommandPolicyResult;
       status?: "suggested" | "running" | "success" | "failed" | "blocked" | "cancelled";
       result?: CommandResult | null;
@@ -723,6 +724,44 @@ export type CommandResult = {
   finishedAt: string;
 };
 
+export type CommandExecutionState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type CommandExecutionMode = "foreground" | "background" | "auto";
+export type CommandReadiness = "pending" | "ready" | "not_applicable";
+export type CommandExecution = {
+  id: string;
+  command: string;
+  cwd: string;
+  chatId?: string;
+  taskSessionId?: string;
+  mode: CommandExecutionMode;
+  state: CommandExecutionState;
+  readiness: CommandReadiness;
+  readyUrl?: string;
+  detectedUrls: string[];
+  exitCode: number | null;
+  signal?: string;
+  pid?: number;
+  waitTimedOut: boolean;
+  outputTruncated: boolean;
+  outputCursor: number;
+  startedAt: string;
+  readyAt?: string;
+  finishedAt?: string;
+  failureReason?: "non_zero_exit" | "execution_timeout" | "spawn_error" | "output_limit";
+};
+export type CommandOutputChunk = { id: string; cursor: number; nextCursor: number; data: string; truncated: boolean };
+export type StartCommandExecutionInput = {
+  command: string;
+  cwd?: string;
+  chatId?: string;
+  taskSessionId?: string | null;
+  mode?: CommandExecutionMode;
+  waitTimeoutMs?: number;
+  executionTimeoutMs?: number;
+  killOnWaitTimeout?: boolean;
+  confirmed?: boolean;
+};
+
 export type CommandRiskLevel = "safe" | "confirm" | "blocked";
 
 export type CommandPolicyResult = {
@@ -996,6 +1035,31 @@ export function runProjectCommand(command: string, cwd?: string, chatId?: string
     method: "POST",
     body: JSON.stringify({ command, cwd, chatId, confirmed, taskSessionId })
   });
+}
+
+export function startCommandExecution(input: StartCommandExecutionInput) {
+  return request<{ execution: CommandExecution }>("/api/command-executions", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function fetchCommandExecutions(filter: { chatId?: string; taskSessionId?: string; state?: CommandExecutionState } = {}) {
+  const query = new URLSearchParams(Object.entries(filter).filter((entry): entry is [string, string] => Boolean(entry[1])));
+  return request<{ executions: CommandExecution[] }>(`/api/command-executions${query.size ? `?${query}` : ""}`);
+}
+
+export function fetchCommandExecution(id: string) {
+  return request<{ execution: CommandExecution }>(`/api/command-executions/${encodeURIComponent(id)}`);
+}
+
+export function fetchCommandExecutionOutput(id: string, cursor = 0) {
+  return request<{ output: CommandOutputChunk }>(`/api/command-executions/${encodeURIComponent(id)}/output?cursor=${encodeURIComponent(cursor)}`);
+}
+
+export function stopCommandExecution(id: string) {
+  return request<{ execution: CommandExecution }>(`/api/command-executions/${encodeURIComponent(id)}/stop`, { method: "POST", body: "{}" });
+}
+
+export function moveCommandExecutionToBackground(id: string) {
+  return request<{ execution: CommandExecution }>(`/api/command-executions/${encodeURIComponent(id)}/background`, { method: "POST", body: "{}" });
 }
 
 export function validateAndFix(command?: string | null, options: {

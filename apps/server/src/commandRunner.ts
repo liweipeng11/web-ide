@@ -10,7 +10,7 @@ import { commandExecutionService } from "./commandExecution/index.js";
 
 const commandTimeoutMs = 120_000;
 
-function resolveCommandCwd(cwd?: string) {
+export function resolveCommandCwd(cwd?: string) {
   const workspaceRoot = getWorkspaceRoot();
 
   if (!workspaceRoot) {
