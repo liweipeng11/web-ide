@@ -27,7 +27,7 @@ export type VerificationExecution = {
 };
 
 export type VerificationReport = {
-  status: "success" | "failed" | "needs_confirmation" | "blocked" | "no_commands";
+  status: "success" | "failed" | "needs_confirmation" | "blocked" | "no_commands" | "cancelled";
   plannedCommands: VerificationCommand[];
   plan: VerificationPlan;
   executions: VerificationExecution[];

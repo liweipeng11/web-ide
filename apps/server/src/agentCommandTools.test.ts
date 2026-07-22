@@ -9,7 +9,7 @@ function commandResult(status: CommandResult["status"], command = "pnpm test"): 
   return {
     command,
     cwd: "C:/workspace",
-    exitCode: status === "success" || status === "running" ? 0 : 1,
+    exitCode: status === "cancelled" ? null : status === "success" || status === "running" ? 0 : 1,
     stdout: status === "success" ? "tests passed" : "",
     stderr: status === "failed" ? "tests failed" : "",
     summary: status === "success" ? "Command completed successfully." : "Command failed with exit code 1.",
@@ -72,6 +72,17 @@ test("runCommand returns failed status details for model repair loop", async () 
   assert.equal(summary.result?.exitCode, 1);
   assert.match(summary.result?.stderr || "", /tests failed/);
   assert.deepEqual(commandStatuses(steps), ["running", "failed"]);
+});
+
+test("runCommand 保留用户主动取消状态", async () => {
+  const steps: AgentStep[] = [];
+  const runtime = createRuntime((step) => steps.push(step));
+  const tool = createTool({ result: commandResult("cancelled") });
+
+  await tool.execute({ command: "pnpm test" }, runtime);
+
+  assert.deepEqual(commandStatuses(steps), ["running", "cancelled"]);
+  assert.deepEqual(runtime.agentContext.commandsRun, [{ command: "pnpm test", status: "cancelled", exitCode: null }]);
 });
 
 test("runCommand 将后台模式和超时参数传给统一执行内核", async () => {

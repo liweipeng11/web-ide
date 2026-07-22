@@ -265,6 +265,13 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
         return validation;
       }
 
+      if (validation.status === "cancelled") {
+        // 用户停止验证后清理自动回修状态，不把主动取消显示为失败。
+        setState((current) => ({ ...current, loading: false, error: null, autoFix: null, agentSteps: nextAgentSteps(current.agentSteps) }));
+        void refreshTaskSessions(state.currentTaskSessionId);
+        return validation;
+      }
+
       const message =
         validation.status === "blocked"
           ? validation.policy.reason
@@ -380,7 +387,7 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
         return null;
       }
 
-      const status = result.status === "success" ? "success" : result.status === "running" ? "running" : "failed";
+      const status = result.status === "success" ? "success" : result.status === "running" ? "running" : result.status === "cancelled" ? "cancelled" : "failed";
       const visibleResult = commandResultForAgentStep(result);
 
       setState((current) => ({

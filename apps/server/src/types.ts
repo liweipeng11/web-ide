@@ -106,7 +106,7 @@ export type CommandResult = {
   stdout: string;
   stderr: string;
   summary?: string;
-  status?: "success" | "failed" | "running" | "timeout";
+  status?: "success" | "failed" | "running" | "timeout" | "cancelled";
   detectedUrl?: string;
   detectedUrls?: string[];
   waitTimedOut?: boolean;
@@ -205,7 +205,7 @@ export type GenerateEditResponse = {
 };
 
 export type AutoValidationResponse = {
-  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached" | "no_commands";
+  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached" | "no_commands" | "cancelled";
   command: string;
   attempts: number;
   maxAttempts: number;
@@ -311,7 +311,7 @@ export type AgentContextSnapshot = {
   existenceCheckPerformed?: boolean;
   unresolvedExistenceChecks?: string[];
   impactAnalyses?: import("./impactAnalyzer/index.js").ImpactAnalysisResult[];
-  commandsRun?: Array<{ command: string; status: "success" | "failed" | "running"; exitCode: number | null }>;
+  commandsRun?: Array<{ command: string; status: "success" | "failed" | "running" | "cancelled"; exitCode: number | null }>;
   externalSources?: import("./externalContext/types.js").ExternalContextSource[];
 };
 

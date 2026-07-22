@@ -9,7 +9,7 @@ function commandResult(status: CommandResult["status"], command = "pnpm test"): 
   return {
     command,
     cwd: "C:/workspace",
-    exitCode: status === "success" ? 0 : 1,
+    exitCode: status === "cancelled" ? null : status === "success" ? 0 : 1,
     stdout: status === "success" ? "tests passed" : "",
     stderr: status === "success" ? "" : "1 test failed",
     status,
@@ -65,7 +65,7 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
       const execution = { command: plannedCommand, policy, result, issues: result.status === "success" ? [] : [{ category: "test" as const, file: "src/app.test.ts", line: 12, message: "1 test failed" }] };
       return result.status === "success"
         ? { status: "success", plannedCommands: [plannedCommand], plan, executions: [execution] }
-        : { status: "failed", plannedCommands: [plannedCommand], plan, executions: [execution], failedExecution: execution };
+        : { status: result.status === "cancelled" ? "cancelled" : "failed", plannedCommands: [plannedCommand], plan, executions: [execution], failedExecution: execution };
     },
     createEditPatchResponse: async (selectedPath, prompt, onAgentStep, taskSessionId) => {
       patchCalls.push({ selectedPath, prompt, taskSessionId });
@@ -114,6 +114,21 @@ test("stops successfully when validation passes", async () => {
   assert.deepEqual(
     result.agentSteps.filter((step) => step.type === "command").map((step) => step.status),
     ["running", "success"]
+  );
+});
+
+test("验证被主动停止后取消任务且不生成修复补丁", async () => {
+  const harness = createHarness({ result: commandResult("cancelled") });
+
+  const result = await harness.run({ command: "pnpm test", taskSessionId: "task-1" });
+
+  assert.equal(result.status, "cancelled");
+  assert.deepEqual(harness.progressPhases, ["task_cancelled"]);
+  assert.deepEqual(harness.statuses, ["cancelled"]);
+  assert.equal(harness.patchCalls.length, 0);
+  assert.deepEqual(
+    result.agentSteps.filter((step) => step.type === "command").map((step) => step.status),
+    ["running", "cancelled"]
   );
 });
 

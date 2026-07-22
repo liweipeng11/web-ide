@@ -57,6 +57,8 @@ function executionResult(execution: CommandExecution, output: string): CommandRe
     ? "success"
     : execution.state === "running"
       ? "running"
+      : execution.state === "cancelled"
+        ? "cancelled"
       : "failed";
   const summary = execution.readiness === "ready" && execution.readyUrl
     ? `服务已就绪：${execution.readyUrl}`

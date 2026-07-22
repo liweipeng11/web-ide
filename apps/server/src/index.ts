@@ -366,8 +366,9 @@ app.post(
 
     const result = await runProjectCommand(command, cwd, chatId, Boolean(confirmed));
     await addTaskSessionCommand(taskSessionId, result.command);
-    await appendTaskSessionStep(taskSessionId, createAgentStep({ type: "command", command: result.command, status: result.status === "success" || result.status === "running" ? "success" : "failed", result }));
-    await advanceTaskPlanProgress(taskSessionId, result.status === "success" || result.status === "running" ? "validation_success" : "validation_failed");
+    const stepStatus = result.status === "cancelled" ? "cancelled" : result.status === "success" || result.status === "running" ? "success" : "failed";
+    await appendTaskSessionStep(taskSessionId, createAgentStep({ type: "command", command: result.command, status: stepStatus, result }));
+    await advanceTaskPlanProgress(taskSessionId, result.status === "cancelled" ? "task_cancelled" : result.status === "success" || result.status === "running" ? "validation_success" : "validation_failed");
     response.json({ result });
   })
 );
@@ -640,11 +641,11 @@ app.post(
       createAgentStep({
         type: "command",
         command,
-        status: result?.status === "success" || result?.status === "running" ? "success" : result ? "failed" : "cancelled",
+        status: result?.status === "cancelled" ? "cancelled" : result?.status === "success" || result?.status === "running" ? "success" : result ? "failed" : "cancelled",
         result: result || null
       })
     );
-    await advanceTaskPlanProgress(taskSessionId, result?.status === "success" || result?.status === "running" ? "validation_success" : "validation_failed");
+    await advanceTaskPlanProgress(taskSessionId, result?.status === "cancelled" || !result ? "task_cancelled" : result.status === "success" || result.status === "running" ? "validation_success" : "validation_failed");
     response.json({ success: true });
   })
 );

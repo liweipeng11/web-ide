@@ -162,7 +162,7 @@ export type PatchLifecycleEvent = {
 };
 
 export type AutoValidationResponse = {
-  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached" | "no_commands";
+  status: "success" | "fix_generated" | "needs_confirmation" | "blocked" | "max_attempts_reached" | "no_commands" | "cancelled";
   command: string;
   attempts: number;
   maxAttempts: number;
@@ -716,7 +716,7 @@ export type CommandResult = {
   stdout: string;
   stderr: string;
   summary?: string;
-  status?: "success" | "failed" | "running" | "timeout";
+  status?: "success" | "failed" | "running" | "timeout" | "cancelled";
   detectedUrl?: string;
   detectedUrls?: string[];
   waitTimedOut?: boolean;

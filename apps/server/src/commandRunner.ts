@@ -78,6 +78,8 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
   const status: CommandResult["status"] =
     execution.state === "running" && (execution.readiness === "ready" || execution.interaction.state === "needs_input")
       ? "running"
+      : execution.state === "cancelled"
+        ? "cancelled"
       : execution.waitTimedOut || execution.failureReason === "execution_timeout"
         ? "timeout"
         : execution.state === "succeeded"

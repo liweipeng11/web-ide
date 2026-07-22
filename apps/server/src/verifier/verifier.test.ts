@@ -4,11 +4,11 @@ import { createVerifier, type VerifierDependencies } from "./verifier.js";
 import type { CommandResult } from "../types.js";
 import type { VerificationCommand } from "./types.js";
 
-function result(command: string, status: "success" | "failed"): CommandResult {
+function result(command: string, status: "success" | "failed" | "cancelled"): CommandResult {
   return {
     command,
     cwd: "C:/workspace",
-    exitCode: status === "success" ? 0 : 1,
+    exitCode: status === "cancelled" ? null : status === "success" ? 0 : 1,
     stdout: status === "success" ? "ok" : "",
     stderr: status === "failed" ? "src/app.ts(3,2): error TS1005: ';' expected." : "",
     status,
@@ -42,6 +42,19 @@ test("验证流水线在首个失败命令处停止并返回结构化问题", as
   assert.equal(report.status, "failed");
   assert.deepEqual(called, ["pnpm typecheck", "pnpm test"]);
   assert.equal(report.failedExecution?.issues[0].file, "src/app.ts");
+});
+
+test("验证命令被主动停止时保留取消状态", async () => {
+  const verifier = createVerifier({
+    planVerification: async () => plan([command("test", "test")]),
+    evaluateCommandPolicy: () => ({ level: "safe", reason: "测试白名单" }),
+    runProjectCommand: async (value) => result(value, "cancelled")
+  } as VerifierDependencies);
+
+  const report = await verifier({ workspaceRoot: "C:/workspace" });
+
+  assert.equal(report.status, "cancelled");
+  assert.equal(report.failedExecution?.result?.status, "cancelled");
 });
 
 test("未确认的命令不会执行", async () => {

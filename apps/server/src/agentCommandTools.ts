@@ -140,7 +140,13 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
         runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status: "running", result: null }));
         const result = await dependencies.runProjectCommand(command, cwd, chatId, true, { mode, waitTimeoutMs, executionTimeoutMs, readyPattern, initiator: "agent" });
         // ready 的后台服务仍是 running，不把“可以继续下一步”伪装成进程已成功退出。
-        const status = result.status === "success" ? "success" : result.status === "running" ? "running" : "failed";
+        const status = result.status === "success"
+          ? "success"
+          : result.status === "running"
+            ? "running"
+            : result.status === "cancelled"
+              ? "cancelled"
+              : "failed";
         runtime.agentContext.commandsRun = [
           ...(runtime.agentContext.commandsRun || []),
           { command, status, exitCode: result.exitCode }

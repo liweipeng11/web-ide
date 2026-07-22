@@ -58,7 +58,8 @@ export function createVerifier(dependencies: VerifierDependencies = defaultDepen
       executions.push(completedExecution);
 
       if (!commandSucceeded(result.status)) {
-        return { status: "failed", plannedCommands, plan, executions, failedExecution: completedExecution };
+        // 用户主动停止验证时保留取消语义，不进入普通失败和自动回修流程。
+        return { status: result.status === "cancelled" ? "cancelled" : "failed", plannedCommands, plan, executions, failedExecution: completedExecution };
       }
     }
 

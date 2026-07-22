@@ -146,8 +146,8 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
       const commandCount = response.verification?.executions.length ?? 0;
       const validationStatus = response.status === "success" ? "passed" : ["blocked", "max_attempts_reached", "fix_generated"].includes(response.status) ? "failed" : "not_run";
       await metrics?.finish({
-        status: ["blocked", "max_attempts_reached"].includes(response.status) ? "failed" : "completed",
-        failureCategory: validationStatus === "failed" ? "validation_failure" : "none",
+        status: response.status === "cancelled" ? "cancelled" : ["blocked", "max_attempts_reached"].includes(response.status) ? "failed" : "completed",
+        failureCategory: response.status === "cancelled" ? "cancelled" : validationStatus === "failed" ? "validation_failure" : "none",
         patchFileCount: response.patch?.files.length ?? 0,
         validationCommandCount: commandCount,
         validationStatus
@@ -173,7 +173,8 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
     for (const execution of verification.executions) {
       if (execution.result) {
         pushAgentStep(createAgentStep({ type: "command", command: execution.command.command, policy: execution.policy, status: "running", result: null }));
-        pushAgentStep(createAgentStep({ type: "command", command: execution.command.command, policy: execution.policy, status: commandSucceeded(execution.result) ? "success" : "failed", result: execution.result }));
+        const status = execution.result.status === "cancelled" ? "cancelled" : commandSucceeded(execution.result) ? "success" : "failed";
+        pushAgentStep(createAgentStep({ type: "command", command: execution.command.command, policy: execution.policy, status, result: execution.result }));
       } else {
         pushAgentStep(createAgentStep({
           type: "command",
@@ -199,6 +200,12 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
 
     if (verification.status === "needs_confirmation") {
       return finish({ status: "needs_confirmation", command, attempts, maxAttempts, policy, verification, agentSteps });
+    }
+
+    if (verification.status === "cancelled") {
+      await dependencies.advanceTaskPlanProgress(taskSessionId, "task_cancelled");
+      await dependencies.updateTaskSessionStatus(taskSessionId, "cancelled");
+      return finish({ status: "cancelled", command, attempts, maxAttempts, policy, result, verification, agentSteps });
     }
 
     if (verification.status === "success") {
