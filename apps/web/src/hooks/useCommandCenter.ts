@@ -416,6 +416,7 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
     }
 
     if (completion.error) {
+      // 超时错误与结构化结果可同时存在；结果已用于解析、展示和任务记录，错误仅提示等待结束原因。
       setState((current) => ({ ...current, loading: false, error: completion.error || null }));
     }
   }

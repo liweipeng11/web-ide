@@ -52,9 +52,14 @@ export async function getRecentCommandResults() {
   return store.results[workspaceKey()] || [];
 }
 
+// 运行中任务的 exitCode 为 null，不能据此推断命令失败。
+export function isFailedCommandResult(result: CommandResult) {
+  return result.status === "failed" || result.status === "timeout";
+}
+
 export async function getLastFailedCommandResult() {
   const results = await getRecentCommandResults();
-  return results.find((result) => result.exitCode !== 0) || null;
+  return results.find(isFailedCommandResult) || null;
 }
 
 export async function getLastFailedCommandResultForChat(chatId?: string) {
@@ -63,7 +68,7 @@ export async function getLastFailedCommandResultForChat(chatId?: string) {
   }
 
   const results = await getRecentCommandResults();
-  return results.find((result) => result.chatId === chatId && result.exitCode !== 0) || null;
+  return results.find((result) => result.chatId === chatId && isFailedCommandResult(result)) || null;
 }
 
 export function formatCommandFailureForPrompt(result: CommandResult | null) {

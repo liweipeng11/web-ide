@@ -5,38 +5,15 @@ import { checkExistence } from "./existenceChecker/index.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
 import type { CommandPolicyResult, CommandResult } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
+import { parsePackageScript } from "./commandExecution/commandClassifier.js";
+
+export { parsePackageScript } from "./commandExecution/commandClassifier.js";
 
 type CommandToolDependencies = {
   evaluateCommandPolicy: (command: string) => CommandPolicyResult;
   runProjectCommand: (command: string, cwd?: string, chatId?: string, confirmed?: boolean) => Promise<CommandResult>;
   verifyPackageScript: (command: string, cwd?: string) => Promise<string | null>;
 };
-
-export function parsePackageScript(command: string) {
-  const tokens = command.trim().split(/\s+/);
-  const packageManager = tokens.shift()?.toLowerCase();
-  if (!packageManager || !["npm", "pnpm", "yarn", "bun"].includes(packageManager)) return null;
-
-  let directory: string | undefined;
-  // 支持项目分析器生成的 pnpm --dir <package> <script>，以及 npm --prefix <package> run <script>。
-  while (tokens[0]?.startsWith("-")) {
-    const option = tokens.shift() || "";
-    const matchedDirectory = option.match(/^(?:--dir|--prefix|-C)=(.+)$/);
-    if (matchedDirectory) {
-      directory = matchedDirectory[1];
-      continue;
-    }
-    if (["--dir", "--prefix", "-C"].includes(option)) {
-      directory = tokens.shift();
-      continue;
-    }
-    // 其他包管理器选项不影响脚本名，跳过其值由调用方继续按原命令执行。
-  }
-
-  if (tokens[0]?.toLowerCase() === "run") tokens.shift();
-  const script = tokens[0]?.match(/^[\w:-]+$/)?.[0];
-  return script ? { script, directory } : null;
-}
 
 async function verifyPackageScript(command: string, cwd?: string) {
   const parsed = parsePackageScript(command);

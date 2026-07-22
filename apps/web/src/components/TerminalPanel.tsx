@@ -78,7 +78,7 @@ function stripAnsi(value: string) {
 }
 
 function commandLooksLongRunning(command: string) {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b|(?:^|\s)(?:vite|next\s+dev|webpack-dev-server|vue-cli-service\s+serve)(?:\s|$)/i.test(command);
+  return /\b(?:npm|pnpm|yarn|bun)\s+(?:(?:(?:--prefix|--dir|--cwd|-C)(?:=\S+|\s+\S+))\s+)*(?:run\s+)?(?:dev|start|serve|preview|watch)\b|(?:^|\s)(?:npx\s+)?(?:vite|next\s+dev|webpack-dev-server|vue-cli-service\s+serve)(?:\s|$)/i.test(command);
 }
 
 function tail(value: string, maxLength: number) {
@@ -86,10 +86,23 @@ function tail(value: string, maxLength: number) {
 }
 
 function detectUrl(output: string) {
-  return output.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[[^\]]+\]|[^\s]+)/i)?.[0]?.replace(/[),.;]+$/, "");
+  const candidates = output.match(/https?:\/\/[^\s<>"'`]+/gi) || [];
+
+  for (const candidate of candidates) {
+    const value = candidate.replace(/[)},.;!?]+$/, "");
+
+    try {
+      const url = new URL(value);
+      if (["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"].includes(url.hostname.toLowerCase())) return value;
+    } catch {
+      // 终端输出可能包含不完整 URL；忽略无效项，避免将普通文档链接误判为本地服务。
+    }
+  }
+
+  return undefined;
 }
 
-function createCommandResult(command: string, cwd: string, exitCode: number | null, output: string, startedAt: string, chatId?: string, finishedAt = new Date().toISOString()): CommandResult {
+function createCommandResult(command: string, cwd: string, exitCode: number | null, output: string, startedAt: string, chatId?: string, finishedAt = new Date().toISOString(), waitTimedOut = false): CommandResult {
   const cleanedOutput = stripAnsi(output).trim();
   const detectedUrl = detectUrl(cleanedOutput);
   const longRunning = commandLooksLongRunning(command);
@@ -115,6 +128,8 @@ function createCommandResult(command: string, cwd: string, exitCode: number | nu
     summary,
     status,
     detectedUrl,
+    detectedUrls: detectedUrl ? [detectedUrl] : [],
+    waitTimedOut,
     outputTruncated: cleanedOutput.length > maxResultOutputLength,
     startedAt,
     finishedAt
@@ -195,6 +210,25 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
     activeCommandRef.current = null;
     setRunningCommand(false);
     onCommandComplete?.({ id: activeCommand.id, result: null, error: message });
+  }
+
+  function timeoutActiveCommand(message: string) {
+    const activeCommand = activeCommandRef.current;
+
+    if (!activeCommand) return;
+
+    window.clearTimeout(activeCommand.timeoutId);
+    if (activeCommand.settleTimeoutId) {
+      window.clearTimeout(activeCommand.settleTimeoutId);
+    }
+    activeCommandRef.current = null;
+    setRunningCommand(false);
+    // 等待 completion marker 超时仍保留命令和输出，供任务记录与后续诊断使用。
+    onCommandComplete?.({
+      id: activeCommand.id,
+      result: createCommandResult(activeCommand.command, terminalCwdRef.current || workspaceRoot, null, activeCommand.output, activeCommand.startedAt, activeCommand.chatId, new Date().toISOString(), true),
+      error: message
+    });
   }
 
   function reportLongRunningSnapshot() {
@@ -390,7 +424,7 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
           }
 
           terminal.writeln(`\r\n[command error] Command timed out after ${commandTimeoutMs / 1000} seconds while waiting for completion marker.`);
-          failActiveCommand("Command timed out while waiting for terminal completion.");
+          timeoutActiveCommand("Command timed out while waiting for terminal completion.");
         }, commandTimeoutMs);
 
         activeCommandRef.current = {

@@ -107,6 +107,8 @@ export type CommandResult = {
   summary?: string;
   status?: "success" | "failed" | "running" | "timeout";
   detectedUrl?: string;
+  detectedUrls?: string[];
+  waitTimedOut?: boolean;
   outputTruncated?: boolean;
   startedAt: string;
   finishedAt: string;

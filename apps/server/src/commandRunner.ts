@@ -5,10 +5,10 @@ import { saveCommandResult } from "./commandResults.js";
 import type { CommandResult } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { evaluateCommandPolicy } from "./commandPolicy.js";
+import { classifyCommand } from "./commandExecution/commandClassifier.js";
+import { parseCommandOutput } from "./commandExecution/commandOutputParser.js";
 
 const maxCapturedOutputLength = 80_000;
-const maxStoredOutputLength = 12_000;
-const maxPreviewLength = 4_000;
 const commandTimeoutMs = 120_000;
 
 function appendOutput(current: string, chunk: string) {
@@ -19,51 +19,6 @@ function appendOutput(current: string, chunk: string) {
   }
 
   return next.slice(next.length - maxCapturedOutputLength);
-}
-
-function stripAnsi(value: string) {
-  return value
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\r(?!\n)/g, "\n")
-    .replace(/\n{3,}/g, "\n\n");
-}
-
-function tail(value: string, maxLength: number) {
-  return value.length > maxLength ? value.slice(value.length - maxLength) : value;
-}
-
-function detectUrl(output: string) {
-  return output.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[[^\]]+\]|[^\s]+)/i)?.[0]?.replace(/[),.;]+$/, "");
-}
-
-function commandLooksLongRunning(command: string) {
-  return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b|(?:^|\s)(?:vite|next\s+dev|webpack-dev-server|vue-cli-service\s+serve)(?:\s|$)/i.test(command);
-}
-
-function summarizeCommandResult(command: string, exitCode: number | null, stdout: string, stderr: string, timedOut: boolean) {
-  const combined = [stderr, stdout].filter(Boolean).join("\n");
-  const detectedUrl = detectUrl(combined);
-  const longRunning = commandLooksLongRunning(command);
-  const status: CommandResult["status"] = detectedUrl && longRunning ? "running" : timedOut ? "timeout" : exitCode === 0 ? "success" : "failed";
-  const preview = tail(combined, maxPreviewLength);
-  const summary = [
-    status === "running" && detectedUrl ? `Development server is running at ${detectedUrl}.` : "",
-    status === "timeout" ? `Command timed out after ${commandTimeoutMs / 1000} seconds.` : "",
-    status === "success" ? "Command completed successfully." : "",
-    status === "failed" ? `Command failed with exit code ${exitCode ?? "null"}.` : "",
-    preview ? `Output preview:\n${preview}` : ""
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
-  return {
-    detectedUrl,
-    status,
-    summary,
-    stdout: tail(stdout, maxStoredOutputLength),
-    stderr: tail(stderr, maxStoredOutputLength),
-    outputTruncated: stdout.length > maxStoredOutputLength || stderr.length > maxStoredOutputLength
-  };
 }
 
 function resolveCommandCwd(cwd?: string) {
@@ -140,9 +95,15 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
     });
   });
 
-  const cleanedStdout = stripAnsi(stdout).trim();
-  const cleanedStderr = stripAnsi(stderr).trim();
-  const summary = summarizeCommandResult(trimmedCommand, exitCode, cleanedStdout, cleanedStderr, timedOut);
+  const summary = parseCommandOutput({
+    command: trimmedCommand,
+    exitCode,
+    stdout,
+    stderr,
+    timedOut,
+    timeoutMs: commandTimeoutMs,
+    longRunning: classifyCommand(trimmedCommand).kind === "long_running"
+  });
   const result: CommandResult = {
     command: trimmedCommand,
     chatId,
@@ -153,6 +114,8 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
     summary: summary.summary,
     status: summary.status,
     detectedUrl: summary.detectedUrl,
+    detectedUrls: summary.detectedUrls,
+    waitTimedOut: timedOut,
     outputTruncated: summary.outputTruncated,
     startedAt,
     finishedAt: new Date().toISOString()
