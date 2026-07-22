@@ -4,7 +4,7 @@ export type CommandExecutionMode = "foreground" | "background" | "auto";
 
 export type CommandReadiness = "pending" | "ready" | "not_applicable";
 
-export type CommandFailureReason = "non_zero_exit" | "execution_timeout" | "spawn_error" | "output_limit";
+export type CommandFailureReason = "non_zero_exit" | "execution_timeout" | "spawn_error" | "output_limit" | "server_restart";
 
 export type CommandExecution = {
   id: string;
@@ -36,6 +36,7 @@ export type StartCommandInput = {
   taskSessionId?: string;
   mode?: CommandExecutionMode;
   executionTimeoutMs?: number;
+  readyPattern?: string;
 };
 
 export type WaitOptions = {

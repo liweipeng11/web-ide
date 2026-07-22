@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 
 export type CommandProcessStream = "stdout" | "stderr";
 
@@ -10,7 +10,7 @@ export type CommandProcessListeners = {
 
 export type CommandProcessHandle = {
   pid?: number;
-  kill: () => boolean;
+  kill: () => boolean | Promise<boolean>;
 };
 
 export type StartCommandProcessOptions = {
@@ -29,7 +29,9 @@ export const childProcessFactory: CommandProcessFactory = {
     const child = spawn(options.command, {
       cwd: options.cwd,
       shell: true,
-      env: options.env ?? process.env
+      env: options.env ?? process.env,
+      // Unix 使用独立进程组，停止 dev server 时可以连同 shell 子进程一起回收。
+      detached: process.platform !== "win32"
     });
 
     child.stdout?.on("data", (chunk: Buffer) => listeners.onData("stdout", chunk.toString("utf8")));
@@ -39,7 +41,37 @@ export const childProcessFactory: CommandProcessFactory = {
 
     return {
       pid: child.pid,
-      kill: () => child.kill()
+      kill: async () => {
+        if (!child.pid) return false;
+        if (process.platform === "win32") {
+          // 先快照整个后代树再逐个停止，避免外层 cmd 先退出后留下孤立的 dev server。
+          try {
+            const script = [
+              `$rootPid = ${child.pid}`,
+              "$processes = @(Get-CimInstance Win32_Process)",
+              "$targets = @($rootPid)",
+              "do {",
+              "  $before = $targets.Count",
+              "  $children = @($processes | Where-Object { $targets -contains $_.ParentProcessId -and $targets -notcontains $_.ProcessId } | ForEach-Object { $_.ProcessId })",
+              "  $targets += $children",
+              "} while ($targets.Count -gt $before)",
+              "Stop-Process -Id $targets -Force -ErrorAction SilentlyContinue"
+            ].join("; ");
+            await new Promise<void>((resolve, reject) => {
+              execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true }, (error) => error ? reject(error) : resolve());
+            });
+            return true;
+          } catch {
+            return child.kill();
+          }
+        }
+        try {
+          process.kill(-child.pid, "SIGTERM");
+          return true;
+        } catch {
+          return child.kill();
+        }
+      }
     };
   }
 };

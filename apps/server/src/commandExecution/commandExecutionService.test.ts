@@ -53,6 +53,16 @@ test("等待超时只停止同步等待，默认不终止进程", async () => {
   assert.equal(wasKilled(), false);
 });
 
+test("运行中命令转入后台后可基于已有输出立即标记 ready", async () => {
+  const { service } = createHarness((listeners) => listeners.onData("stdout", "Local: http://localhost:4100\n"));
+  const started = await service.start({ command: "node custom-server.js", cwd: process.cwd(), mode: "foreground" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const background = await service.moveToBackground(started.id);
+  assert.equal(background.mode, "background");
+  assert.equal(background.readiness, "ready");
+  assert.equal(background.readyUrl, "http://localhost:4100");
+});
+
 test("执行超时终止进程并记录 execution_timeout", async () => {
   const { service, wasKilled } = createHarness(() => undefined);
   const started = await service.start({ command: "node fixture sleep 500", cwd: process.cwd(), executionTimeoutMs: 5 });

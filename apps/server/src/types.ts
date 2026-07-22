@@ -98,6 +98,7 @@ export type ProjectRulesResponse = {
 };
 
 export type CommandResult = {
+  executionId?: string;
   command: string;
   chatId?: string;
   cwd: string;
@@ -110,6 +111,7 @@ export type CommandResult = {
   detectedUrls?: string[];
   waitTimedOut?: boolean;
   outputTruncated?: boolean;
+  readiness?: import("./commandExecution/types.js").CommandReadiness;
   startedAt: string;
   finishedAt: string;
 };
@@ -308,7 +310,7 @@ export type AgentContextSnapshot = {
   existenceCheckPerformed?: boolean;
   unresolvedExistenceChecks?: string[];
   impactAnalyses?: import("./impactAnalyzer/index.js").ImpactAnalysisResult[];
-  commandsRun?: Array<{ command: string; status: "success" | "failed"; exitCode: number | null }>;
+  commandsRun?: Array<{ command: string; status: "success" | "failed" | "running"; exitCode: number | null }>;
   externalSources?: import("./externalContext/types.js").ExternalContextSource[];
 };
 

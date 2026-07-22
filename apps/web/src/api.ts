@@ -708,6 +708,7 @@ export type MemoryCandidateMutationResult = {
 };
 
 export type CommandResult = {
+  executionId?: string;
   command: string;
   chatId?: string;
   cwd: string;
@@ -720,6 +721,7 @@ export type CommandResult = {
   detectedUrls?: string[];
   waitTimedOut?: boolean;
   outputTruncated?: boolean;
+  readiness?: CommandReadiness;
   startedAt: string;
   finishedAt: string;
 };
@@ -747,7 +749,7 @@ export type CommandExecution = {
   startedAt: string;
   readyAt?: string;
   finishedAt?: string;
-  failureReason?: "non_zero_exit" | "execution_timeout" | "spawn_error" | "output_limit";
+  failureReason?: "non_zero_exit" | "execution_timeout" | "spawn_error" | "output_limit" | "server_restart";
 };
 export type CommandOutputChunk = { id: string; cursor: number; nextCursor: number; data: string; truncated: boolean };
 export type StartCommandExecutionInput = {
@@ -758,6 +760,7 @@ export type StartCommandExecutionInput = {
   mode?: CommandExecutionMode;
   waitTimeoutMs?: number;
   executionTimeoutMs?: number;
+  readyPattern?: string;
   killOnWaitTimeout?: boolean;
   confirmed?: boolean;
 };
@@ -1060,6 +1063,14 @@ export function stopCommandExecution(id: string) {
 
 export function moveCommandExecutionToBackground(id: string) {
   return request<{ execution: CommandExecution }>(`/api/command-executions/${encodeURIComponent(id)}/background`, { method: "POST", body: "{}" });
+}
+
+export function removeCommandExecution(id: string) {
+  return request<void>(`/api/command-executions/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function fetchCommandExecutionSummary(id: string) {
+  return request<{ summary: { summary: string; output: string; truncated: boolean } }>(`/api/command-executions/${encodeURIComponent(id)}/summary`);
 }
 
 export function validateAndFix(command?: string | null, options: {

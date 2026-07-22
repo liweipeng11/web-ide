@@ -20,7 +20,7 @@ export type StructuredContextSummary = {
   unresolvedQuestions: string[];
   filesRead: string[];
   filesModified: string[];
-  commands: Array<{ command: string; status: "success" | "failed"; exitCode: number | null }>;
+  commands: Array<{ command: string; status: "success" | "failed" | "running"; exitCode: number | null }>;
   planStatus: string[];
   recentValidationFailures: string[];
   pendingApproval: { actionId: string; toolName: string; arguments: unknown } | null;

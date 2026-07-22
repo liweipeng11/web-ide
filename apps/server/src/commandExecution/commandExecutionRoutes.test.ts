@@ -79,6 +79,11 @@ test("execution HTTP API 支持启动、查询、列表、cursor 输出和后台
   assert.equal(moved.data.execution.mode, "background");
   const stopped = await requestJson(server.baseUrl, `/api/command-executions/${backgroundId}/stop`, "POST", {});
   assert.equal(stopped.data.execution.state, "cancelled");
+  const summary = await requestJson(server.baseUrl, `/api/command-executions/${id}/summary`);
+  assert.match(summary.data.summary.output, /123/);
+  const removed = await fetch(`${server.baseUrl}/api/command-executions/${backgroundId}`, { method: "DELETE" });
+  assert.equal(removed.status, 204);
+  assert.equal((await requestJson(server.baseUrl, `/api/command-executions/${backgroundId}`)).response.status, 404);
 });
 
 test("execution HTTP API 保留策略、确认、cwd 和 package script 校验", async (context) => {

@@ -13,8 +13,10 @@ switch (operation) {
     setTimeout(() => process.exit(0), value);
     break;
   case "server":
-    console.log(`ready at http://localhost:${value}`);
-    setInterval(() => undefined, 1_000);
+    // 使用真实本地监听验证 stop 会释放整个进程树，而不是只停止外层 shell。
+    http.createServer((_request, response) => response.end("ready")).listen(value, "127.0.0.1", () => {
+      console.log(`ready at http://localhost:${value}`);
+    });
     break;
   case "silent-server":
     setInterval(() => undefined, 1_000);
@@ -26,3 +28,4 @@ switch (operation) {
     console.error(`Unknown fixture operation: ${operation}`);
     process.exit(2);
 }
+import http from "node:http";

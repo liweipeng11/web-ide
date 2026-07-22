@@ -6,12 +6,13 @@ import type { AgentToolDefinition } from "./agentToolTypes.js";
 import type { CommandPolicyResult, CommandResult } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { parsePackageScript } from "./commandExecution/commandClassifier.js";
+import type { RunProjectCommandOptions } from "./commandRunner.js";
 
 export { parsePackageScript } from "./commandExecution/commandClassifier.js";
 
 type CommandToolDependencies = {
   evaluateCommandPolicy: (command: string) => CommandPolicyResult;
-  runProjectCommand: (command: string, cwd?: string, chatId?: string, confirmed?: boolean) => Promise<CommandResult>;
+  runProjectCommand: (command: string, cwd?: string, chatId?: string, confirmed?: boolean, options?: RunProjectCommandOptions) => Promise<CommandResult>;
   verifyPackageScript: (command: string, cwd?: string) => Promise<string | null>;
 };
 
@@ -46,6 +47,13 @@ function requiredString(args: Record<string, unknown>, name: string) {
   return value;
 }
 
+function optionalPositiveNumber(args: Record<string, unknown>, name: string) {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error(`${name} must be greater than zero`);
+  return value;
+}
+
 function summarizeOutput(value: string, maxLength = 4000) {
   return value.length > maxLength ? value.slice(value.length - maxLength) : value;
 }
@@ -68,7 +76,7 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
   return [
     {
       name: "runCommand",
-      description: "Run a workspace command after user approval. Use this for validation commands such as tests, typecheck, lint, build, or a user-requested command.",
+      description: "Run a workspace command after user approval. Use foreground for tests/lint/typecheck/build, background for dev/serve/watch and wait for readiness, or auto when uncertain. Never extend timeouts indefinitely to imitate background mode.",
       cacheable: false,
       parameters: {
         type: "object",
@@ -84,6 +92,23 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
           chatId: {
             type: "string",
             description: "Optional chat id used to associate command results with the current conversation."
+          },
+          mode: {
+            type: "string",
+            enum: ["foreground", "background", "auto"],
+            description: "Execution mode. Background returns when the service is ready instead of waiting for process exit."
+          },
+          waitTimeoutMs: {
+            type: "number",
+            description: "Maximum time to synchronously wait for completion or readiness. Defaults to 15000 for background services."
+          },
+          executionTimeoutMs: {
+            type: "number",
+            description: "Maximum process lifetime. Usually omit for background services."
+          },
+          readyPattern: {
+            type: "string",
+            description: "Optional regular expression that explicitly identifies service readiness in output."
           }
         },
         required: ["command"],
@@ -93,6 +118,12 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
         const command = requiredString(args, "command");
         const cwd = optionalString(args, "cwd") || undefined;
         const chatId = optionalString(args, "chatId") || undefined;
+        const rawMode = optionalString(args, "mode");
+        if (rawMode && !["foreground", "background", "auto"].includes(rawMode)) throw new Error("mode must be foreground, background, or auto");
+        const mode = rawMode as RunProjectCommandOptions["mode"];
+        const waitTimeoutMs = optionalPositiveNumber(args, "waitTimeoutMs");
+        const executionTimeoutMs = optionalPositiveNumber(args, "executionTimeoutMs");
+        const readyPattern = optionalString(args, "readyPattern") || undefined;
         const policy = dependencies.evaluateCommandPolicy(command);
 
         if (policy.level === "blocked") {
@@ -107,8 +138,9 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
 
         // Runtime 已经完成用户审批，这里仍传 confirmed=true，让 commandRunner 复用原有二次策略校验。
         runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status: "running", result: null }));
-        const result = await dependencies.runProjectCommand(command, cwd, chatId, true);
-        const status = result.status === "success" || result.status === "running" ? "success" : "failed";
+        const result = await dependencies.runProjectCommand(command, cwd, chatId, true, { mode, waitTimeoutMs, executionTimeoutMs, readyPattern });
+        // ready 的后台服务仍是 running，不把“可以继续下一步”伪装成进程已成功退出。
+        const status = result.status === "success" ? "success" : result.status === "running" ? "running" : "failed";
         runtime.agentContext.commandsRun = [
           ...(runtime.agentContext.commandsRun || []),
           { command, status, exitCode: result.exitCode }

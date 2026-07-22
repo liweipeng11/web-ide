@@ -69,6 +69,17 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
     await verifyPackageScript(command, cwd);
     const requestedMode = request.body?.mode;
     if (requestedMode !== undefined && !modes.has(requestedMode)) throw new HttpError(400, "mode must be foreground, background, or auto");
+    const readyPattern = request.body?.readyPattern;
+    if (readyPattern !== undefined && (typeof readyPattern !== "string" || readyPattern.length > 500)) {
+      throw new HttpError(400, "readyPattern must be a string of at most 500 characters");
+    }
+    if (readyPattern) {
+      try {
+        new RegExp(readyPattern);
+      } catch {
+        throw new HttpError(400, "readyPattern must be a valid regular expression");
+      }
+    }
 
     const execution = await service.start({
       command,
@@ -76,7 +87,8 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
       chatId: typeof request.body?.chatId === "string" ? request.body.chatId : undefined,
       taskSessionId: typeof request.body?.taskSessionId === "string" ? request.body.taskSessionId : undefined,
       mode: requestedMode,
-      executionTimeoutMs: optionalPositiveNumber(request.body?.executionTimeoutMs, "executionTimeoutMs")
+      executionTimeoutMs: optionalPositiveNumber(request.body?.executionTimeoutMs, "executionTimeoutMs"),
+      readyPattern
     });
     await dependencies.onStarted?.(execution.taskSessionId, execution.command);
 
@@ -115,6 +127,12 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
     response.json({ output: await service.readOutput(id, rawCursor) });
   }));
 
+  router.get("/command-executions/:id/summary", asyncRoute(async (request, response) => {
+    const id = routeId(request.params.id);
+    await requireExecution(id);
+    response.json({ summary: await service.getOutputSummary(id) });
+  }));
+
   router.post("/command-executions/:id/background", asyncRoute(async (request, response) => {
     const id = routeId(request.params.id);
     await requireExecution(id);
@@ -125,6 +143,14 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
     const id = routeId(request.params.id);
     await requireExecution(id);
     response.json({ execution: await service.stop(id) });
+  }));
+
+  router.delete("/command-executions/:id", asyncRoute(async (request, response) => {
+    const id = routeId(request.params.id);
+    const execution = await requireExecution(id);
+    if (execution.state === "queued" || execution.state === "running") throw new HttpError(409, "Stop the command execution before removing it");
+    await service.remove(id);
+    response.status(204).end();
   }));
 
   return router;

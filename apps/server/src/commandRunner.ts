@@ -10,6 +10,13 @@ import { commandExecutionService } from "./commandExecution/index.js";
 
 const commandTimeoutMs = 120_000;
 
+export type RunProjectCommandOptions = {
+  mode?: "foreground" | "background" | "auto";
+  waitTimeoutMs?: number;
+  executionTimeoutMs?: number;
+  readyPattern?: string;
+};
+
 export function resolveCommandCwd(cwd?: string) {
   const workspaceRoot = getWorkspaceRoot();
 
@@ -28,7 +35,7 @@ export function resolveCommandCwd(cwd?: string) {
 }
 
 /** 保留旧调用契约，内部统一委托给服务端 execution 内核。 */
-export async function runProjectCommand(command: string, cwd?: string, chatId?: string, confirmed = false) {
+export async function runProjectCommand(command: string, cwd?: string, chatId?: string, confirmed = false, options: RunProjectCommandOptions = {}) {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) throw new HttpError(400, "command is required");
 
@@ -38,17 +45,20 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
   if (policy.level === "confirm" && !confirmed) throw new HttpError(409, policy.reason);
 
   const longRunning = classifyCommand(trimmedCommand).kind === "long_running";
+  const requestedMode = options.mode ?? "auto";
+  const mode = requestedMode === "auto" ? (longRunning ? "background" : "foreground") : requestedMode;
   const started = await commandExecutionService.start({
     command: trimmedCommand,
     cwd: resolvedCwd,
     chatId,
-    mode: longRunning ? "background" : "foreground",
+    mode,
     // 长期服务由调用方主动停止；一次性命令仍保留原有 120 秒执行上限。
-    executionTimeoutMs: longRunning ? undefined : commandTimeoutMs
+    executionTimeoutMs: options.executionTimeoutMs ?? (mode === "background" ? undefined : commandTimeoutMs),
+    readyPattern: options.readyPattern
   });
   const execution = await commandExecutionService.waitForState(started.id, {
-    until: longRunning ? "ready_or_finished" : "finished",
-    timeoutMs: commandTimeoutMs,
+    until: mode === "background" ? "ready_or_finished" : "finished",
+    timeoutMs: options.waitTimeoutMs ?? (mode === "background" ? 15_000 : commandTimeoutMs),
     killOnTimeout: false
   });
   const { stdout, stderr } = commandExecutionService.readCapturedOutput(started.id);
@@ -70,6 +80,7 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
           ? "success"
           : "failed";
   const result: CommandResult = {
+    executionId: execution.id,
     command: trimmedCommand,
     chatId,
     cwd: resolvedCwd,
@@ -82,9 +93,17 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
     detectedUrls: execution.detectedUrls,
     waitTimedOut: execution.waitTimedOut,
     outputTruncated: execution.outputTruncated || summary.outputTruncated,
+    readiness: execution.readiness,
     startedAt: execution.startedAt,
     finishedAt: execution.finishedAt ?? new Date().toISOString()
   };
+
+  // Agent 默认只接收压缩后的有界输出；完整日志始终保存在 execution 独立日志文件中供 UI 查看。
+  const modelOutput = await commandExecutionService.getOutputSummary(started.id);
+  result.stdout = modelOutput.output;
+  result.stderr = "";
+  result.summary = modelOutput.summary;
+  result.outputTruncated = result.outputTruncated || modelOutput.truncated;
 
   await saveCommandResult(result);
   return result;

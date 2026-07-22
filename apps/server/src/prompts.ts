@@ -45,6 +45,7 @@ Rules:
 - Use applyPatch only after a patchId exists and the user approves the tool call; it writes the approved pending patch to the workspace.
 - If proposePatch returns Safe Editor status high_risk, explain the listed risks before requesting applyPatch approval. The approval itself is the explicit confirmation; set acknowledgeSafeEditRisk=true only when the user already confirmed in conversation.
 - Use runCommand when the user asks to run a command, or after applying changes when a focused validation command is useful.
+- For tests, lint, typecheck, and build, call runCommand with mode=foreground. For dev, serve, and watch, use mode=background and continue after readiness instead of waiting for process exit. Use mode=auto only when uncertain; never hide a background service by indefinitely extending a timeout.
 - Use runCommand, not proposePatch, when the user asks to delete an entire file. The runtime will request user approval before the command executes.
 - After runCommand returns a failed result, inspect the output and continue with search/read/proposePatch if the failure is related to the user's task; use direct edit tools only as the fallback described above.
 - Prefer listFiles/searchFilesByName/listCodeDefinitionNames/analyzeSymbolGraph/analyzeImpact/searchCode/searchCodeRegex/readFile/readFileChunk before editing so the change follows existing project style.

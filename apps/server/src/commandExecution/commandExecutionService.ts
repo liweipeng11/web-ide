@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { classifyCommand } from "./commandClassifier.js";
-import { detectLocalReadyUrl, detectUrls, stripAnsi } from "./commandOutputParser.js";
+import { detectUrls, stripAnsi } from "./commandOutputParser.js";
+import { detectCommandReadiness } from "./commandReadinessDetector.js";
+import { createCommandOutputSummary } from "./commandOutputSummary.js";
 import { CommandOutputBuffer } from "./commandOutputBuffer.js";
+import type { CommandExecutionStore } from "./commandExecutionStore.js";
 import { childProcessFactory, type CommandProcessFactory, type CommandProcessHandle, type CommandProcessStream } from "./commandProcess.js";
 import type {
   CommandExecution,
@@ -22,6 +25,7 @@ type ExecutionRecord = {
   stdout: CommandOutputBuffer;
   stderr: CommandOutputBuffer;
   timeout?: NodeJS.Timeout;
+  readyPattern?: string;
 };
 
 export type CommandExecutionServiceOptions = {
@@ -29,6 +33,7 @@ export type CommandExecutionServiceOptions = {
   maxOutputLength?: number;
   now?: () => Date;
   createId?: () => string;
+  store?: CommandExecutionStore;
 };
 
 function cloneExecution(execution: CommandExecution): CommandExecution {
@@ -43,32 +48,40 @@ export class CommandExecutionService {
   private readonly maxOutputLength: number;
   private readonly now: () => Date;
   private readonly createId: () => string;
+  private readonly store?: CommandExecutionStore;
+  private readonly hydration: Promise<void>;
 
   constructor(options: CommandExecutionServiceOptions = {}) {
     this.processFactory = options.processFactory ?? childProcessFactory;
     this.maxOutputLength = options.maxOutputLength ?? 80_000;
     this.now = options.now ?? (() => new Date());
     this.createId = options.createId ?? (() => `cmd-${randomUUID()}`);
+    this.store = options.store;
+    this.hydration = this.hydrate();
   }
 
   async start(input: StartCommandInput): Promise<CommandExecution> {
+    await this.hydration;
     const command = input.command.trim();
     if (!command) throw new Error("command is required");
     if (!input.cwd.trim()) throw new Error("cwd is required");
     if (input.executionTimeoutMs !== undefined && (!Number.isFinite(input.executionTimeoutMs) || input.executionTimeoutMs <= 0)) {
       throw new Error("executionTimeoutMs must be greater than zero");
     }
+    if (input.readyPattern) detectCommandReadiness("", { readyPattern: input.readyPattern });
 
     const longRunning = classifyCommand(command).kind === "long_running";
+    const requestedMode = input.mode ?? "auto";
+    const mode = requestedMode === "auto" ? (longRunning ? "background" : "foreground") : requestedMode;
     const execution: CommandExecution = {
       id: this.createId(),
       command,
       cwd: input.cwd,
       chatId: input.chatId,
       taskSessionId: input.taskSessionId,
-      mode: input.mode ?? "auto",
+      mode,
       state: "queued",
-      readiness: longRunning ? "pending" : "not_applicable",
+      readiness: mode === "background" ? "pending" : "not_applicable",
       detectedUrls: [],
       exitCode: null,
       waitTimedOut: false,
@@ -80,9 +93,11 @@ export class CommandExecutionService {
       execution,
       output: new CommandOutputBuffer(this.maxOutputLength),
       stdout: new CommandOutputBuffer(this.maxOutputLength),
-      stderr: new CommandOutputBuffer(this.maxOutputLength)
+      stderr: new CommandOutputBuffer(this.maxOutputLength),
+      readyPattern: input.readyPattern
     };
     this.records.set(execution.id, record);
+    await this.persistExecution(execution);
 
     try {
       this.transition(record, "running");
@@ -95,13 +110,14 @@ export class CommandExecutionService {
         }
       );
       execution.pid = record.process.pid;
+      await this.persistExecution(execution);
       this.emit({ type: "started", execution: cloneExecution(execution) });
 
       if (input.executionTimeoutMs !== undefined) {
         record.timeout = setTimeout(() => {
           if (terminalStates.has(execution.state)) return;
           this.finish(record, "failed", { failureReason: "execution_timeout" });
-          record.process?.kill();
+          void record.process?.kill();
         }, input.executionTimeoutMs);
       }
     } catch {
@@ -112,6 +128,7 @@ export class CommandExecutionService {
   }
 
   async waitForState(id: string, options: WaitOptions = {}): Promise<CommandExecution> {
+    await this.hydration;
     const record = this.requireRecord(id);
     const until = options.until ?? "finished";
     if (this.matchesWait(record.execution, until)) return cloneExecution(record.execution);
@@ -133,7 +150,10 @@ export class CommandExecutionService {
       if (options.timeoutMs !== undefined) {
         timeout = setTimeout(() => {
           cleanup();
-          if (!terminalStates.has(record.execution.state)) record.execution.waitTimedOut = true;
+          if (!terminalStates.has(record.execution.state)) {
+            record.execution.waitTimedOut = true;
+            void this.persistExecution(record.execution);
+          }
           if (options.killOnTimeout && !terminalStates.has(record.execution.state)) this.stop(id);
           resolve(cloneExecution(record.execution));
         }, Math.max(0, options.timeoutMs));
@@ -142,11 +162,13 @@ export class CommandExecutionService {
   }
 
   async get(id: string) {
+    await this.hydration;
     const execution = this.records.get(id)?.execution;
     return execution ? cloneExecution(execution) : null;
   }
 
   async list(filter: CommandExecutionFilter = {}) {
+    await this.hydration;
     return [...this.records.values()]
       .map(({ execution }) => execution)
       .filter((execution) => !filter.chatId || execution.chatId === filter.chatId)
@@ -156,6 +178,8 @@ export class CommandExecutionService {
   }
 
   async readOutput(id: string, cursor = 0): Promise<CommandOutputChunk> {
+    await this.hydration;
+    if (this.store) return this.store.readOutput(id, cursor);
     const snapshot = this.requireRecord(id).output.read(cursor);
     return { id, ...snapshot };
   }
@@ -167,19 +191,48 @@ export class CommandExecutionService {
   }
 
   async moveToBackground(id: string) {
+    await this.hydration;
     const record = this.requireRecord(id);
     record.execution.mode = "background";
+    if (record.execution.state === "running" && record.execution.readiness === "not_applicable") {
+      record.execution.readiness = "pending";
+      const readiness = detectCommandReadiness(stripAnsi(record.output.tail()), { readyPattern: record.readyPattern });
+      if (readiness.ready) {
+        record.execution.readiness = "ready";
+        record.execution.readyUrl = readiness.readyUrl;
+        record.execution.readyAt = this.now().toISOString();
+        this.emit({ type: "ready", execution: cloneExecution(record.execution) });
+      }
+    }
+    await this.persistExecution(record.execution);
     return cloneExecution(record.execution);
   }
 
   async stop(id: string) {
+    await this.hydration;
     const record = this.requireRecord(id);
     if (terminalStates.has(record.execution.state)) return cloneExecution(record.execution);
 
     // 先固化用户取消语义，随后到达的 exit/error 事件不会覆盖最终状态或重复发出完成事件。
     this.finish(record, "cancelled");
-    record.process?.kill();
+    await record.process?.kill();
+    await this.persistExecution(record.execution);
     return cloneExecution(record.execution);
+  }
+
+  async getOutputSummary(id: string, maxLength = 4_000) {
+    const execution = await this.get(id);
+    if (!execution) throw new Error(`Command execution not found: ${id}`);
+    const output = await this.readOutput(id, 0);
+    return createCommandOutputSummary(execution, output.data, maxLength);
+  }
+
+  async remove(id: string) {
+    await this.hydration;
+    const record = this.requireRecord(id);
+    if (!terminalStates.has(record.execution.state)) throw new Error("Running command executions cannot be removed");
+    this.records.delete(id);
+    await this.store?.delete(id);
   }
 
   subscribe(listener: CommandExecutionListener) {
@@ -193,18 +246,22 @@ export class CommandExecutionService {
     record[stream].append(data);
     record.execution.outputCursor = chunk.nextCursor;
     record.execution.outputTruncated = record.output.outputTruncated || record.stdout.outputTruncated || record.stderr.outputTruncated;
+    void this.store?.appendOutput(record.execution.id, data).catch(() => undefined);
 
     const cleanOutput = stripAnsi(record.output.tail());
     record.execution.detectedUrls = detectUrls(cleanOutput);
     if (record.execution.state === "running" && record.execution.readiness === "pending") {
-      const readyUrl = detectLocalReadyUrl(cleanOutput);
-      if (readyUrl) {
+      const readiness = detectCommandReadiness(cleanOutput, { readyPattern: record.readyPattern });
+      if (readiness.ready) {
         record.execution.readiness = "ready";
-        record.execution.readyUrl = readyUrl;
+        record.execution.readyUrl = readiness.readyUrl;
         record.execution.readyAt = this.now().toISOString();
+        void this.persistExecution(record.execution);
         this.emit({ type: "ready", execution: cloneExecution(record.execution) });
       }
     }
+
+    void this.persistExecution(record.execution);
 
     this.emit({ type: "output", id: record.execution.id, cursor: chunk.cursor, data, stream });
   }
@@ -224,6 +281,7 @@ export class CommandExecutionService {
     clearTimeout(record.timeout);
     this.transition(record, state);
     Object.assign(record.execution, details, { finishedAt: this.now().toISOString() });
+    void this.persistExecution(record.execution);
     this.emit({ type: "finished", execution: cloneExecution(record.execution) });
   }
 
@@ -248,5 +306,22 @@ export class CommandExecutionService {
 
   private emit(event: CommandExecutionEvent) {
     for (const listener of this.listeners) listener(event);
+  }
+
+  private async hydrate() {
+    if (!this.store) return;
+    const executions = await this.store.load();
+    for (const execution of executions) {
+      this.records.set(execution.id, {
+        execution,
+        output: new CommandOutputBuffer(this.maxOutputLength),
+        stdout: new CommandOutputBuffer(this.maxOutputLength),
+        stderr: new CommandOutputBuffer(this.maxOutputLength)
+      });
+    }
+  }
+
+  private async persistExecution(execution: CommandExecution) {
+    await this.store?.upsert(cloneExecution(execution));
   }
 }

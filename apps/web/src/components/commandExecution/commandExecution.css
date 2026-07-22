@@ -1,0 +1,72 @@
+.terminal-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.command-execution-list {
+  background: #0f172a;
+  border-right: 1px solid #263241;
+  display: flex;
+  flex: 0 0 250px;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.command-execution-list > header {
+  align-items: center;
+  color: #cbd5e1;
+  display: flex;
+  font-size: 10px;
+  justify-content: space-between;
+  padding: 7px 9px;
+}
+
+.command-execution-items { overflow: auto; }
+
+.command-execution-item {
+  align-items: stretch;
+  border-top: 1px solid #1e293b;
+  display: flex;
+}
+
+.command-execution-item.active { background: #172554; }
+
+.command-execution-main {
+  background: transparent;
+  border: 0;
+  color: #e2e8f0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.command-execution-command,
+.command-execution-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-execution-command { font-size: 10px; }
+.command-execution-meta, .command-execution-url { color: #94a3b8; font-size: 9px; margin-top: 3px; }
+.command-execution-meta strong[data-state="ready"] { color: #86efac; }
+.command-execution-meta strong[data-state="failed"] { color: #fca5a5; }
+
+.command-execution-item-actions {
+  align-items: center;
+  display: flex;
+  padding-right: 7px;
+}
+
+.command-execution-item-actions button { font-size: 9px; min-height: 22px; padding: 2px 6px; }
+
+.terminal-content > .terminal-body { min-width: 0; }
+
+@media (max-width: 760px) {
+  .command-execution-list { flex-basis: 180px; }
+}

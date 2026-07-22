@@ -11,6 +11,7 @@ import {
   type CommandResult
 } from "../api";
 import Icon from "./Icon";
+import CommandExecutionList from "./commandExecution/CommandExecutionList";
 
 type Props = {
   workspaceRoot: string;
@@ -128,7 +129,11 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
   async function subscribeExecution(execution: CommandExecution) {
     setActiveExecution(execution);
     subscribedIdsRef.current.add(execution.id);
-    const cursor = cursorByExecutionRef.current.get(execution.id) || 0;
+    // 切换任务时从磁盘日志重新绘制完整视图，后续增量仍由 cursor 去重。
+    terminalRef.current?.clear();
+    cursorByExecutionRef.current.set(execution.id, 0);
+    outputByExecutionRef.current.set(execution.id, "");
+    const cursor = 0;
 
     // WebSocket 可能在断线期间丢失事件，订阅前先用 HTTP cursor 补拉。
     try {
@@ -284,7 +289,10 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
         <strong data-status={status}>{status}</strong>
         <button type="button" className="terminal-close icon-button" title="关闭终端 (Ctrl+`)" aria-label="关闭终端" onClick={onClose}><Icon name="close" /></button>
       </div>
-      <div className="terminal-body" ref={containerRef} />
+      <div className="terminal-content">
+        <CommandExecutionList activeExecutionId={activeExecution?.id} onOpen={(execution) => void subscribeExecution(execution)} />
+        <div className="terminal-body" ref={containerRef} />
+      </div>
     </section>
   );
 }

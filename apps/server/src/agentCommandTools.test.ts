@@ -34,11 +34,11 @@ function createRuntime(onAgentStep?: (step: AgentStep) => void): AgentToolRuntim
   };
 }
 
-function createTool(options: { policy?: CommandPolicyResult; result?: CommandResult; onRun?: () => void; scriptProblem?: string | null } = {}) {
+function createTool(options: { policy?: CommandPolicyResult; result?: CommandResult; onRun?: (runOptions?: import("./commandRunner.js").RunProjectCommandOptions) => void; scriptProblem?: string | null } = {}) {
   return createCommandAgentToolDefinitions({
     evaluateCommandPolicy: () => options.policy || { level: "safe", reason: "allowlisted" },
-    runProjectCommand: async () => {
-      options.onRun?.();
+    runProjectCommand: async (_command, _cwd, _chatId, _confirmed, runOptions) => {
+      options.onRun?.(runOptions);
       return options.result || commandResult("success");
     },
     verifyPackageScript: async () => options.scriptProblem || null
@@ -72,6 +72,15 @@ test("runCommand returns failed status details for model repair loop", async () 
   assert.equal(summary.result?.exitCode, 1);
   assert.match(summary.result?.stderr || "", /tests failed/);
   assert.deepEqual(commandStatuses(steps), ["running", "failed"]);
+});
+
+test("runCommand 将后台模式和超时参数传给统一执行内核", async () => {
+  let received: import("./commandRunner.js").RunProjectCommandOptions | undefined;
+  const steps: AgentStep[] = [];
+  const tool = createTool({ result: commandResult("running", "npm run dev"), onRun: (options) => { received = options; } });
+  await tool.execute({ command: "npm run dev", mode: "background", waitTimeoutMs: 15000, readyPattern: "ready" }, createRuntime((step) => steps.push(step)));
+  assert.deepEqual(received, { mode: "background", waitTimeoutMs: 15000, executionTimeoutMs: undefined, readyPattern: "ready" });
+  assert.deepEqual(commandStatuses(steps), ["running", "running"]);
 });
 
 test("runCommand blocks command when command policy rejects it", async () => {
