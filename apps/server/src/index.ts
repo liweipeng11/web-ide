@@ -39,6 +39,7 @@ import { createLanguageServiceRouter, languageServiceGateway } from "./languageS
 import { createInlineEditRouter } from "./inlineEdit/routes.js";
 import { initializeProviderSettings } from "./providerSettingsStore.js";
 import { createCommandExecutionRouter } from "./commandExecution/commandExecutionRoutes.js";
+import { commandExecutionService } from "./commandExecution/index.js";
 
 const initialProviders = await initializeProviderSettings();
 configureProviderGateway(initialProviders.filter((provider) => provider.enabled));
@@ -65,7 +66,17 @@ app.use(express.json({ limit: "5mb" }));
 app.use("/api", createCapabilityRouter({ flags: config.featureFlags }));
 if (config.featureFlags.modelProviderGateway) app.use("/api", createModelRouter());
 app.use("/api", createSearchRouter());
-app.use("/api", createCommandExecutionRouter({ onStarted: (taskSessionId, command) => addTaskSessionCommand(taskSessionId, command).then(() => undefined) }));
+app.use("/api", createCommandExecutionRouter({
+  v2Enabled: config.featureFlags.commandExecutionV2,
+  onStarted: (taskSessionId, command) => addTaskSessionCommand(taskSessionId, command).then(() => undefined)
+}));
+
+// 生命周期日志只包含 execution ID 和状态，不记录命令输出或敏感输入。
+commandExecutionService.subscribe((event) => {
+  if (event.type === "output") return;
+  const execution = event.execution;
+  console.info(`[command-execution] id=${execution.id} event=${event.type} state=${execution.state}`);
+});
 app.use("/api/git-workflow", createGitWorkflowRouter());
 app.use("/api/vue2-template", createVue2TemplateRouter());
 app.use("/api/project-memory", createProjectMemoryRouter());
@@ -1276,6 +1287,7 @@ server.listen(config.serverPort, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void languageServiceGateway.disposeAll().finally(() => server.close(() => process.exit(0)));
+    void Promise.allSettled([languageServiceGateway.disposeAll(), commandExecutionService.shutdown()])
+      .finally(() => server.close(() => process.exit(0)));
   });
 }

@@ -3,6 +3,7 @@ export type FeatureFlags = {
   modelProviderGateway: boolean;
   lsp: boolean;
   inlineEdit: boolean;
+  commandExecutionV2: boolean;
 };
 
 export type FeatureImplementations = Record<keyof FeatureFlags, boolean>;
@@ -13,14 +14,16 @@ const featureFlagEnvironmentNames: Record<keyof FeatureFlags, string> = {
   contextBudgetV2: "CONTEXT_BUDGET_V2_ENABLED",
   modelProviderGateway: "MODEL_PROVIDER_GATEWAY_ENABLED",
   lsp: "LSP_ENABLED",
-  inlineEdit: "INLINE_EDIT_ENABLED"
+  inlineEdit: "INLINE_EDIT_ENABLED",
+  commandExecutionV2: "COMMAND_EXECUTION_V2_ENABLED"
 };
 
 export const defaultFeatureFlags: FeatureFlags = {
   contextBudgetV2: true,
   modelProviderGateway: true,
   lsp: true,
-  inlineEdit: true
+  inlineEdit: true,
+  commandExecutionV2: true
 };
 
 function parseBoolean(value: string | undefined, defaultValue: boolean) {
@@ -82,5 +85,6 @@ export const implementedFeatures: FeatureImplementations = {
   contextBudgetV2: true,
   modelProviderGateway: true,
   lsp: true,
-  inlineEdit: true
+  inlineEdit: true,
+  commandExecutionV2: true
 };

@@ -12,6 +12,7 @@ import { commandExecutionService, type CommandExecutionService } from "./index.j
 type RouteDependencies = {
   service?: CommandExecutionService;
   onStarted?: (taskSessionId: string | undefined, command: string) => Promise<void>;
+  v2Enabled?: boolean;
 };
 
 const modes = new Set<CommandExecutionMode>(["foreground", "background", "auto"]);
@@ -58,6 +59,7 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
   };
 
   router.post("/command-executions", asyncRoute(async (request, response) => {
+    if (dependencies.v2Enabled === false) throw new HttpError(503, "Command Execution V2 is disabled; use the compatibility command endpoint");
     const command = typeof request.body?.command === "string" ? request.body.command.trim() : "";
     if (!command) throw new HttpError(400, "command is required");
 
@@ -87,6 +89,7 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
       chatId: typeof request.body?.chatId === "string" ? request.body.chatId : undefined,
       taskSessionId: typeof request.body?.taskSessionId === "string" ? request.body.taskSessionId : undefined,
       mode: requestedMode,
+      initiator: "user",
       executionTimeoutMs: optionalPositiveNumber(request.body?.executionTimeoutMs, "executionTimeoutMs"),
       readyPattern
     });
@@ -112,6 +115,10 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
       filter.state = request.query.state as CommandExecutionState;
     }
     response.json({ executions: await service.list(filter) });
+  }));
+
+  router.get("/command-executions/metrics", asyncRoute(async (_request, response) => {
+    response.json({ metrics: await service.getMetrics() });
   }));
 
   router.get("/command-executions/:id", asyncRoute(async (request, response) => {
@@ -143,6 +150,13 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
     const id = routeId(request.params.id);
     await requireExecution(id);
     response.json({ execution: await service.stop(id) });
+  }));
+
+  router.post("/command-executions/:id/pin", asyncRoute(async (request, response) => {
+    const id = routeId(request.params.id);
+    await requireExecution(id);
+    if (typeof request.body?.pinned !== "boolean") throw new HttpError(400, "pinned must be a boolean");
+    response.json({ execution: await service.setPinned(id, request.body.pinned) });
   }));
 
   router.delete("/command-executions/:id", asyncRoute(async (request, response) => {

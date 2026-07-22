@@ -722,6 +722,7 @@ export type CommandResult = {
   waitTimedOut?: boolean;
   outputTruncated?: boolean;
   readiness?: CommandReadiness;
+  interaction?: CommandExecution["interaction"];
   startedAt: string;
   finishedAt: string;
 };
@@ -729,13 +730,16 @@ export type CommandResult = {
 export type CommandExecutionState = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type CommandExecutionMode = "foreground" | "background" | "auto";
 export type CommandReadiness = "pending" | "ready" | "not_applicable";
+export type ShellCapability = "rich" | "basic" | "none";
 export type CommandExecution = {
   id: string;
   command: string;
   cwd: string;
   chatId?: string;
   taskSessionId?: string;
+  initiator: "agent" | "validation" | "user";
   mode: CommandExecutionMode;
+  shell: { name: string; capability: ShellCapability };
   state: CommandExecutionState;
   readiness: CommandReadiness;
   readyUrl?: string;
@@ -746,6 +750,8 @@ export type CommandExecution = {
   waitTimedOut: boolean;
   outputTruncated: boolean;
   outputCursor: number;
+  interaction: { state: "none" | "needs_input"; kind?: "password" | "passphrase" | "pin" | "verification_code" | "login_confirmation" | "unknown"; detectedAt?: string };
+  pinned: boolean;
   startedAt: string;
   readyAt?: string;
   finishedAt?: string;
@@ -827,7 +833,7 @@ export type PickWorkspaceResponse = WorkspaceResponse & {
 
 export type ServerCapabilities = {
   version: 1;
-  features: Record<"contextBudgetV2" | "modelProviderGateway" | "lsp" | "inlineEdit", { enabled: boolean; available: boolean; active: boolean; path: "legacy" | "next" }>;
+  features: Record<"contextBudgetV2" | "modelProviderGateway" | "lsp" | "inlineEdit" | "commandExecutionV2", { enabled: boolean; available: boolean; active: boolean; path: "legacy" | "next" }>;
   models: { selection: boolean; configured: boolean; defaultModel: string; catalogEndpoint?: string };
 };
 
@@ -1059,6 +1065,14 @@ export function fetchCommandExecutionOutput(id: string, cursor = 0) {
 
 export function stopCommandExecution(id: string) {
   return request<{ execution: CommandExecution }>(`/api/command-executions/${encodeURIComponent(id)}/stop`, { method: "POST", body: "{}" });
+}
+
+export function pinCommandExecution(id: string, pinned: boolean) {
+  return request<{ execution: CommandExecution }>(`/api/command-executions/${encodeURIComponent(id)}/pin`, { method: "POST", body: JSON.stringify({ pinned }) });
+}
+
+export function fetchCommandExecutionMetrics() {
+  return request<{ metrics: Record<string, unknown> }>("/api/command-executions/metrics");
 }
 
 export function moveCommandExecutionToBackground(id: string) {

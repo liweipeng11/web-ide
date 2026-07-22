@@ -31,14 +31,16 @@ const featureLabels: Record<keyof FeatureFlags, string> = {
   contextBudgetV2: "Context Budget V2",
   modelProviderGateway: "Model Provider Gateway",
   lsp: "Language Service / LSP",
-  inlineEdit: "Inline Edit"
+  inlineEdit: "Inline Edit",
+  commandExecutionV2: "Command Execution V2"
 };
 
 const disabledEnvironment: NodeJS.ProcessEnv = {
   CONTEXT_BUDGET_V2_ENABLED: "0",
   MODEL_PROVIDER_GATEWAY_ENABLED: "0",
   LSP_ENABLED: "0",
-  INLINE_EDIT_ENABLED: "0"
+  INLINE_EDIT_ENABLED: "0",
+  COMMAND_EXECUTION_V2_ENABLED: "0"
 };
 
 /**

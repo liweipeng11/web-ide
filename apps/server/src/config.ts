@@ -98,6 +98,10 @@ export const config = {
   stateFilePath: process.env.STATE_FILE_PATH || path.join(process.env.STATE_DIRECTORY || defaultStateDirectory, "state.json"),
   legacyStateFilePath: path.join(legacyStateDirectory, "state.json"),
   serverPort: Number(process.env.SERVER_PORT || 3001),
+  commandExecutionRetentionLimit: numberFromEnv("COMMAND_EXECUTION_RETENTION_LIMIT", 100),
+  commandExecutionRetentionDays: numberFromEnv("COMMAND_EXECUTION_RETENTION_DAYS", 30),
+  commandExecutionMaxLogFileBytes: numberFromEnv("COMMAND_EXECUTION_MAX_LOG_FILE_BYTES", 5 * 1024 * 1024),
+  commandExecutionMaxWorkspaceLogBytes: numberFromEnv("COMMAND_EXECUTION_MAX_WORKSPACE_LOG_BYTES", 50 * 1024 * 1024),
   featureFlags: readFeatureFlags(),
   projectMemoryFeatureFlags: readProjectMemoryFeatureFlags()
 };

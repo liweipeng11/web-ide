@@ -138,7 +138,7 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
 
         // Runtime 已经完成用户审批，这里仍传 confirmed=true，让 commandRunner 复用原有二次策略校验。
         runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status: "running", result: null }));
-        const result = await dependencies.runProjectCommand(command, cwd, chatId, true, { mode, waitTimeoutMs, executionTimeoutMs, readyPattern });
+        const result = await dependencies.runProjectCommand(command, cwd, chatId, true, { mode, waitTimeoutMs, executionTimeoutMs, readyPattern, initiator: "agent" });
         // ready 的后台服务仍是 running，不把“可以继续下一步”伪装成进程已成功退出。
         const status = result.status === "success" ? "success" : result.status === "running" ? "running" : "failed";
         runtime.agentContext.commandsRun = [

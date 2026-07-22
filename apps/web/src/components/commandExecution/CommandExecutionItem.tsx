@@ -19,12 +19,13 @@ function durationLabel(execution: CommandExecution, now: number) {
 /** 展示单条后台任务的关键状态与控制入口。 */
 export default function CommandExecutionItem({ execution, now, active, onOpen, onStop, onRemove }: Props) {
   const running = execution.state === "queued" || execution.state === "running";
-  const status = execution.readiness === "ready" ? "ready" : execution.state;
+  const status = execution.interaction.state === "needs_input" ? "needs_input" : execution.readiness === "ready" ? "ready" : execution.state;
   return (
     <article className={`command-execution-item${active ? " active" : ""}`}>
       <button className="command-execution-main" type="button" onClick={() => onOpen(execution)} title={execution.command}>
         <span className="command-execution-command">{execution.command}</span>
         <span className="command-execution-meta"><strong data-state={status}>{status}</strong> · {durationLabel(execution, now)}</span>
+        {execution.interaction.state === "needs_input" && <span className="command-execution-url">需要用户在终端中安全输入，Agent 已暂停等待</span>}
         {execution.readyUrl && <span className="command-execution-url">{execution.readyUrl}</span>}
       </button>
       <div className="command-execution-item-actions">

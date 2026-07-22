@@ -7,14 +7,14 @@ import { createServerCapabilities, defaultFeatureFlags, readFeatureFlags, resolv
 
 test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {
   assert.deepEqual(readFeatureFlags({}), defaultFeatureFlags);
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on" }), { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true });
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off" }), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false });
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true" }), { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true });
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0" }), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false });
   assert.deepEqual(readFeatureFlags({ LSP_ENABLED: "invalid-value" }), defaultFeatureFlags);
 });
 
 test("Capability API 返回脱敏能力快照", async () => {
   const app = express();
-  app.use("/api", createCapabilityRouter({ flags: { contextBudgetV2: true, modelProviderGateway: true, lsp: false, inlineEdit: false }, implementations: { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false }, aiConfigured: true, defaultModel: "mock-model" }));
+  app.use("/api", createCapabilityRouter({ flags: { contextBudgetV2: true, modelProviderGateway: true, lsp: false, inlineEdit: false, commandExecutionV2: true }, implementations: { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false }, aiConfigured: true, defaultModel: "mock-model" }));
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
@@ -39,11 +39,11 @@ test("Feature Flag 仅在实现可用时切换新路径，否则保持旧路径"
   assert.equal(selectFeaturePath(true, true, () => "new", () => "legacy"), "new");
 });
 
-test("四项 Feature Flag 分别裁决 legacy 和 next 路径", () => {
-  const names = ["contextBudgetV2", "modelProviderGateway", "lsp", "inlineEdit"] as const;
-  const allAvailable = { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true };
+test("各项 Feature Flag 分别裁决 legacy 和 next 路径", () => {
+  const names = ["contextBudgetV2", "modelProviderGateway", "lsp", "inlineEdit", "commandExecutionV2"] as const;
+  const allAvailable = { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true };
   for (const name of names) {
-    const disabled = { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false } satisfies FeatureFlags;
+    const disabled = { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false } satisfies FeatureFlags;
     assert.equal(resolveFeaturePath(name, disabled, allAvailable), "legacy");
 
     const enabled = { ...disabled, [name]: true };

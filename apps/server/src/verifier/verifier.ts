@@ -45,7 +45,11 @@ export function createVerifier(dependencies: VerifierDependencies = defaultDepen
         return { status: "needs_confirmation", plannedCommands, plan, executions, failedExecution: execution };
       }
 
-      const result = await dependencies.runProjectCommand(command.command, undefined, undefined, options.confirmed || policy.level === "safe");
+      const result = await dependencies.runProjectCommand(command.command, undefined, undefined, options.confirmed || policy.level === "safe", {
+        initiator: "validation",
+        // 仅验证计划中的构建、测试、检查命令使用 CI，避免改变开发服务器行为。
+        ci: true
+      });
       const completedExecution = {
         ...execution,
         result,

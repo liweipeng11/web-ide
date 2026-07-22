@@ -15,6 +15,8 @@ export type RunProjectCommandOptions = {
   waitTimeoutMs?: number;
   executionTimeoutMs?: number;
   readyPattern?: string;
+  initiator?: "agent" | "validation" | "user";
+  ci?: boolean;
 };
 
 export function resolveCommandCwd(cwd?: string) {
@@ -52,6 +54,8 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
     cwd: resolvedCwd,
     chatId,
     mode,
+    initiator: options.initiator ?? "user",
+    ci: options.ci,
     // 长期服务由调用方主动停止；一次性命令仍保留原有 120 秒执行上限。
     executionTimeoutMs: options.executionTimeoutMs ?? (mode === "background" ? undefined : commandTimeoutMs),
     readyPattern: options.readyPattern
@@ -72,7 +76,7 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
     longRunning
   });
   const status: CommandResult["status"] =
-    execution.state === "running" && execution.readiness === "ready"
+    execution.state === "running" && (execution.readiness === "ready" || execution.interaction.state === "needs_input")
       ? "running"
       : execution.waitTimedOut || execution.failureReason === "execution_timeout"
         ? "timeout"
@@ -94,6 +98,7 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
     waitTimedOut: execution.waitTimedOut,
     outputTruncated: execution.outputTruncated || summary.outputTruncated,
     readiness: execution.readiness,
+    interaction: execution.interaction,
     startedAt: execution.startedAt,
     finishedAt: execution.finishedAt ?? new Date().toISOString()
   };

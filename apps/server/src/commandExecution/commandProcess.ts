@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import type { ShellLaunchSpec } from "./shellCapability.js";
 
 export type CommandProcessStream = "stdout" | "stderr";
 
@@ -17,6 +18,7 @@ export type StartCommandProcessOptions = {
   command: string;
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  shell: ShellLaunchSpec;
 };
 
 export type CommandProcessFactory = {
@@ -26,13 +28,16 @@ export type CommandProcessFactory = {
 /** 隔离 Node 子进程细节，使执行状态机可以通过可控夹具测试。 */
 export const childProcessFactory: CommandProcessFactory = {
   start(options, listeners) {
-    const child = spawn(options.command, {
+    const sharedOptions = {
       cwd: options.cwd,
-      shell: true,
       env: options.env ?? process.env,
       // Unix 使用独立进程组，停止 dev server 时可以连同 shell 子进程一起回收。
       detached: process.platform !== "win32"
-    });
+    };
+    // CMD/Unix shell 直接接收完整命令串，避免 Node 参数转义改变引号语义；PowerShell 使用固定安全参数。
+    const child = options.shell.name === "powershell"
+      ? spawn(options.shell.file, options.shell.args, sharedOptions)
+      : spawn(options.command, { ...sharedOptions, shell: options.shell.file });
 
     child.stdout?.on("data", (chunk: Buffer) => listeners.onData("stdout", chunk.toString("utf8")));
     child.stderr?.on("data", (chunk: Buffer) => listeners.onData("stderr", chunk.toString("utf8")));

@@ -28,11 +28,11 @@ function createService() {
   return new CommandExecutionService({ processFactory, createId: () => `cmd-route-${++sequence}` });
 }
 
-async function createTestServer(workspaceRoot: string) {
+async function createTestServer(workspaceRoot: string, options: { v2Enabled?: boolean } = {}) {
   await setWorkspaceRoot(workspaceRoot, { persist: false });
   const app = express();
   app.use(express.json());
-  app.use("/api", createCommandExecutionRouter({ service: createService() }));
+  app.use("/api", createCommandExecutionRouter({ service: createService(), v2Enabled: options.v2Enabled }));
   app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
     response.status(error instanceof HttpError ? error.status : 500).json({ error: error instanceof Error ? error.message : "Internal server error" });
   });
@@ -79,11 +79,25 @@ test("execution HTTP API 支持启动、查询、列表、cursor 输出和后台
   assert.equal(moved.data.execution.mode, "background");
   const stopped = await requestJson(server.baseUrl, `/api/command-executions/${backgroundId}/stop`, "POST", {});
   assert.equal(stopped.data.execution.state, "cancelled");
+  const pinned = await requestJson(server.baseUrl, `/api/command-executions/${backgroundId}/pin`, "POST", { pinned: true });
+  assert.equal(pinned.data.execution.pinned, true);
+  const metrics = await requestJson(server.baseUrl, "/api/command-executions/metrics");
+  assert.equal(metrics.data.metrics.command_execution_started_total, 2);
   const summary = await requestJson(server.baseUrl, `/api/command-executions/${id}/summary`);
   assert.match(summary.data.summary.output, /123/);
   const removed = await fetch(`${server.baseUrl}/api/command-executions/${backgroundId}`, { method: "DELETE" });
   assert.equal(removed.status, 204);
   assert.equal((await requestJson(server.baseUrl, `/api/command-executions/${backgroundId}`)).response.status, 404);
+});
+
+test("Feature Flag 关闭时拒绝 V2 启动并提示兼容端点", async (context) => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "command-routes-flag-"));
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  const server = await createTestServer(workspaceRoot, { v2Enabled: false });
+  context.after(() => server.close());
+  const result = await requestJson(server.baseUrl, "/api/command-executions", "POST", { command: "npm test" });
+  assert.equal(result.response.status, 503);
+  assert.match(result.data.error, /compatibility command endpoint/);
 });
 
 test("execution HTTP API 保留策略、确认、cwd 和 package script 校验", async (context) => {

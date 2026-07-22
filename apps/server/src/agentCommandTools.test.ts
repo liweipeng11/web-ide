@@ -79,7 +79,7 @@ test("runCommand 将后台模式和超时参数传给统一执行内核", async 
   const steps: AgentStep[] = [];
   const tool = createTool({ result: commandResult("running", "npm run dev"), onRun: (options) => { received = options; } });
   await tool.execute({ command: "npm run dev", mode: "background", waitTimeoutMs: 15000, readyPattern: "ready" }, createRuntime((step) => steps.push(step)));
-  assert.deepEqual(received, { mode: "background", waitTimeoutMs: 15000, executionTimeoutMs: undefined, readyPattern: "ready" });
+  assert.deepEqual(received, { mode: "background", waitTimeoutMs: 15000, executionTimeoutMs: undefined, readyPattern: "ready", initiator: "agent" });
   assert.deepEqual(commandStatuses(steps), ["running", "running"]);
 });
 

@@ -115,3 +115,50 @@ test("spawn error 稳定映射为 failed", async () => {
   assert.equal(execution.state, "failed");
   assert.equal(execution.failureReason, "spawn_error");
 });
+
+test("Agent 环境、Shell 能力和 CI 策略传递给进程层", async () => {
+  let received: Parameters<CommandProcessFactory["start"]>[0] | undefined;
+  const processFactory: CommandProcessFactory = {
+    start(options, listeners) {
+      received = options;
+      queueMicrotask(() => listeners.onExit(0));
+      return { pid: 11, kill: () => true };
+    }
+  };
+  const service = new CommandExecutionService({ processFactory, createId: () => "cmd-env" });
+  const started = await service.start({ command: "npm test", cwd: process.cwd(), initiator: "validation", ci: true });
+  await service.waitForState(started.id);
+  assert.equal(received?.env?.MINI_AI_AGENT, "1");
+  assert.equal(received?.env?.CI, "1");
+  assert.ok(started.shell.name);
+  assert.notEqual(started.shell.capability, "none");
+});
+
+test("敏感交互使用独立状态表达，模型摘要不包含敏感值", async () => {
+  const { service } = createHarness((listeners) => listeners.onData("stdout", "Password: hunter2\nPassword: "));
+  const events: CommandExecutionEvent[] = [];
+  service.subscribe((event) => events.push(event));
+  const started = await service.start({ command: "login-tool", cwd: process.cwd(), initiator: "agent" });
+  const current = await service.waitForState(started.id, { timeoutMs: 100 });
+  const summary = await service.getOutputSummary(started.id);
+  assert.equal(current?.interaction.state, "needs_input");
+  assert.equal(current?.interaction.kind, "password");
+  assert.equal(events.filter((event) => event.type === "interaction").length, 1);
+  assert.doesNotMatch(summary.output, /hunter2/);
+});
+
+test("shutdown 回收未固定活动任务但保留固定任务", async () => {
+  let killed = 0;
+  let sequence = 0;
+  const processFactory: CommandProcessFactory = {
+    start() { return { pid: ++sequence, kill: () => { killed += 1; return true; } }; }
+  };
+  const service = new CommandExecutionService({ processFactory, createId: () => `cmd-shutdown-${sequence + 1}` });
+  const disposable = await service.start({ command: "npm run dev", cwd: process.cwd(), mode: "background" });
+  const retained = await service.start({ command: "npm run watch", cwd: process.cwd(), mode: "background" });
+  await service.setPinned(retained.id, true);
+  await service.shutdown();
+  assert.equal((await service.get(disposable.id))?.state, "cancelled");
+  assert.equal((await service.get(retained.id))?.state, "running");
+  assert.equal(killed, 1);
+});

@@ -112,6 +112,7 @@ export type CommandResult = {
   waitTimedOut?: boolean;
   outputTruncated?: boolean;
   readiness?: import("./commandExecution/types.js").CommandReadiness;
+  interaction?: import("./commandExecution/types.js").CommandInteraction;
   startedAt: string;
   finishedAt: string;
 };

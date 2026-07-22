@@ -3,9 +3,12 @@ import { classifyCommand } from "./commandClassifier.js";
 import { detectUrls, stripAnsi } from "./commandOutputParser.js";
 import { detectCommandReadiness } from "./commandReadinessDetector.js";
 import { createCommandOutputSummary } from "./commandOutputSummary.js";
+import { detectCommandInteraction, sanitizeSensitiveOutput } from "./commandInteraction.js";
+import { CommandExecutionMetrics } from "./commandExecutionMetrics.js";
 import { CommandOutputBuffer } from "./commandOutputBuffer.js";
 import type { CommandExecutionStore } from "./commandExecutionStore.js";
 import { childProcessFactory, type CommandProcessFactory, type CommandProcessHandle, type CommandProcessStream } from "./commandProcess.js";
+import { createCommandEnvironment, resolveShellLaunch } from "./shellCapability.js";
 import type {
   CommandExecution,
   CommandExecutionEvent,
@@ -34,10 +37,11 @@ export type CommandExecutionServiceOptions = {
   now?: () => Date;
   createId?: () => string;
   store?: CommandExecutionStore;
+  metrics?: CommandExecutionMetrics;
 };
 
 function cloneExecution(execution: CommandExecution): CommandExecution {
-  return { ...execution, detectedUrls: [...execution.detectedUrls] };
+  return { ...execution, detectedUrls: [...execution.detectedUrls], shell: { ...execution.shell }, interaction: { ...execution.interaction } };
 }
 
 /** 服务端命令执行内核：统一维护进程生命周期、输出游标、就绪状态和完成事件。 */
@@ -49,6 +53,7 @@ export class CommandExecutionService {
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly store?: CommandExecutionStore;
+  private readonly metrics: CommandExecutionMetrics;
   private readonly hydration: Promise<void>;
 
   constructor(options: CommandExecutionServiceOptions = {}) {
@@ -57,6 +62,7 @@ export class CommandExecutionService {
     this.now = options.now ?? (() => new Date());
     this.createId = options.createId ?? (() => `cmd-${randomUUID()}`);
     this.store = options.store;
+    this.metrics = options.metrics ?? new CommandExecutionMetrics();
     this.hydration = this.hydrate();
   }
 
@@ -73,13 +79,17 @@ export class CommandExecutionService {
     const longRunning = classifyCommand(command).kind === "long_running";
     const requestedMode = input.mode ?? "auto";
     const mode = requestedMode === "auto" ? (longRunning ? "background" : "foreground") : requestedMode;
+    const initiator = input.initiator ?? "user";
+    const shell = resolveShellLaunch(command, { initiator });
     const execution: CommandExecution = {
       id: this.createId(),
       command,
       cwd: input.cwd,
       chatId: input.chatId,
       taskSessionId: input.taskSessionId,
+      initiator,
       mode,
+      shell: { name: shell.name, capability: shell.capability },
       state: "queued",
       readiness: mode === "background" ? "pending" : "not_applicable",
       detectedUrls: [],
@@ -87,6 +97,8 @@ export class CommandExecutionService {
       waitTimedOut: false,
       outputTruncated: false,
       outputCursor: 0,
+      interaction: { state: "none" },
+      pinned: false,
       startedAt: this.now().toISOString()
     };
     const record: ExecutionRecord = {
@@ -102,7 +114,7 @@ export class CommandExecutionService {
     try {
       this.transition(record, "running");
       record.process = this.processFactory.start(
-        { command, cwd: input.cwd, env: process.env },
+        { command, cwd: input.cwd, env: createCommandEnvironment({ initiator, ci: input.ci }), shell },
         {
           onData: (stream, data) => this.handleOutput(record, stream, data),
           onExit: (code, signal) => this.handleExit(record, code, signal),
@@ -112,6 +124,7 @@ export class CommandExecutionService {
       execution.pid = record.process.pid;
       await this.persistExecution(execution);
       this.emit({ type: "started", execution: cloneExecution(execution) });
+      this.metrics.recordStarted();
 
       if (input.executionTimeoutMs !== undefined) {
         record.timeout = setTimeout(() => {
@@ -136,7 +149,7 @@ export class CommandExecutionService {
     return new Promise((resolve) => {
       let timeout: NodeJS.Timeout | undefined;
       const listener: CommandExecutionListener = (event) => {
-        if ((event.type !== "ready" && event.type !== "finished") || event.execution.id !== id) return;
+        if ((event.type !== "ready" && event.type !== "interaction" && event.type !== "finished") || event.execution.id !== id) return;
         if (!this.matchesWait(record.execution, until)) return;
         cleanup();
         resolve(cloneExecution(record.execution));
@@ -152,6 +165,7 @@ export class CommandExecutionService {
           cleanup();
           if (!terminalStates.has(record.execution.state)) {
             record.execution.waitTimedOut = true;
+            this.metrics.recordWaitTimeout();
             void this.persistExecution(record.execution);
           }
           if (options.killOnTimeout && !terminalStates.has(record.execution.state)) this.stop(id);
@@ -201,6 +215,7 @@ export class CommandExecutionService {
         record.execution.readiness = "ready";
         record.execution.readyUrl = readiness.readyUrl;
         record.execution.readyAt = this.now().toISOString();
+        this.metrics.recordReady(record.execution);
         this.emit({ type: "ready", execution: cloneExecution(record.execution) });
       }
     }
@@ -224,7 +239,27 @@ export class CommandExecutionService {
     const execution = await this.get(id);
     if (!execution) throw new Error(`Command execution not found: ${id}`);
     const output = await this.readOutput(id, 0);
-    return createCommandOutputSummary(execution, output.data, maxLength);
+    return createCommandOutputSummary(execution, sanitizeSensitiveOutput(output.data), maxLength);
+  }
+
+  async setPinned(id: string, pinned: boolean) {
+    await this.hydration;
+    const record = this.requireRecord(id);
+    record.execution.pinned = pinned;
+    await this.persistExecution(record.execution);
+    return cloneExecution(record.execution);
+  }
+
+  async getMetrics() {
+    return this.metrics.snapshot(await this.list());
+  }
+
+  /** 应用退出时仅回收本实例创建且未固定的活动任务。 */
+  async shutdown() {
+    await this.hydration;
+    const active = [...this.records.values()].filter(({ execution }) => !execution.pinned && !terminalStates.has(execution.state));
+    await Promise.allSettled(active.map(({ execution }) => this.stop(execution.id)));
+    await this.store?.flush();
   }
 
   async remove(id: string) {
@@ -245,10 +280,20 @@ export class CommandExecutionService {
     const chunk = record.output.append(data);
     record[stream].append(data);
     record.execution.outputCursor = chunk.nextCursor;
+    const wasTruncated = record.execution.outputTruncated;
     record.execution.outputTruncated = record.output.outputTruncated || record.stdout.outputTruncated || record.stderr.outputTruncated;
+    if (!wasTruncated && record.execution.outputTruncated) this.metrics.recordOutputTruncated();
     void this.store?.appendOutput(record.execution.id, data).catch(() => undefined);
 
     const cleanOutput = stripAnsi(record.output.tail());
+    if (record.execution.interaction.state === "none") {
+      const interactionKind = detectCommandInteraction(cleanOutput);
+      if (interactionKind) {
+        record.execution.interaction = { state: "needs_input", kind: interactionKind, detectedAt: this.now().toISOString() };
+        void this.persistExecution(record.execution);
+        this.emit({ type: "interaction", execution: cloneExecution(record.execution) });
+      }
+    }
     record.execution.detectedUrls = detectUrls(cleanOutput);
     if (record.execution.state === "running" && record.execution.readiness === "pending") {
       const readiness = detectCommandReadiness(cleanOutput, { readyPattern: record.readyPattern });
@@ -256,6 +301,7 @@ export class CommandExecutionService {
         record.execution.readiness = "ready";
         record.execution.readyUrl = readiness.readyUrl;
         record.execution.readyAt = this.now().toISOString();
+        this.metrics.recordReady(record.execution);
         void this.persistExecution(record.execution);
         this.emit({ type: "ready", execution: cloneExecution(record.execution) });
       }
@@ -281,6 +327,7 @@ export class CommandExecutionService {
     clearTimeout(record.timeout);
     this.transition(record, state);
     Object.assign(record.execution, details, { finishedAt: this.now().toISOString() });
+    this.metrics.recordFinished(record.execution);
     void this.persistExecution(record.execution);
     this.emit({ type: "finished", execution: cloneExecution(record.execution) });
   }
@@ -295,7 +342,7 @@ export class CommandExecutionService {
   }
 
   private matchesWait(execution: CommandExecution, until: NonNullable<WaitOptions["until"]>) {
-    return terminalStates.has(execution.state) || (until === "ready_or_finished" && execution.readiness === "ready");
+    return terminalStates.has(execution.state) || execution.interaction.state === "needs_input" || (until === "ready_or_finished" && execution.readiness === "ready");
   }
 
   private requireRecord(id: string) {
@@ -312,8 +359,15 @@ export class CommandExecutionService {
     if (!this.store) return;
     const executions = await this.store.load();
     for (const execution of executions) {
+      const normalized: CommandExecution = {
+        ...execution,
+        initiator: execution.initiator || "user",
+        shell: execution.shell || { name: "unknown", capability: "none" },
+        interaction: execution.interaction || { state: "none" },
+        pinned: execution.pinned === true
+      };
       this.records.set(execution.id, {
-        execution,
+        execution: normalized,
         output: new CommandOutputBuffer(this.maxOutputLength),
         stdout: new CommandOutputBuffer(this.maxOutputLength),
         stderr: new CommandOutputBuffer(this.maxOutputLength)

@@ -56,6 +56,7 @@
 .command-execution-meta, .command-execution-url { color: #94a3b8; font-size: 9px; margin-top: 3px; }
 .command-execution-meta strong[data-state="ready"] { color: #86efac; }
 .command-execution-meta strong[data-state="failed"] { color: #fca5a5; }
+.command-execution-meta strong[data-state="needs_input"] { color: #fbbf24; }
 
 .command-execution-item-actions {
   align-items: center;

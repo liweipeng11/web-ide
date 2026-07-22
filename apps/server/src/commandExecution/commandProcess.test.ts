@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { childProcessFactory } from "./commandProcess.js";
 import { CommandExecutionService } from "./commandExecutionService.js";
+import { resolveShellLaunch } from "./shellCapability.js";
 
 async function reservePort() {
   const server = net.createServer();
@@ -22,7 +23,7 @@ test("真实子进程输出和退出码通过统一抽象回传", async () => {
 
   const exitCode = await new Promise<number | null>((resolve, reject) => {
     childProcessFactory.start(
-      { command, cwd: process.cwd(), env: process.env },
+      { command, cwd: process.cwd(), env: process.env, shell: resolveShellLaunch(command, { initiator: "user" }) },
       {
         onData(stream, data) {
           if (stream === "stdout") stdout += data;

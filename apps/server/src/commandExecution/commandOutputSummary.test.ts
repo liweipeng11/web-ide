@@ -5,6 +5,7 @@ import type { CommandExecution } from "./types.js";
 
 const execution: CommandExecution = {
   id: "cmd-summary", command: "npm test", cwd: process.cwd(), mode: "foreground", state: "failed",
+  initiator: "agent", shell: { name: "test", capability: "basic" }, interaction: { state: "none" }, pinned: false,
   readiness: "not_applicable", detectedUrls: [], exitCode: 1, waitTimedOut: false,
   outputTruncated: false, outputCursor: 0, startedAt: new Date(0).toISOString()
 };
