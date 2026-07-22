@@ -66,3 +66,21 @@ test("WebSocket execution 协议支持事件订阅、断线 cursor 补拉与停�
   second.socket.close();
   await new Promise((resolve) => second.socket.once("close", resolve));
 });
+
+test("WebSocket 订阅不存在的 execution 时返回稳定错误码", async (context) => {
+  const harness = createHarness();
+  const server = http.createServer();
+  attachTerminalServer(server, { executionService: harness.service, createTerminal: false });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Failed to start test server");
+
+  const client = await openSocket(`ws://127.0.0.1:${address.port}/terminal`);
+  client.socket.send(JSON.stringify({ type: "command.subscribe", id: "missing", cursor: 0 }));
+  const error = await waitFor(client.messages, (message) => message.type === "command.error");
+  assert.equal(error.id, "missing");
+  assert.equal(error.code, "execution_not_found");
+  client.socket.close();
+  await new Promise((resolve) => client.socket.once("close", resolve));
+});

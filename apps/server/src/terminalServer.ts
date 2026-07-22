@@ -180,7 +180,12 @@ export function attachTerminalServer(server: Server, options: { executionService
       try {
         if (message.type === "command.subscribe") {
           const execution = await executionService.get(message.id);
-          if (!execution) throw new Error("Command execution not found");
+          if (!execution) {
+            // 使用稳定错误码通知前端清理已经删除或因服务重启失效的 execution。
+            subscriptions.delete(message.id);
+            writeJson(socket, { type: "command.error", id: message.id, code: "execution_not_found", message: "Command execution not found" });
+            return;
+          }
           subscriptions.set(message.id, message.cursor);
           const output = await executionService.readOutput(message.id, message.cursor);
           subscriptions.set(message.id, Math.max(subscriptions.get(message.id) || 0, output.nextCursor));

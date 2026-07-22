@@ -837,6 +837,14 @@ export type ServerCapabilities = {
   models: { selection: boolean; configured: boolean; defaultModel: string; catalogEndpoint?: string };
 };
 
+/** 保留服务端状态码，调用方可针对资源失效等场景做可靠恢复。 */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     headers: {
@@ -849,7 +857,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
-    throw new Error(data?.error || data?.summary || "请求失败");
+    throw new ApiError(data?.error || data?.summary || "请求失败", response.status);
   }
 
   return data as T;

@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { type PointerEvent, useEffect, useRef, useState } from "react";
 import {
+  ApiError,
   fetchCommandExecutionOutput,
   fetchCommandExecutions,
   moveCommandExecutionToBackground,
@@ -42,7 +43,7 @@ type ServerMessage =
   | { type: "error"; error: string }
   | { type: "command.started" | "command.ready" | "command.finished"; execution: CommandExecution }
   | { type: "command.output"; id: string; cursor: number; data: string }
-  | { type: "command.error"; id: string; message: string };
+  | { type: "command.error"; id: string; message: string; code?: "execution_not_found" };
 
 const terminalStates = new Set<CommandExecution["state"]>(["succeeded", "failed", "cancelled"]);
 const maxCapturedOutputLength = 80_000;
@@ -101,8 +102,23 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
   const subscribedIdsRef = useRef(new Set<string>());
   const reportedReadyRef = useRef(new Set<string>());
   const reportedFinishedRef = useRef(new Set<string>());
+  const subscriptionRequestRef = useRef(0);
   const [status, setStatus] = useState<"connecting" | "connected" | "closed">("closed");
   const [activeExecution, setActiveExecution] = useState<CommandExecution | null>(null);
+
+  function forgetExecution(id: string) {
+    subscribedIdsRef.current.delete(id);
+    cursorByExecutionRef.current.delete(id);
+    outputByExecutionRef.current.delete(id);
+    reportedReadyRef.current.delete(id);
+    reportedFinishedRef.current.delete(id);
+    setActiveExecution((current) => current?.id === id ? null : current);
+  }
+
+  function reportMissingExecution(id: string) {
+    forgetExecution(id);
+    terminalRef.current?.writeln("\r\n[execution error] 该命令执行记录已删除或因服务重启失效，请重新运行命令。");
+  }
 
   function writeExecutionOutput(id: string, cursor: number, data: string) {
     const knownCursor = cursorByExecutionRef.current.get(id) || 0;
@@ -129,8 +145,7 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
   }
 
   async function subscribeExecution(execution: CommandExecution) {
-    setActiveExecution(execution);
-    subscribedIdsRef.current.add(execution.id);
+    const requestId = ++subscriptionRequestRef.current;
     // 切换任务时从磁盘日志重新绘制完整视图，后续增量仍由 cursor 去重。
     terminalRef.current?.clear();
     cursorByExecutionRef.current.set(execution.id, 0);
@@ -140,9 +155,18 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
     // WebSocket 可能在断线期间丢失事件，订阅前先用 HTTP cursor 补拉。
     try {
       const { output } = await fetchCommandExecutionOutput(execution.id, cursor);
+      if (requestId !== subscriptionRequestRef.current) return;
+      setActiveExecution(execution);
+      subscribedIdsRef.current.add(execution.id);
       writeExecutionOutput(execution.id, output.cursor, output.data);
     } catch (error) {
+      if (requestId !== subscriptionRequestRef.current) return;
+      if (error instanceof ApiError && error.status === 404) {
+        reportMissingExecution(execution.id);
+        return;
+      }
       terminalRef.current?.writeln(`\r\n[execution error] ${error instanceof Error ? error.message : "无法补拉命令输出"}`);
+      return;
     }
 
     const socket = socketRef.current;
@@ -190,6 +214,10 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
               socket.send(JSON.stringify({ type: "command.subscribe", id, cursor: cursorByExecutionRef.current.get(id) || 0 }));
             }
           }).catch((error) => {
+            if (error instanceof ApiError && error.status === 404) {
+              reportMissingExecution(id);
+              return;
+            }
             terminal.writeln(`\r\n[execution error] ${error instanceof Error ? error.message : "无法恢复命令输出"}`);
           });
         }
@@ -212,7 +240,8 @@ export default function TerminalPanel({ workspaceRoot, height, commandRequest, o
         } else if (message.type === "command.output") {
           writeExecutionOutput(message.id, message.cursor, message.data);
         } else if (message.type === "command.error") {
-          terminal.writeln(`\r\n[execution error] ${message.message}`);
+          if (message.code === "execution_not_found") reportMissingExecution(message.id);
+          else terminal.writeln(`\r\n[execution error] ${message.message}`);
           onCommandComplete?.({ id: message.id, result: null, error: message.message });
         } else {
           setActiveExecution(message.execution);
