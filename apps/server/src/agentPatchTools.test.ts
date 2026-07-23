@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { patchAgentToolDefinitions } from "./agentPatchTools.js";
+import { patchAgentToolDefinitions, validateAgentGeneratedPatchImports } from "./agentPatchTools.js";
 import { createContextCache } from "./codeDiscovery/index.js";
 import { getCheckpoint } from "./checkpointStore.js";
 import { clearPendingPatches, createPendingPatch, getPendingPatch } from "./patchStore.js";
@@ -31,6 +31,20 @@ function createToolRuntime(options: Partial<AgentToolRuntime> = {}): AgentToolRu
 test("runtime registry exposes patch tools for continuous agent runs", () => {
   assert.ok(runtimeAgentToolRegistry.get("proposePatch"));
   assert.ok(runtimeAgentToolRegistry.get("applyPatch"));
+});
+
+test("agent patch import validation uses the post-patch virtual file graph", async (context) => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-virtual-patch-"));
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+
+  const result = await validateAgentGeneratedPatchImports(workspaceRoot, [
+    { path: "src/main.ts", status: "create", newContent: "import \"./router\";\n" },
+    { path: "src/router.ts", status: "create", newContent: "export default {};\n" }
+  ]);
+
+  assert.equal(result.fileResults[0].result.checks[0].resolution.status, "planned_create");
+  assert.deepEqual(result.unresolved, []);
 });
 
 test("applyPatch tool applies a pending patch and removes it from the store", async () => {

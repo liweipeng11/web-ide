@@ -4,6 +4,7 @@ import { buildPatchCompletenessReport, createContextSelectionSnapshot, formatCon
 import { createBinaryDiffHtml, createDiffHtml, createEditHunks, createMultiFileDiffHtml } from "./diffTools.js";
 import { buildEditScope, validatePatchesAgainstEditScope } from "./editScope.js";
 import { HttpError } from "./errors.js";
+import { buildPlannedFileGraph, checkPatchImports, type PlannedFileGraph } from "./existenceChecker/index.js";
 import { listFiles, readWorkspaceFile, readWorkspaceFileForDiff, safeResolve } from "./fileTools.js";
 import { createPendingPatch } from "./patchStore.js";
 import { createAgentStep } from "./routeAgentSteps.js";
@@ -130,6 +131,10 @@ async function validateEditResultPaths(aiResult: AiEditResult, selectedFilePath:
       const existingPath = resolveExistingEditPath(change.filePath, existingPaths);
 
       if (existingPath) {
+        if (change.status === "create") {
+          invalidFilePaths.push(change.filePath);
+          return null;
+        }
         return {
           ...change,
           path: existingPath,
@@ -139,6 +144,10 @@ async function validateEditResultPaths(aiResult: AiEditResult, selectedFilePath:
       }
 
       if (isDeletePatch(change)) {
+        invalidFilePaths.push(change.filePath);
+        return null;
+      }
+      if (change.status === "modify") {
         invalidFilePaths.push(change.filePath);
         return null;
       }
@@ -195,6 +204,22 @@ function validateEditScope(aiResult: AiEditResult, selectedFilePath: string | nu
 }
 
 type ValidatedFileChange = NonNullable<Awaited<ReturnType<typeof validateEditResultPaths>>["files"]>[number];
+
+/** 在 pending patch 入库前校验最终内容，确保所有阻断型 import 都能在补丁后文件图中解析。 */
+export async function validateFinalPatchImports(
+  workspaceRoot: string,
+  files: Parameters<typeof checkPatchImports>[1],
+  plannedFileGraph?: PlannedFileGraph
+) {
+  const validation = await checkPatchImports(workspaceRoot, files, plannedFileGraph);
+  if (validation.unresolved.length) {
+    const details = validation.unresolved
+      .map(({ filePath, check }) => `${filePath}: ${check.target.value} (${check.resolution.status})`)
+      .join(", ");
+    throw new HttpError(422, `Generated patch contains unresolved import references: ${details}`);
+  }
+  return validation;
+}
 
 export function buildFinalPatchSummary(options: { files: Pick<PatchFileChange, "path">[]; rawPatchCount?: number; commandsToRun?: string[] }) {
   const finalPatchCount = options.files.length;
@@ -385,6 +410,8 @@ export async function createEditPatchResponse(
   taskSessionId?: string,
   safeEditRecommendationOverride?: import("./safeEditor/index.js").SafeEditRecommendation
 ) {
+  const workspaceRoot = getWorkspaceRoot();
+  if (!workspaceRoot) throw new HttpError(400, "No workspace selected");
   const runId = createRouteRunId("edit");
   const startedAt = Date.now();
   const selectedFilePath = typeof filePath === "string" && filePath.trim() ? filePath.trim() : null;
@@ -509,9 +536,22 @@ export async function createEditPatchResponse(
       finalPreDedupeCount = validatedPaths.files?.length || 0;
       finalPostDedupeCount = deduped.uniqueChanges.length;
       finalNormalizedFilePaths = deduped.uniqueChanges.map((change) => change.path);
+      // 第一次校验使用模型给出的计划与已知内容；此时不会写入任何真实文件。
+      const plannedFiles = deduped.uniqueChanges.map((change) => ({
+        path: change.path,
+        status: change.status,
+        newContent: change.status === "delete" ? "" : change.newContent
+      }));
+      const plannedFileGraph = await buildPlannedFileGraph(
+        workspaceRoot,
+        plannedFiles.map((file) => ({ filePath: file.path, changeKind: file.status, content: file.newContent }))
+      );
+      await validateFinalPatchImports(workspaceRoot, plannedFiles, plannedFileGraph);
       const patchFileResult = await buildPatchFileChanges(deduped.uniqueChanges, userRequest, attempt);
       diagnosticsRecords.push(...patchFileResult.noEffectRecords);
       files = patchFileResult.files;
+      // 第二次校验针对 search/replace 计算后的最终内容，防止补丁后新增未知 import。
+      await validateFinalPatchImports(workspaceRoot, files);
     } catch (error) {
       if (error instanceof StaleFullFileRewriteError && attempt < 2) {
         diagnosticsRecords.push(

@@ -2,13 +2,16 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { resolvePathAlias } from "./aliasResolver.js";
 import { resolvePackageImport } from "./packageResolver.js";
+import { buildPlannedFileGraph, getPlannedChangeKind, resolvePlannedFileCandidates } from "./plannedFileResolver.js";
 import type {
   ExistenceCandidate,
   ExistenceCheckResult,
+  ExistenceCheckOptions,
   ExistenceCheckTarget,
   ExistenceCheckerResult,
   ExistenceStatus,
   ImportReference,
+  PlannedFileGraph,
   ReferenceResolution,
   ReferenceResolutionStatus
 } from "./types.js";
@@ -93,16 +96,34 @@ function isInsideWorkspace(workspaceRoot: string, absolutePath: string) {
   return !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }
 
-async function resolveFileCandidates(workspaceRoot: string, basePath: string, detail: string) {
+async function resolveFileCandidates(workspaceRoot: string, basePath: string, detail: string, plannedFileGraph?: PlannedFileGraph) {
   const candidates: ExistenceCandidate[] = [];
+  const seen = new Set<string>();
   if (!isInsideWorkspace(workspaceRoot, basePath)) return candidates;
   for (const extension of IMPORT_EXTENSIONS) {
     const filePath = `${basePath}${extension}`;
-    if (await pathExists(filePath)) candidates.push({ path: normalizeRelativePath(path.relative(workspaceRoot, filePath)), detail });
+    const relativePath = normalizeRelativePath(path.relative(workspaceRoot, filePath));
+    if (plannedFileGraph && getPlannedChangeKind(plannedFileGraph, relativePath) === "delete") continue;
+    if (await pathExists(filePath)) {
+      seen.add(relativePath.toLowerCase());
+      candidates.push({ path: relativePath, detail });
+    }
   }
   for (const extension of IMPORT_EXTENSIONS.slice(1)) {
     const filePath = path.join(basePath, `index${extension}`);
-    if (await pathExists(filePath)) candidates.push({ path: normalizeRelativePath(path.relative(workspaceRoot, filePath)), detail: `${detail}（目录 index）` });
+    const relativePath = normalizeRelativePath(path.relative(workspaceRoot, filePath));
+    if (plannedFileGraph && getPlannedChangeKind(plannedFileGraph, relativePath) === "delete") continue;
+    if (await pathExists(filePath) && !seen.has(relativePath.toLowerCase())) {
+      seen.add(relativePath.toLowerCase());
+      candidates.push({ path: relativePath, detail: `${detail}（目录 index）` });
+    }
+  }
+  if (plannedFileGraph) {
+    for (const candidate of resolvePlannedFileCandidates(workspaceRoot, basePath, plannedFileGraph)) {
+      if (seen.has(candidate.path.toLowerCase())) continue;
+      seen.add(candidate.path.toLowerCase());
+      candidates.push(candidate);
+    }
   }
   return candidates;
 }
@@ -128,16 +149,17 @@ export function extractImportReferences(content: string): ImportReference[] {
 }
 
 /** 校验一段将要写入工作区的代码中的所有静态 import。 */
-export async function checkCodeImports(workspaceRoot: string, content: string, fromPath: string) {
+export async function checkCodeImports(workspaceRoot: string, content: string, fromPath: string, options: ExistenceCheckOptions = {}) {
   const references = extractImportReferences(content);
   const result = await checkExistence(
     workspaceRoot,
-    references.map((reference) => ({ kind: "import" as const, value: reference.specifier, fromPath }))
+    references.map((reference) => ({ kind: "import" as const, value: reference.specifier, fromPath })),
+    options
   );
   return { references, result };
 }
 
-async function checkImport(workspaceRoot: string, target: ExistenceCheckTarget) {
+async function checkImport(workspaceRoot: string, target: ExistenceCheckTarget, options: ExistenceCheckOptions) {
   const specifier = target.value.trim();
   if (!specifier) return createResult(target, "truly_missing", [], "import 路径不能为空");
 
@@ -146,9 +168,18 @@ async function checkImport(workspaceRoot: string, target: ExistenceCheckTarget) 
     if (!isInsideWorkspace(workspaceRoot, basePath)) {
       return createResult(target, "unknown", [], "import 路径试图越出工作区，已阻止解析", { blocking: true });
     }
-    const candidates = await resolveFileCandidates(workspaceRoot, basePath, "相对 import 目标");
+    const candidates = await resolveFileCandidates(workspaceRoot, basePath, "相对 import 目标", options.plannedFileGraph);
+    const plannedCandidate = candidates.length === 1 && options.plannedFileGraph
+      ? getPlannedChangeKind(options.plannedFileGraph, candidates[0].path) === "create"
+      : false;
     return candidates.length === 1
-      ? createResult(target, "existing", candidates, "import 路径已解析到唯一文件", { blocking: false, resolvedPath: candidates[0].path })
+      ? createResult(
+          target,
+          plannedCandidate ? "planned_create" : "existing",
+          candidates,
+          plannedCandidate ? "import 路径将在本次补丁中创建" : "import 路径已解析到唯一文件",
+          { blocking: false, resolvedPath: candidates[0].path }
+        )
       : candidates.length > 1
         ? createResult(target, "ambiguous", candidates, "import 路径可解析到多个文件，请明确扩展名或路径")
         : createResult(target, "truly_missing", [], "未找到 import 路径对应的文件或目录 index 文件");
@@ -223,10 +254,10 @@ async function checkDirectory(workspaceRoot: string, target: ExistenceCheckTarge
 }
 
 /** 在实际工作区中核验 Agent 即将引用的路径、符号、脚本与配置来源。 */
-export async function checkExistence(workspaceRoot: string, targets: ExistenceCheckTarget[]): Promise<ExistenceCheckerResult> {
+export async function checkExistence(workspaceRoot: string, targets: ExistenceCheckTarget[], options: ExistenceCheckOptions = {}): Promise<ExistenceCheckerResult> {
   const checks = await Promise.all(
     targets.map(async (target) => {
-      if (target.kind === "import") return checkImport(workspaceRoot, target);
+      if (target.kind === "import") return checkImport(workspaceRoot, target, options);
       if (target.kind === "symbol") return checkSymbol(workspaceRoot, target);
       if (target.kind === "script") return checkScript(workspaceRoot, target);
       if (target.kind === "environment") return checkEnvironment(workspaceRoot, target);
@@ -237,4 +268,38 @@ export async function checkExistence(workspaceRoot: string, targets: ExistenceCh
     checks,
     summary: checks.reduce((summary, check) => ({ ...summary, [check.status]: summary[check.status] + 1 }), { exists: 0, missing: 0, ambiguous: 0 })
   };
+}
+
+export type PatchImportValidationFile = {
+  path: string;
+  status: "create" | "modify" | "delete";
+  newContent: string;
+};
+
+/** 使用同一个补丁后文件图校验所有新增、修改文件的最终静态 import。 */
+export async function checkPatchImports(
+  workspaceRoot: string,
+  files: PatchImportValidationFile[],
+  plannedFileGraph?: PlannedFileGraph
+) {
+  const graph = plannedFileGraph || await buildPlannedFileGraph(
+    workspaceRoot,
+    files.map((file) => ({ filePath: file.path, changeKind: file.status, content: file.newContent }))
+  );
+  const fileResults = await Promise.all(
+    files
+      .filter((file) => file.status !== "delete")
+      .map(async (file) => ({
+        file,
+        ...(await checkCodeImports(workspaceRoot, file.newContent, file.path, { plannedFileGraph: graph }))
+      }))
+  );
+  const unresolved = fileResults.flatMap(({ file, result }) =>
+    result.checks
+      // 已声明但未确认安装的依赖交给后续安装/构建验证；真实缺失、歧义和未知引用仍必须阻断补丁。
+      .filter((check) => check.resolution.blocking && check.resolution.status !== "dependency_declared")
+      .map((check) => ({ filePath: file.path, check }))
+  );
+
+  return { graph, fileResults, unresolved };
 }

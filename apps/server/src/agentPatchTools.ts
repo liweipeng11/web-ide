@@ -1,6 +1,6 @@
 import { createEditPatchResponse } from "./editPatchService.js";
 import { applyPendingPatch } from "./patchApplyService.js";
-import { checkCodeImports } from "./existenceChecker/index.js";
+import { buildPlannedFileGraph, checkPatchImports } from "./existenceChecker/index.js";
 import { deletePendingPatch } from "./patchStore.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
@@ -18,6 +18,18 @@ function requiredString(args: Record<string, unknown>, name: string) {
   }
 
   return value;
+}
+
+/** Agent 层复用补丁后文件图进行最终复核，避免再次按纯磁盘状态误判新文件。 */
+export async function validateAgentGeneratedPatchImports(
+  workspaceRoot: string,
+  files: Parameters<typeof checkPatchImports>[1]
+) {
+  const plannedFileGraph = await buildPlannedFileGraph(
+    workspaceRoot,
+    files.map((file) => ({ filePath: file.path, changeKind: file.status, content: file.newContent }))
+  );
+  return checkPatchImports(workspaceRoot, files, plannedFileGraph);
 }
 
 export const patchAgentToolDefinitions: AgentToolDefinition[] = [
@@ -49,11 +61,14 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
       const patch = await createEditPatchResponse(filePath, userRequest, runtime.onAgentStep, runtime.taskSessionId || undefined, safeEditRecommendation);
       const workspaceRoot = getWorkspaceRoot();
       if (!workspaceRoot) throw new Error("No workspace selected");
-      const importChecks = await Promise.all(patch.files.map((file) => checkCodeImports(workspaceRoot, file.newContent, file.path)));
-      const unresolved = importChecks.flatMap(({ result }) => result.checks).filter((check) => check.status !== "exists");
-      if (unresolved.length) {
+      const importValidation = await validateAgentGeneratedPatchImports(workspaceRoot, patch.files);
+      if (importValidation.unresolved.length) {
         deletePendingPatch(patch.patchId);
-        throw new Error(`Generated patch contains unresolved import references: ${unresolved.map((check) => `${check.target.value} (${check.status})`).join(", ")}`);
+        throw new Error(
+          `Generated patch contains unresolved import references: ${importValidation.unresolved
+            .map(({ filePath: sourcePath, check }) => `${sourcePath}: ${check.target.value} (${check.resolution.status})`)
+            .join(", ")}`
+        );
       }
       runtime.generatedPatchIds?.push(patch.patchId);
 

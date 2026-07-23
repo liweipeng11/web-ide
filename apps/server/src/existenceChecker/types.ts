@@ -24,6 +24,25 @@ export type ReferenceResolutionStatus =
   | "ambiguous"
   | "unknown";
 
+/** 补丁中单个文件的预期变更，用于在真实写盘前构建虚拟文件状态。 */
+export type PlannedFileChange = {
+  filePath: string;
+  changeKind: "create" | "modify" | "delete";
+  content?: string;
+};
+
+/** 补丁应用后的虚拟文件图；所有路径均为规范化后的工作区相对路径。 */
+export type PlannedFileGraph = {
+  creates: Set<string>;
+  modifies: Set<string>;
+  deletes: Set<string>;
+};
+
+/** 存在性检查的可选上下文，阶段 2 通过文件图补充尚未写盘的文件。 */
+export type ExistenceCheckOptions = {
+  plannedFileGraph?: PlannedFileGraph;
+};
+
 /** 单个候选位置及其来源说明。 */
 export type ExistenceCandidate = {
   path: string;

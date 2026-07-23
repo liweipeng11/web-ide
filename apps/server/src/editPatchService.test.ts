@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { buildPatchCompletenessReport, createContextSelectionSnapshot } from "./contextSelection/index.js";
-import { buildFinalPatchSummary, buildPatchGenerationDiagnostics } from "./editPatchService.js";
+import { buildFinalPatchSummary, buildPatchGenerationDiagnostics, validateFinalPatchImports } from "./editPatchService.js";
 import { buildSafeEditRecommendation, evaluateSafeEdit } from "./safeEditor/index.js";
 
 test("final patch summary uses cleaned file count instead of model candidate count", () => {
@@ -117,4 +120,43 @@ test("patch completeness reports missed selected target file", () => {
   });
 
   assert.equal(report.risks.some((risk) => risk.requirement === "patch-cover-target-files"), true);
+});
+
+test("final patch import validation accepts planned files and blocks unknown imports", async (context) => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-edit-patch-imports-"));
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  const validFiles = [
+    {
+      path: "src/main.ts",
+      filePath: "src/main.ts",
+      status: "create" as const,
+      oldContent: "",
+      newContent: "import value from \"./value\";\nexport default value;\n",
+      summary: "新增入口",
+      diffHtml: ""
+    },
+    {
+      path: "src/value.ts",
+      filePath: "src/value.ts",
+      status: "create" as const,
+      oldContent: "",
+      newContent: "export default 1;\n",
+      summary: "新增值",
+      diffHtml: ""
+    }
+  ];
+
+  const valid = await validateFinalPatchImports(workspaceRoot, validFiles);
+  assert.deepEqual(valid.unresolved, []);
+
+  await assert.rejects(
+    validateFinalPatchImports(workspaceRoot, [
+      {
+        ...validFiles[0],
+        newContent: "import value from \"./missing\";\nexport default value;\n"
+      }
+    ]),
+    /unresolved import references.*truly_missing/
+  );
 });
