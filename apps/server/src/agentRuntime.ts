@@ -83,7 +83,6 @@ async function loadRuntimeContextState(taskSessionId: string | null | undefined)
 // 会导致任务在真正进入审批前就触发步数上限。
 const DEFAULT_MAX_AGENT_STEPS = 24;
 const TOOL_BUDGET_WARNING_REMAINING_STEPS = 3;
-const REPEATED_TOOL_CALL_WARNING_THRESHOLD = 2;
 
 function createDefaultAgentContext(userRequest: string): AgentContext {
   return {
@@ -261,6 +260,20 @@ function createRepeatedToolWarningMessage(toolNames: string[]): ModelMessage {
   };
 }
 
+function createRepeatedToolCallBlockedMessage(toolCall: ModelToolCall, repeatCount: number): ModelMessage {
+  return {
+    role: "tool",
+    toolCallId: toolCall.id,
+    content: JSON.stringify({
+      error: "repeated_tool_call_blocked",
+      toolName: toolCall.name,
+      repeatCount,
+      cached: true,
+      instruction: "该调用已经得到完整结果，请复用已有结果或更换策略。"
+    })
+  };
+}
+
 async function persistAgentMessage(taskSessionId: string | null | undefined, message: ModelMessage) {
   if (!taskSessionId) return;
 
@@ -424,6 +437,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const generatedPatchIds = options.generatedPatchIds || [];
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, generatedPatchIds, taskSessionId: options.taskSessionId, onAgentStep: options.onAgentStep, registry, emitToolApprovalSteps: false });
   const toolCallCounts = new Map<string, number>();
+  const repeatCountsByToolCall = new Map<ModelToolCall, number>();
   const repeatedToolWarnings = new Set<string>();
   let budgetWarningSent = false;
   let latestContextBudgetSnapshot: ContextBudgetSnapshot | undefined;
@@ -546,6 +560,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const signature = getToolCallSignature(toolCall);
       const nextCount = (toolCallCounts.get(signature) || 0) + 1;
       toolCallCounts.set(signature, nextCount);
+      repeatCountsByToolCall.set(toolCall, nextCount);
       metrics.recordToolCall({
         toolName: toolCall.name,
         signature,
@@ -554,13 +569,26 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         invalid: !registry.get(toolCall.name)
       });
 
-      if (nextCount >= REPEATED_TOOL_CALL_WARNING_THRESHOLD && !repeatedToolWarnings.has(signature)) {
+      if (nextCount >= config.aiAgentRepeatWarningThreshold && !repeatedToolWarnings.has(signature)) {
         repeatedToolWarnings.add(signature);
         repeatedToolNames.push(toolCall.name);
       }
     }
 
     for (const toolCall of toolCalls) {
+      const signature = getToolCallSignature(toolCall);
+      const repeatCount = repeatCountsByToolCall.get(toolCall) ?? 1;
+
+      // 第三次及后续完全相同的调用由 Runtime 直接拦截，但保留本轮其他工具继续执行。
+      if (repeatCount >= config.aiAgentRepeatBlockThreshold) {
+        metrics.recordToolResult({ signature, noProgress: true });
+        const blockedMessage = createRepeatedToolCallBlockedMessage(toolCall, repeatCount);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        logAi(runId, "runtime.repeatedToolCallBlocked", { toolName: toolCall.name, repeatCount });
+        continue;
+      }
+
       const definition = registry.get(toolCall.name);
       const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, agentContext, options.workflow);
       const patternFinderBlockReason = getPatternFinderBlockReason(toolCall.name, agentContext, registry);
@@ -568,7 +596,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
       if (workflowBlockReason) {
         metrics.recordToolFailure();
-        metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
+        metrics.recordToolResult({ signature, noProgress: true });
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: workflowBlockReason, workflow: options.workflow?.type });
         options.onAgentStep?.(createAgentStep({ type: "error", message: workflowBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, workflowBlockReason);
@@ -578,7 +606,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       }
       if (patternFinderBlockReason) {
         metrics.recordToolFailure();
-        metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
+        metrics.recordToolResult({ signature, noProgress: true });
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: patternFinderBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: patternFinderBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, patternFinderBlockReason);
@@ -588,7 +616,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       }
       if (existenceCheckBlockReason) {
         metrics.recordToolFailure();
-        metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
+        metrics.recordToolResult({ signature, noProgress: true });
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: existenceCheckBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: existenceCheckBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, existenceCheckBlockReason);
@@ -600,7 +628,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
       if (approval.status === "blocked") {
         metrics.recordToolFailure();
-        metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
+        metrics.recordToolResult({ signature, noProgress: true });
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: approval.reason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: approval.reason }));
         const blockedMessage = createBlockedToolMessage(toolCall, approval.reason);
@@ -658,7 +686,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const resultMetrics = analyzeToolResult(result.content);
         if (resultMetrics.failed) metrics.recordToolFailure();
         metrics.recordToolResult({
-          signature: getToolCallSignature(toolCall),
+          signature,
           cached: resultMetrics.cached,
           empty: resultMetrics.empty,
           noProgress: resultMetrics.cached || resultMetrics.empty || resultMetrics.failed

@@ -7,6 +7,7 @@ import type { AgentCompletionResponse, AgentToolDefinition, AgentToolRuntime } f
 import type { AgentStep } from "./types.js";
 import { createTaskWorkflow } from "./taskWorkflow/index.js";
 import type { RunMetrics } from "./observability/index.js";
+import { resolveAgentRepeatToolCallThresholds } from "./config.js";
 
 function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runtime: AgentToolRuntime) => void): AgentToolDefinition {
   return {
@@ -398,6 +399,133 @@ test("agent runtime warns on repeated tool calls with the same arguments", async
 
   assert.equal(result.status, "completed");
   assert.equal(hasRepeatedWarning, true);
+});
+
+test("agent runtime blocks the third identical tool call and can finish with another tool", async () => {
+  let searchExecutions = 0;
+  let listExecutions = 0;
+  let capturedMetrics: RunMetrics | undefined;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("searchCode", [{ filePath: "src/a.ts" }], () => { searchExecutions += 1; }),
+    createRuntimeTestTool("listFiles", ["src/a.ts"], () => { listExecutions += 1; })
+  ]);
+  let modelStep = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "Repeat search then switch strategy",
+    registry,
+    runId: "test-runtime-repeated-tool-block",
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; },
+    requestCompletion: async () => {
+      modelStep += 1;
+      if (modelStep <= 4) {
+        // 第二次故意调整嵌套 JSON 字段顺序，验证稳定签名仍能识别为相同调用。
+        const rawArguments = modelStep === 2
+          ? '{"options":{"caseSensitive":false,"limit":20},"query":"same-keyword"}'
+          : '{"query":"same-keyword","options":{"limit":20,"caseSensitive":false}}';
+        return {
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: `tool-repeat-block-${modelStep}`,
+                type: "function",
+                function: { name: "searchCode", arguments: rawArguments }
+              }]
+            }
+          }]
+        };
+      }
+
+      if (modelStep === 5) {
+        return {
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: "tool-list-after-block",
+                type: "function",
+                function: { name: "listFiles", arguments: "{}" }
+              }]
+            }
+          }]
+        };
+      }
+
+      return { choices: [{ message: { role: "assistant", content: "Completed with another tool." } }] };
+    }
+  });
+
+  const blockedResults = result.messages
+    .filter((message) => message.role === "tool" && typeof message.content === "string")
+    .map((message) => JSON.parse(message.content as string) as Record<string, unknown>)
+    .filter((content) => content.error === "repeated_tool_call_blocked");
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.content, "Completed with another tool.");
+  assert.equal(searchExecutions, 1);
+  assert.equal(listExecutions, 1);
+  assert.deepEqual(blockedResults.map((content) => content.repeatCount), [3, 4]);
+  assert.equal(blockedResults.every((content) => content.toolName === "searchCode" && content.cached === true), true);
+  assert.equal(blockedResults.every((content) => typeof content.instruction === "string"), true);
+  assert.equal(capturedMetrics?.tools.cacheHits, 1);
+  assert.equal(capturedMetrics?.tools.failedCalls, 0);
+  assert.equal(capturedMetrics?.result.failureCategory, "none");
+});
+
+test("agent runtime does not block calls with different arguments", async () => {
+  let executions = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("searchCode", [], () => { executions += 1; })
+  ]);
+  let modelStep = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "Search different terms",
+    registry,
+    runId: "test-runtime-distinct-tool-calls",
+    metricsRecorder: async () => undefined,
+    requestCompletion: async () => {
+      modelStep += 1;
+      if (modelStep <= 2) {
+        return {
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: `tool-distinct-${modelStep}`,
+                type: "function",
+                function: { name: "searchCode", arguments: JSON.stringify({ query: `keyword-${modelStep}` }) }
+              }]
+            }
+          }]
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "Both searches completed." } }] };
+    }
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(executions, 2);
+  assert.equal(result.messages.some((message) => typeof message.content === "string" && message.content.includes("repeated_tool_call_blocked")), false);
+});
+
+test("repeat tool-call thresholds require positive ordered integers", () => {
+  assert.deepEqual(resolveAgentRepeatToolCallThresholds({
+    AI_AGENT_REPEAT_WARNING_THRESHOLD: "3",
+    AI_AGENT_REPEAT_BLOCK_THRESHOLD: "5"
+  }), { warning: 3, block: 5 });
+  assert.deepEqual(resolveAgentRepeatToolCallThresholds({
+    AI_AGENT_REPEAT_WARNING_THRESHOLD: "0",
+    AI_AGENT_REPEAT_BLOCK_THRESHOLD: "not-a-number"
+  }), { warning: 2, block: 3 });
+  assert.deepEqual(resolveAgentRepeatToolCallThresholds({
+    AI_AGENT_REPEAT_WARNING_THRESHOLD: "4",
+    AI_AGENT_REPEAT_BLOCK_THRESHOLD: "4"
+  }), { warning: 2, block: 3 });
 });
 
 test("agent runtime pauses before approval-required tools", async () => {

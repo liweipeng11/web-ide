@@ -20,6 +20,44 @@ function numberFromEnv(name: string, fallback: number) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+export type AgentRepeatToolCallThresholds = {
+  warning: number;
+  block: number;
+};
+
+const DEFAULT_AGENT_REPEAT_TOOL_CALL_THRESHOLDS: AgentRepeatToolCallThresholds = {
+  warning: 2,
+  block: 3
+};
+
+function positiveIntegerFromEnv(name: string, fallback: number, env: NodeJS.ProcessEnv) {
+  const value = env[name];
+  if (value === undefined || value.trim() === "") return fallback;
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * 读取完全相同工具调用的分级阈值；关系无效时整体回退，避免出现先阻断、后警告。
+ */
+export function resolveAgentRepeatToolCallThresholds(env: NodeJS.ProcessEnv = process.env): AgentRepeatToolCallThresholds {
+  const warning = positiveIntegerFromEnv(
+    "AI_AGENT_REPEAT_WARNING_THRESHOLD",
+    DEFAULT_AGENT_REPEAT_TOOL_CALL_THRESHOLDS.warning,
+    env
+  );
+  const block = positiveIntegerFromEnv(
+    "AI_AGENT_REPEAT_BLOCK_THRESHOLD",
+    DEFAULT_AGENT_REPEAT_TOOL_CALL_THRESHOLDS.block,
+    env
+  );
+
+  return block > warning
+    ? { warning, block }
+    : { ...DEFAULT_AGENT_REPEAT_TOOL_CALL_THRESHOLDS };
+}
+
 function optionalNumberFromEnv(name: string) {
   const value = process.env[name];
   if (value === undefined || value.trim() === "") return undefined;
@@ -69,6 +107,8 @@ function modelCatalogFromEnv(): Array<Record<string, unknown>> {
   }
 }
 
+const agentRepeatToolCallThresholds = resolveAgentRepeatToolCallThresholds();
+
 export const config = {
   aiApiKey: process.env.AI_API_KEY || "",
   aiBaseUrl: process.env.AI_BASE_URL || "https://api.openai.com/v1",
@@ -84,6 +124,8 @@ export const config = {
   aiContextWindowTokens: numberFromEnv("AI_CONTEXT_WINDOW_TOKENS", 128_000),
   aiMaxOutputTokens: numberFromEnv("AI_MAX_OUTPUT_TOKENS", 8_192),
   aiContextSafetyMarginTokens: numberFromEnv("AI_CONTEXT_SAFETY_MARGIN_TOKENS", 2_048),
+  aiAgentRepeatWarningThreshold: agentRepeatToolCallThresholds.warning,
+  aiAgentRepeatBlockThreshold: agentRepeatToolCallThresholds.block,
   braveSearchApiKey: process.env.BRAVE_SEARCH_API_KEY || "",
   braveSearchBaseUrl: process.env.BRAVE_SEARCH_BASE_URL || "https://api.search.brave.com/res/v1/web/search",
   externalContextTimeoutMs: numberFromEnv("EXTERNAL_CONTEXT_TIMEOUT_MS", 15_000),
