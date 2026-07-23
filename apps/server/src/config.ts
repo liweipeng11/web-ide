@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import path from "node:path";
+import { resolveAgentBudgetPolicy } from "./agentBudgetPolicy.js";
 import { readFeatureFlags } from "./featureFlags.js";
 import { readProjectMemoryFeatureFlags } from "./projectMemory/projectMemoryFeatureFlags.js";
 
@@ -139,6 +140,7 @@ function modelCatalogFromEnv(): Array<Record<string, unknown>> {
 
 const agentRepeatToolCallThresholds = resolveAgentRepeatToolCallThresholds();
 const agentNoProgressPolicy = resolveAgentNoProgressPolicy();
+const agentBudgetPolicy = resolveAgentBudgetPolicy();
 
 export const config = {
   aiApiKey: process.env.AI_API_KEY || "",
@@ -155,6 +157,9 @@ export const config = {
   aiContextWindowTokens: numberFromEnv("AI_CONTEXT_WINDOW_TOKENS", 128_000),
   aiMaxOutputTokens: numberFromEnv("AI_MAX_OUTPUT_TOKENS", 8_192),
   aiContextSafetyMarginTokens: numberFromEnv("AI_CONTEXT_SAFETY_MARGIN_TOKENS", 2_048),
+  aiAgentMaxSteps: agentBudgetPolicy.maxSteps,
+  aiAgentConvergenceRemainingSteps: agentBudgetPolicy.convergenceRemainingSteps,
+  aiAgentForceFinalRemainingSteps: agentBudgetPolicy.forceFinalRemainingSteps,
   aiAgentRepeatWarningThreshold: agentRepeatToolCallThresholds.warning,
   aiAgentRepeatBlockThreshold: agentRepeatToolCallThresholds.block,
   aiAgentMaxNoProgressSteps: agentNoProgressPolicy.maxSteps,

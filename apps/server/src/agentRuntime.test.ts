@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { resolveAgentBudgetPolicy } from "./agentBudgetPolicy.js";
 import { resumeAgentRuntimeAfterApproval, runAgentRuntime } from "./agentRuntime.js";
 import { createAgentToolRegistry } from "./agentToolRegistry.js";
 import { AI_AGENT_ACT_SYSTEM_PROMPT } from "./prompts.js";
@@ -380,11 +381,217 @@ test("agent runtime warns the model before the tool budget is exhausted", async 
   });
 
   const hasBudgetWarning = requests.some((request) =>
-    ((request.messages as Array<{ content?: string }> | undefined) || []).some((message) => message.content?.includes("near the tool-call limit"))
+    ((request.messages as Array<{ content?: string }> | undefined) || []).some((message) => message.content?.includes("预算收敛区间"))
   );
 
   assert.equal(result.status, "completed");
   assert.equal(hasBudgetWarning, true);
+});
+
+test("agent budget configuration validates all threshold relationships", () => {
+  assert.deepEqual(resolveAgentBudgetPolicy({
+    AI_AGENT_MAX_STEPS: "30",
+    AI_AGENT_CONVERGENCE_REMAINING_STEPS: "5",
+    AI_AGENT_FORCE_FINAL_REMAINING_STEPS: "2"
+  }), {
+    maxSteps: 30,
+    convergenceRemainingSteps: 5,
+    forceFinalRemainingSteps: 2
+  });
+
+  // 阈值相等、顺序颠倒或非正整数都会整体回退，避免只修正单项后产生隐蔽配置。
+  assert.deepEqual(resolveAgentBudgetPolicy({
+    AI_AGENT_MAX_STEPS: "3",
+    AI_AGENT_CONVERGENCE_REMAINING_STEPS: "3",
+    AI_AGENT_FORCE_FINAL_REMAINING_STEPS: "0"
+  }), {
+    maxSteps: 24,
+    convergenceRemainingSteps: 3,
+    forceFinalRemainingSteps: 1
+  });
+});
+
+test("agent runtime dynamically narrows tools while keeping precise edit and verification tools", async () => {
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("searchFilesByName", []),
+    createRuntimeTestTool("searchCode", []),
+    createRuntimeTestTool("searchCodeRegex", []),
+    createRuntimeTestTool("searchWeb", []),
+    createRuntimeTestTool("readFile", { filePath: "src/app.ts", content: "export {}" }),
+    createRuntimeTestTool("proposePatch", { patchId: "patch-1" }),
+    createRuntimeTestTool("replaceInFile", { changed: true }),
+    createRuntimeTestTool("writeFile", { changed: true }),
+    createRuntimeTestTool("runCommand", { exitCode: 0 })
+  ]);
+  const requests: Record<string, unknown>[] = [];
+  let completionCount = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "完成实现并验证",
+    registry,
+    maxSteps: 4,
+    convergenceRemainingSteps: 3,
+    forceFinalRemainingSteps: 1,
+    requestCompletion: async (body) => {
+      requests.push(body);
+      completionCount += 1;
+      if (completionCount <= 2) {
+        return {
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: `precise-read-${completionCount}`,
+                type: "function",
+                function: { name: "readFile", arguments: JSON.stringify({ filePath: `src/app-${completionCount}.ts` }) }
+              }]
+            }
+          }]
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "已完成收敛处理。" } }] };
+    }
+  });
+
+  const normalTools = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
+  const convergenceTools = ((requests[1].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
+  assert.equal(result.status, "completed");
+  assert.equal(normalTools.includes("searchCode"), true);
+  assert.equal(convergenceTools.includes("searchFilesByName"), false);
+  assert.equal(convergenceTools.includes("searchCode"), false);
+  assert.equal(convergenceTools.includes("searchCodeRegex"), false);
+  assert.equal(convergenceTools.includes("searchWeb"), false);
+  assert.equal(convergenceTools.includes("readFile"), true);
+  assert.equal(convergenceTools.includes("proposePatch"), true);
+  assert.equal(convergenceTools.includes("replaceInFile"), true);
+  assert.equal(convergenceTools.includes("writeFile"), true);
+  assert.equal(convergenceTools.includes("runCommand"), true);
+});
+
+test("agent runtime hard-blocks hidden broad searches during convergence", async () => {
+  let executions = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("searchCode", [], () => { executions += 1; }),
+    createRuntimeTestTool("readFile", { content: "ok" })
+  ]);
+  const requests: Record<string, unknown>[] = [];
+  let completionCount = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "不要浪费剩余预算",
+    registry,
+    maxSteps: 3,
+    convergenceRemainingSteps: 2,
+    forceFinalRemainingSteps: 1,
+    requestCompletion: async (body) => {
+      requests.push(body);
+      completionCount += 1;
+      if (completionCount <= 2) {
+        return {
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: `broad-search-${completionCount}`,
+                type: "function",
+                function: { name: "searchCode", arguments: JSON.stringify({ query: `query-${completionCount}` }) }
+              }]
+            }
+          }]
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "已停止搜索并给出结论。" } }] };
+    }
+  });
+
+  const convergenceTools = ((requests[1].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
+  assert.equal(result.status, "completed");
+  assert.equal(executions, 1);
+  assert.equal(convergenceTools.includes("searchCode"), false);
+  assert.match(result.messages.find((message) => message.role === "tool" && message.toolCallId === "broad-search-2")?.content || "", /convergence_tool_call_blocked/);
+});
+
+test("agent runtime forces the final request without tools and prioritizes pending patch context", async () => {
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("readFile", { filePath: "src/app.ts", content: "export {}" }),
+    createRuntimeTestTool("searchCode", [])
+  ]);
+  const requests: Record<string, unknown>[] = [];
+  let completionCount = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "总结补丁",
+    registry,
+    generatedPatchIds: ["patch-existing"],
+    maxSteps: 2,
+    forceFinalRemainingSteps: 1,
+    requestCompletion: async (body) => {
+      requests.push(body);
+      completionCount += 1;
+      return completionCount === 1
+        ? {
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: "final-read",
+                  type: "function",
+                  function: { name: "readFile", arguments: JSON.stringify({ filePath: "src/app.ts" }) }
+                }]
+              }
+            }]
+          }
+        : { choices: [{ message: { role: "assistant", content: "补丁已生成，等待审核。" } }] };
+    }
+  });
+
+  const finalRequest = requests[1];
+  const finalMessages = finalRequest.messages as Array<{ content?: string }>;
+  assert.equal(result.status, "completed");
+  assert.equal(finalRequest.tool_choice, "none");
+  assert.deepEqual(finalRequest.tools, []);
+  assert.equal(finalMessages.some((message) => message.content?.includes("待审核补丁")), true);
+  assert.equal(finalMessages.some((message) => message.content?.includes("工具调用已被 Runtime 禁用")), true);
+});
+
+test("agent runtime prevents a provider from bypassing the force-final tool ban", async () => {
+  let executions = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("searchCode", [], () => { executions += 1; })
+  ]);
+  let capturedRequest: Record<string, unknown> | undefined;
+
+  const result = await runAgentRuntime({
+    userRequest: "立即给出结论",
+    registry,
+    maxSteps: 1,
+    requestCompletion: async (body) => {
+      capturedRequest = body;
+      return {
+        choices: [{
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "forbidden-final-search",
+              type: "function",
+              function: { name: "searchCode", arguments: JSON.stringify({ query: "again" }) }
+            }]
+          }
+        }]
+      };
+    }
+  });
+
+  assert.equal(capturedRequest?.tool_choice, "none");
+  assert.deepEqual(capturedRequest?.tools, []);
+  assert.equal(executions, 0);
+  assert.equal(result.status, "step_limit_reached");
+  assert.match(result.content, /未完成原因/);
+  assert.match(result.content, /硬性拦截/);
 });
 
 test("agent runtime warns on repeated tool calls with the same arguments", async () => {
@@ -1114,12 +1321,13 @@ test("agent runtime stops when tool-call step limit is reached", async () => {
   });
 
   assert.equal(result.status, "step_limit_reached");
-  assert.match(result.content, /tool-call limit/);
-  assert.equal(steps.some((step) => step.type === "error" && step.message.includes("Tool budget limit reached")), true);
+  assert.match(result.content, /已用完 2 个模型步骤/);
+  assert.match(result.content, /未完成原因/);
+  assert.equal(steps.some((step) => step.type === "error" && step.message.includes("已停止新的工具调用")), true);
   assert.equal(capturedMetrics?.result.stopReason, "step_limit");
   assert.equal(capturedMetrics?.tools.repeatedCalls, 1);
-  assert.equal(capturedMetrics?.tools.cacheHits, 1);
-  assert.equal(capturedMetrics?.tools.emptyResults, 2);
+  assert.equal(capturedMetrics?.tools.cacheHits, 0);
+  assert.equal(capturedMetrics?.tools.emptyResults, 1);
   assert.deepEqual(capturedMetrics?.tools.mostRepeatedCall, {
     toolName: "searchCode",
     signature: 'searchCode:{"query":"Agent"}',
@@ -1127,8 +1335,8 @@ test("agent runtime stops when tool-call step limit is reached", async () => {
     repeatedCalls: 1,
     firstStep: 1,
     lastStep: 2,
-    allResultsEmpty: true,
-    cacheHit: true
+    allResultsEmpty: false,
+    cacheHit: false
   });
 });
 
@@ -1180,7 +1388,7 @@ test("agent runtime emits a visible budget warning step before exhausting tool b
     })
   });
 
-  assert.equal(steps.some((step) => step.type === "message" && step.content.includes("Tool budget warning")), true);
+  assert.equal(steps.some((step) => step.type === "message" && step.content.includes("预算进入收敛区间")), true);
 });
 
 test("plan mode exposes only readonly tools to the model", async () => {
@@ -1298,11 +1506,11 @@ test("agent runtime budget warning keeps patch review as the preferred path", as
     }
   });
 
-  const warningMessages = requests.flatMap((request) => (request.messages as Array<{ content?: string }> | undefined) || []).filter((message) => message.content?.includes("near the tool-call limit"));
+  const warningMessages = requests.flatMap((request) => (request.messages as Array<{ content?: string }> | undefined) || []).filter((message) => message.content?.includes("预算收敛区间"));
   assert.equal(result.status, "completed");
-  assert.equal(warningMessages.some((message) => message.content?.includes("use proposePatch")), true);
-  assert.equal(warningMessages.some((message) => message.content?.includes("reviewable pending patch")), true);
-  assert.equal(warningMessages.some((message) => message.content?.includes("replaceInFile/writeFile only")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("proposePatch")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("禁止继续宽泛搜索")), true);
+  assert.equal(warningMessages.some((message) => message.content?.includes("必要的编辑或验证工具")), true);
 });
 
 test("agent runtime repeated-tool warning asks the model to move to patch review", async () => {

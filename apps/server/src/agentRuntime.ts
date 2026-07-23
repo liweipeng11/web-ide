@@ -1,5 +1,12 @@
 import crypto from "node:crypto";
 import { appendAgentMessage, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
+import {
+  filterToolSchemasForBudgetPhase,
+  getAgentBudgetPhase,
+  isToolAvailableInBudgetPhase,
+  normalizeRuntimeAgentBudgetPolicy,
+  type AgentBudgetPhase
+} from "./agentBudgetPolicy.js";
 import { getAgentModeConfig, normalizeAgentMode, type AgentMode } from "./agentModes.js";
 import { evaluateAgentToolApproval } from "./agentPermissions.js";
 import type { AgentToolRegistry } from "./agentToolRegistry.js";
@@ -44,6 +51,8 @@ export type AgentRuntimeOptions = {
   agentContext?: AgentContext;
   registry?: AgentToolRegistry;
   maxSteps?: number;
+  convergenceRemainingSteps?: number;
+  forceFinalRemainingSteps?: number;
   runId?: string;
   generatedPatchIds?: string[];
   taskSessionId?: string | null;
@@ -86,11 +95,6 @@ async function loadRuntimeContextState(taskSessionId: string | null | undefined)
     return { planStatus: [] as string[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
   }
 }
-
-// 16 步在“搜索 -> 读取上下文 -> 发起补丁/命令审批”的链路里偏紧，
-// 会导致任务在真正进入审批前就触发步数上限。
-const DEFAULT_MAX_AGENT_STEPS = 24;
-const TOOL_BUDGET_WARNING_REMAINING_STEPS = 3;
 
 function createDefaultAgentContext(userRequest: string): AgentContext {
   return {
@@ -331,12 +335,59 @@ function buildNegativeEvidenceMessage(agentContext: AgentContext): ModelMessage 
 
 function createToolBudgetWarningMessage(remainingSteps: number, hasGeneratedPatch: boolean): ModelMessage {
   const instruction = hasGeneratedPatch
-    ? "A pending patch already exists. Stop calling tools unless approval is required, and provide the final concise Chinese summary now."
-    : "If you have enough context, use proposePatch to create a reviewable pending patch before files are written. Use replaceInFile/writeFile only when the user explicitly requested direct editing or the patch path cannot safely complete the change. Avoid repeating search/read calls unless they are strictly necessary.";
+    ? "已有待审核补丁。除非完成审批所必需，否则停止调用工具，并立即给出简洁的中文补丁说明。"
+    : "禁止继续宽泛搜索。请复用已有证据，优先使用精确读取、proposePatch、必要的编辑或验证工具完成任务；如果无法完成，请明确说明已确认事实和未完成原因。";
 
   return {
     role: "user",
-    content: `You are near the tool-call limit with ${remainingSteps} model step(s) left. ${instruction}`
+    content: `Agent 已进入预算收敛区间，仅剩 ${remainingSteps} 个模型步骤。${instruction}`
+  };
+}
+
+function createForceFinalMessage(agentContext: AgentContext, generatedPatchIds: string[]): ModelMessage {
+  const facts = buildRecoveryFacts(agentContext, generatedPatchIds);
+  const patchInstruction = generatedPatchIds.length
+    ? `已有 ${generatedPatchIds.length} 个待审核补丁，最终回答必须优先说明补丁内容和审核状态。`
+    : "如果任务尚未完成，最终回答必须说明未完成原因和建议的下一步。";
+
+  return {
+    role: "user",
+    content: [
+      "这是最后的模型步骤，工具调用已被 Runtime 禁用。请立即输出可独立理解的中文最终结论。",
+      patchInstruction,
+      facts.length ? `已确认事实：\n${facts.map((fact) => `- ${fact}`).join("\n")}` : "当前没有可补充的已确认事实。"
+    ].join("\n")
+  };
+}
+
+function createBudgetLimitContent(
+  maxSteps: number,
+  agentContext: AgentContext,
+  generatedPatchIds: string[],
+  reason: string
+) {
+  const facts = buildRecoveryFacts(agentContext, generatedPatchIds);
+  return [
+    `智能体已用完 ${maxSteps} 个模型步骤，Runtime 已停止新的工具调用。`,
+    generatedPatchIds.length
+      ? `已生成 ${generatedPatchIds.length} 个待审核补丁：${generatedPatchIds.join("、")}。`
+      : "尚未生成待审核补丁。",
+    facts.length ? `已确认事实：\n${facts.map((fact) => `- ${fact}`).join("\n")}` : "已确认事实：暂无可用的结构化事实。",
+    `未完成原因：${reason}`
+  ].join("\n");
+}
+
+function createBudgetBlockedToolMessage(toolCall: ModelToolCall, phase: AgentBudgetPhase): ModelMessage {
+  return {
+    role: "tool",
+    toolCallId: toolCall.id,
+    content: JSON.stringify({
+      error: phase === "force_final" ? "force_final_tool_call_blocked" : "convergence_tool_call_blocked",
+      toolName: toolCall.name,
+      instruction: phase === "force_final"
+        ? "工具预算已关闭，请直接输出最终结论。"
+        : "预算已进入收敛区间，请复用已有搜索结果并改用精确读取、编辑、补丁或验证工具。"
+    })
   };
 }
 
@@ -487,7 +538,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const runId = options.runId || createAiRunId("agent-runtime");
   const mode = normalizeAgentMode(options.mode);
   const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
-  const maxSteps = options.maxSteps ?? DEFAULT_MAX_AGENT_STEPS;
+  const budgetPolicy = normalizeRuntimeAgentBudgetPolicy({
+    maxSteps: options.maxSteps ?? config.aiAgentMaxSteps,
+    convergenceRemainingSteps: options.convergenceRemainingSteps ?? config.aiAgentConvergenceRemainingSteps,
+    forceFinalRemainingSteps: options.forceFinalRemainingSteps ?? config.aiAgentForceFinalRemainingSteps
+  });
+  const maxSteps = budgetPolicy.maxSteps;
   const providerId = options.providerId || "openai-compatible";
   const modelId = options.modelId || config.aiModel;
   const completeModel: (request: ModelRequest) => Promise<ModelResponse> = options.completeModel || (async (request: ModelRequest) => {
@@ -529,7 +585,6 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     ? options.recoveryAttempts as number
     : config.aiAgentRecoveryAttempts;
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, generatedPatchIds, taskSessionId: options.taskSessionId, onAgentStep: options.onAgentStep, registry, emitToolApprovalSteps: false });
-  const availableToolNames = new Set(registry.definitions.map((definition) => definition.name));
   const toolCallCounts = new Map<string, number>();
   const repeatCountsByToolCall = new Map<ModelToolCall, number>();
   const repeatedToolWarnings = new Set<string>();
@@ -557,29 +612,35 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   try {
     for (let step = 0; step < maxSteps; step += 1) {
       const remainingSteps = maxSteps - step;
+      const budgetPhase = getAgentBudgetPhase(remainingSteps, budgetPolicy);
+      const visibleToolSchemas = filterToolSchemasForBudgetPhase(registry.schemas, budgetPhase);
+      const currentAvailableToolNames = new Set(visibleToolSchemas.map((schema) => schema.function.name));
 
-    if (!budgetWarningSent && step > 0 && remainingSteps <= TOOL_BUDGET_WARNING_REMAINING_STEPS) {
+    if (!budgetWarningSent && budgetPhase === "convergence") {
       const warningMessage = createToolBudgetWarningMessage(remainingSteps, generatedPatchIds.length > 0);
       messages.push(warningMessage);
       await persistAgentMessage(options.taskSessionId, warningMessage);
       budgetWarningSent = true;
       // 把预算预警写入步骤流，前端可直接展示“即将触达工具预算”的观测信号。
-      options.onAgentStep?.(createAgentStep({ type: "message", content: `Tool budget warning: ${remainingSteps} model step(s) remaining.` }));
-      logAi(runId, "runtime.budgetWarning", { step, remainingSteps, generatedPatchIds });
+      options.onAgentStep?.(createAgentStep({ type: "message", content: `预算进入收敛区间：剩余 ${remainingSteps} 个模型步骤，宽泛搜索工具已禁用。` }));
+      logAi(runId, "runtime.budgetConvergence", { step, remainingSteps, generatedPatchIds, tools: [...currentAvailableToolNames] });
     }
 
     logAi(runId, "runtime.completion.request", { step, messageCount: messages.length });
     const negativeEvidenceMessage = buildNegativeEvidenceMessage(agentContext);
     const workflowProgressMessage: ModelMessage | null = options.workflow
-      ? { role: "system", content: buildTaskWorkflowProgressPrompt(options.workflow, agentContext, availableToolNames) }
+      ? { role: "system", content: buildTaskWorkflowProgressPrompt(options.workflow, agentContext, currentAvailableToolNames) }
       : null;
-    const transientDecisionMessages = [negativeEvidenceMessage, workflowProgressMessage].filter((message): message is ModelMessage => Boolean(message));
+    const forceFinalMessage = budgetPhase === "force_final"
+      ? createForceFinalMessage(agentContext, generatedPatchIds)
+      : null;
+    const transientDecisionMessages = [negativeEvidenceMessage, workflowProgressMessage, forceFinalMessage].filter((message): message is ModelMessage => Boolean(message));
     const fullModelRequest: ModelRequest = {
       model: modelId,
       temperature: config.aiChatTemperature,
       messages: transientDecisionMessages.length ? [...messages, ...transientDecisionMessages] : messages,
-      tools: registry.schemas,
-      toolChoice: "auto"
+      tools: budgetPhase === "force_final" ? [] : visibleToolSchemas,
+      toolChoice: budgetPhase === "force_final" ? "none" : "auto"
     };
     let modelRequest = fullModelRequest;
     if (contextBudgetEnabled) {
@@ -625,6 +686,46 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     metrics.addUsage(completion.usage);
     const message = completion.message;
     const toolCalls = message.toolCalls ?? [];
+
+    if (budgetPhase === "force_final" && toolCalls.length) {
+      // 即使 Provider 违反 toolChoice=none，最终轮也只记录越权尝试，不执行任何工具。
+      for (const toolCall of toolCalls) {
+        const signature = getToolCallSignature(toolCall);
+        const nextCount = (toolCallCounts.get(signature) || 0) + 1;
+        toolCallCounts.set(signature, nextCount);
+        metrics.recordToolCall({
+          toolName: toolCall.name,
+          signature,
+          step: step + 1,
+          repeated: nextCount > 1,
+          invalid: !registry.get(toolCall.name)
+        });
+        metrics.recordToolResult({ signature, noProgress: true });
+      }
+      const content = message.content?.trim() || createBudgetLimitContent(
+        maxSteps,
+        agentContext,
+        generatedPatchIds,
+        "模型在强制结论轮仍尝试调用工具，该调用已被硬性拦截。"
+      );
+      const assistantMessage: ModelMessage = { role: "assistant", content };
+      messages.push(assistantMessage);
+      await persistAgentMessage(options.taskSessionId, assistantMessage);
+      options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
+      logAi(runId, "runtime.forceFinalToolCallBlocked", { step, toolNames: toolCalls.map((toolCall) => toolCall.name) });
+      await metrics.finish({ status: "step_limit_reached", stopReason: "step_limit", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+      return {
+        status: "step_limit_reached",
+        runId,
+        content,
+        messages,
+        agentContext,
+        generatedPatchIds,
+        pendingToolCall: null,
+        contextBudgetSnapshot: latestContextBudgetSnapshot,
+        contextSummary: latestContextSummary
+      };
+    }
 
     if (!toolCalls.length) {
       const content = message.content || "";
@@ -693,7 +794,17 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       }
 
       const definition = registry.get(toolCall.name);
-      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, agentContext, availableToolNames, options.workflow);
+      if (!isToolAvailableInBudgetPhase(toolCall.name, budgetPhase)) {
+        metrics.recordToolFailure();
+        metrics.recordToolResult({ signature, noProgress: true });
+        consecutiveNoProgressSteps += 1;
+        const blockedMessage = createBudgetBlockedToolMessage(toolCall, budgetPhase);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        logAi(runId, "runtime.budgetToolBlocked", { step, remainingSteps, budgetPhase, toolName: toolCall.name });
+        continue;
+      }
+      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, agentContext, currentAvailableToolNames, options.workflow);
       // 旧调用方可能未创建工作流快照，继续使用原有通用门禁保持兼容。
       const patternFinderBlockReason = options.workflow ? null : getPatternFinderBlockReason(toolCall.name, agentContext, registry);
       const existenceCheckBlockReason = options.workflow ? null : getExistenceCheckBlockReason(toolCall.name, agentContext, registry);
@@ -877,7 +988,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     }
   }
 
-  const content = `Tool budget limit reached: Agent runtime stopped after ${maxSteps} step(s) because the tool-call limit was reached.`;
+  const content = createBudgetLimitContent(
+    maxSteps,
+    agentContext,
+    generatedPatchIds,
+    "模型在预算内未能返回最终结论。"
+  );
   options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
   logAi(runId, "runtime.stepLimitReached", { mode, maxSteps });
   await metrics.finish({ status: "step_limit_reached", stopReason: "step_limit", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
