@@ -16,16 +16,39 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
     tracker.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8, cachedInputPerMillionTokens: 1 });
     tracker.addUsage({ inputTokens: 10, outputTokens: 2, reasoningTokens: 1, cachedInputTokens: 4 });
     tracker.recordFirstTokenLatency(25, "provider");
-    tracker.recordToolCall();
-    tracker.recordToolCall({ repeated: true });
+    const signature = 'searchCode:{"query":"router"}';
+    tracker.recordToolCall({ toolName: "searchCode", signature, step: 1 });
+    tracker.recordToolResult({ signature, empty: true });
+    tracker.recordToolCall({ toolName: "searchCode", signature, step: 2, repeated: true });
+    tracker.recordToolResult({ signature, cached: true, empty: true });
     tracker.recordToolFailure();
     const metrics = await tracker.finish({ status: "completed", patchFileCount: 2, validationCommandCount: 1, validationStatus: "passed" });
     const log = await fs.readFile(filePath, "utf8");
 
-    assert.deepEqual(metrics.tools, { calls: 2, repeatedCalls: 1, failedCalls: 1 });
+    assert.deepEqual(metrics.tools, {
+      calls: 2,
+      repeatedCalls: 1,
+      cacheHits: 1,
+      emptyResults: 2,
+      invalidToolCalls: 0,
+      consecutiveNoProgressSteps: 2,
+      maxConsecutiveNoProgressSteps: 2,
+      failedCalls: 1,
+      mostRepeatedCall: {
+        toolName: "searchCode",
+        signature,
+        calls: 2,
+        repeatedCalls: 1,
+        firstStep: 1,
+        lastStep: 2,
+        allResultsEmpty: true,
+        cacheHit: true
+      }
+    });
     assert.equal(metrics.usage.cachedInputTokens, 4);
     assert.equal(metrics.estimatedCostUsd, 0.000032);
     assert.equal(metrics.result.patchFileCount, 2);
+    assert.equal(metrics.result.stopReason, "completed");
     assert.equal(metrics.firstTokenLatencyMs, 25);
     assert.equal(metrics.firstTokenLatencySource, "provider");
     assert.equal(log.includes("Authorization"), false);

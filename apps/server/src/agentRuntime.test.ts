@@ -6,6 +6,7 @@ import { AI_AGENT_ACT_SYSTEM_PROMPT } from "./prompts.js";
 import type { AgentCompletionResponse, AgentToolDefinition, AgentToolRuntime } from "./agentToolTypes.js";
 import type { AgentStep } from "./types.js";
 import { createTaskWorkflow } from "./taskWorkflow/index.js";
+import type { RunMetrics } from "./observability/index.js";
 
 function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runtime: AgentToolRuntime) => void): AgentToolDefinition {
   return {
@@ -534,6 +535,7 @@ test("agent runtime exposes only the first pending approval from a tool batch", 
 
 test("agent runtime feeds blocked unknown tools back to the model", async () => {
   const registry = createAgentToolRegistry([]);
+  let capturedMetrics: RunMetrics | undefined;
   const responses: AgentCompletionResponse[] = [
     {
       choices: [
@@ -568,6 +570,7 @@ test("agent runtime feeds blocked unknown tools back to the model", async () => 
     userRequest: "Call unknown tool",
     registry,
     runId: "test-runtime-blocked-tool",
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; },
     requestCompletion: async () => {
       const response = responses.shift();
       assert.ok(response);
@@ -578,6 +581,8 @@ test("agent runtime feeds blocked unknown tools back to the model", async () => 
   assert.equal(result.status, "completed");
   assert.match(result.messages.find((message) => message.role === "tool")?.content || "", /Unknown tool/);
   assert.equal(result.content, "Cannot use that tool, so I will stop.");
+  assert.equal(capturedMetrics?.tools.invalidToolCalls, 1);
+  assert.equal(capturedMetrics?.tools.maxConsecutiveNoProgressSteps, 1);
 });
 
 test("agent runtime blocks prohibited runCommand before approval", async () => {
@@ -707,12 +712,14 @@ test("agent runtime resumes after rejecting a pending tool call", async () => {
 test("agent runtime stops when tool-call step limit is reached", async () => {
   const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
   const steps: AgentStep[] = [];
+  let capturedMetrics: RunMetrics | undefined;
 
   const result = await runAgentRuntime({
     userRequest: "Search code",
     registry,
     runId: "test-runtime-limit",
     maxSteps: 2,
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; },
     onAgentStep(step) {
       steps.push(step);
     },
@@ -738,6 +745,20 @@ test("agent runtime stops when tool-call step limit is reached", async () => {
   assert.equal(result.status, "step_limit_reached");
   assert.match(result.content, /tool-call limit/);
   assert.equal(steps.some((step) => step.type === "error" && step.message.includes("Tool budget limit reached")), true);
+  assert.equal(capturedMetrics?.result.stopReason, "step_limit");
+  assert.equal(capturedMetrics?.tools.repeatedCalls, 1);
+  assert.equal(capturedMetrics?.tools.cacheHits, 1);
+  assert.equal(capturedMetrics?.tools.emptyResults, 2);
+  assert.deepEqual(capturedMetrics?.tools.mostRepeatedCall, {
+    toolName: "searchCode",
+    signature: 'searchCode:{"query":"Agent"}',
+    calls: 2,
+    repeatedCalls: 1,
+    firstStep: 1,
+    lastStep: 2,
+    allResultsEmpty: true,
+    cacheHit: true
+  });
 });
 
 test("agent runtime restores Safe Editor context after approval", async () => {

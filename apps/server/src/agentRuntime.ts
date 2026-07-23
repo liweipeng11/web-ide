@@ -221,6 +221,28 @@ function getToolCallSignature(toolCall: ModelToolCall) {
   return `${toolCall.name}:${stableStringify(toolCall.arguments)}`;
 }
 
+function analyzeToolResult(content: ModelMessage["content"]) {
+  if (typeof content !== "string") return { cached: false, empty: false, failed: false };
+
+  try {
+    const value = JSON.parse(content) as unknown;
+    if (value === null || value === "") return { cached: false, empty: true, failed: false };
+    if (Array.isArray(value)) return { cached: false, empty: value.length === 0, failed: false };
+    if (!value || typeof value !== "object") return { cached: false, empty: false, failed: false };
+
+    const record = value as Record<string, unknown>;
+    const cached = record.cached === true || (typeof record.note === "string" && record.note.includes("already called with these arguments"));
+    const failed = typeof record.error === "string";
+    // 缓存包装和搜索工具都使用这些集合字段；只判断明确存在的空集合，避免把普通对象误报为空结果。
+    const collection = ["results", "matches", "files", "items"]
+      .map((key) => record[key])
+      .find((entry) => Array.isArray(entry));
+    return { cached, empty: Array.isArray(collection) && collection.length === 0, failed };
+  } catch {
+    return { cached: false, empty: false, failed: false };
+  }
+}
+
 function createToolBudgetWarningMessage(remainingSteps: number, hasGeneratedPatch: boolean): ModelMessage {
   const instruction = hasGeneratedPatch
     ? "A pending patch already exists. Stop calling tools unless approval is required, and provide the final concise Chinese summary now."
@@ -524,7 +546,13 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const signature = getToolCallSignature(toolCall);
       const nextCount = (toolCallCounts.get(signature) || 0) + 1;
       toolCallCounts.set(signature, nextCount);
-      metrics.recordToolCall({ repeated: nextCount > 1 });
+      metrics.recordToolCall({
+        toolName: toolCall.name,
+        signature,
+        step: step + 1,
+        repeated: nextCount > 1,
+        invalid: !registry.get(toolCall.name)
+      });
 
       if (nextCount >= REPEATED_TOOL_CALL_WARNING_THRESHOLD && !repeatedToolWarnings.has(signature)) {
         repeatedToolWarnings.add(signature);
@@ -540,6 +568,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
       if (workflowBlockReason) {
         metrics.recordToolFailure();
+        metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: workflowBlockReason, workflow: options.workflow?.type });
         options.onAgentStep?.(createAgentStep({ type: "error", message: workflowBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, workflowBlockReason);
@@ -549,6 +578,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       }
       if (patternFinderBlockReason) {
         metrics.recordToolFailure();
+        metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: patternFinderBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: patternFinderBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, patternFinderBlockReason);
@@ -558,6 +588,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       }
       if (existenceCheckBlockReason) {
         metrics.recordToolFailure();
+        metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: existenceCheckBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: existenceCheckBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, existenceCheckBlockReason);
@@ -569,6 +600,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
       if (approval.status === "blocked") {
         metrics.recordToolFailure();
+        metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: approval.reason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: approval.reason }));
         const blockedMessage = createBlockedToolMessage(toolCall, approval.reason);
@@ -623,7 +655,14 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
       try {
         const result = toModelToolMessage(await executeAgentToolCall(toAgentToolCall(toolCall), toolRuntime));
-        if (typeof result.content === "string" && /\"error\"\s*:/.test(result.content)) metrics.recordToolFailure();
+        const resultMetrics = analyzeToolResult(result.content);
+        if (resultMetrics.failed) metrics.recordToolFailure();
+        metrics.recordToolResult({
+          signature: getToolCallSignature(toolCall),
+          cached: resultMetrics.cached,
+          empty: resultMetrics.empty,
+          noProgress: resultMetrics.cached || resultMetrics.empty || resultMetrics.failed
+        });
         messages.push(result);
         await persistAgentMessage(options.taskSessionId, result);
       } catch (error) {
@@ -643,7 +682,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const content = `Tool budget limit reached: Agent runtime stopped after ${maxSteps} step(s) because the tool-call limit was reached.`;
   options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
   logAi(runId, "runtime.stepLimitReached", { mode, maxSteps });
-  await metrics.finish({ status: "step_limit_reached", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+  await metrics.finish({ status: "step_limit_reached", stopReason: "step_limit", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
 
   return {
     status: "step_limit_reached",
@@ -657,7 +696,13 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     contextSummary: latestContextSummary
   };
   } catch (error) {
-    await metrics.finish({ status: error instanceof Error && error.name === "AbortError" ? "cancelled" : "failed", failureCategory: classifyRunFailure(error), patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+    const cancelled = error instanceof Error && error.name === "AbortError";
+    await metrics.finish({
+      status: cancelled ? "cancelled" : "failed",
+      stopReason: cancelled ? "cancelled" : "provider_error",
+      failureCategory: classifyRunFailure(error),
+      patchFileCount: countGeneratedPatchFiles(generatedPatchIds)
+    });
     throw error;
   }
 }

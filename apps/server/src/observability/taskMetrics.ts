@@ -21,6 +21,26 @@ function snapshotPath(key: string) {
   return path.join(snapshotDirectory(), `${crypto.createHash("sha256").update(key).digest("hex")}.json`);
 }
 
+function normalizeMetricFields(metrics: RunMetrics) {
+  // 阶段 1 之前的持久化快照没有诊断字段，读取时补零以保持向后兼容。
+  metrics.tools.cacheHits ??= 0;
+  metrics.tools.emptyResults ??= 0;
+  metrics.tools.invalidToolCalls ??= 0;
+  metrics.tools.consecutiveNoProgressSteps ??= 0;
+  metrics.tools.maxConsecutiveNoProgressSteps ??= 0;
+  metrics.tools.mostRepeatedCall ??= null;
+  metrics.result.stopReason ??= metrics.result.status === "completed"
+    ? "completed"
+    : metrics.result.status === "awaiting_approval"
+      ? "awaiting_approval"
+      : metrics.result.status === "cancelled"
+        ? "cancelled"
+        : metrics.result.status === "step_limit_reached"
+          ? "step_limit"
+          : "provider_error";
+  return metrics;
+}
+
 async function readSnapshot(key: string) {
   const content = await fs.readFile(snapshotPath(key), "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
@@ -33,7 +53,7 @@ async function readSnapshot(key: string) {
     if (metrics?.schemaVersion !== 1 || metrics.scope !== "task_run") return null;
     // 兼容首 token 来源字段加入前生成的阶段 0 快照。
     metrics.firstTokenLatencySource ??= metrics.firstTokenLatencyMs === null ? "unavailable" : "completion_upper_bound";
-    return metrics;
+    return normalizeMetricFields(metrics);
   } catch {
     return null;
   }
@@ -124,11 +144,23 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
     current.tools.calls += metrics.tools.calls;
     current.tools.repeatedCalls += metrics.tools.repeatedCalls;
     current.tools.failedCalls += metrics.tools.failedCalls;
+    current.tools.cacheHits += metrics.tools.cacheHits;
+    current.tools.emptyResults += metrics.tools.emptyResults;
+    current.tools.invalidToolCalls += metrics.tools.invalidToolCalls;
+    current.tools.consecutiveNoProgressSteps = metrics.tools.consecutiveNoProgressSteps;
+    current.tools.maxConsecutiveNoProgressSteps = Math.max(current.tools.maxConsecutiveNoProgressSteps, metrics.tools.maxConsecutiveNoProgressSteps);
+    if (
+      metrics.tools.mostRepeatedCall
+      && (!current.tools.mostRepeatedCall || metrics.tools.mostRepeatedCall.repeatedCalls > current.tools.mostRepeatedCall.repeatedCalls)
+    ) {
+      current.tools.mostRepeatedCall = structuredClone(metrics.tools.mostRepeatedCall);
+    }
     current.context.compressionCount += metrics.context.compressionCount;
     current.context.estimatedTokensBefore = Math.max(current.context.estimatedTokensBefore ?? 0, metrics.context.estimatedTokensBefore ?? 0) || null;
     current.context.estimatedTokensAfter = metrics.context.estimatedTokensAfter ?? current.context.estimatedTokensAfter;
     if (metrics.context.estimator !== "unavailable") current.context.estimator = metrics.context.estimator;
     current.result.status = metrics.result.status;
+    current.result.stopReason = metrics.result.stopReason;
     if (metrics.result.failureCategory !== "none") current.result.failureCategory = metrics.result.failureCategory;
     current.result.patchFileCount = Math.max(current.result.patchFileCount, metrics.result.patchFileCount);
     current.result.validationCommandCount += metrics.result.validationCommandCount;

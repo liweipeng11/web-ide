@@ -5,6 +5,38 @@ import type { ModelPrice, ModelUsage } from "../contracts/model.js";
 
 export type RunFailureCategory = "none" | "timeout" | "model_error" | "tool_error" | "validation_failure" | "cancelled" | "step_limit" | "internal_error";
 export type RunFinalStatus = "completed" | "awaiting_approval" | "failed" | "cancelled" | "step_limit_reached";
+export type AgentStopReason =
+  | "completed"
+  | "awaiting_approval"
+  | "step_limit"
+  | "repeated_tool_call"
+  | "no_progress"
+  | "invalid_tool_call"
+  | "provider_error"
+  | "cancelled";
+
+export type MostRepeatedToolCall = {
+  toolName: string;
+  signature: string;
+  calls: number;
+  repeatedCalls: number;
+  firstStep: number;
+  lastStep: number;
+  allResultsEmpty: boolean;
+  cacheHit: boolean;
+};
+
+export type ToolRuntimeMetrics = {
+  calls: number;
+  repeatedCalls: number;
+  cacheHits: number;
+  emptyResults: number;
+  invalidToolCalls: number;
+  consecutiveNoProgressSteps: number;
+  maxConsecutiveNoProgressSteps: number;
+  failedCalls: number;
+  mostRepeatedCall: MostRepeatedToolCall | null;
+};
 
 export type RunMetrics = {
   schemaVersion: 1;
@@ -22,10 +54,11 @@ export type RunMetrics = {
   usage: ModelUsage;
   // 价格未知时保持 null，禁止用 0 伪装成免费。
   estimatedCostUsd: number | null;
-  tools: { calls: number; repeatedCalls: number; failedCalls: number };
+  tools: ToolRuntimeMetrics;
   context: { compressionCount: number; estimatedTokensBefore: number | null; estimatedTokensAfter: number | null; estimator: "conservative" | "unavailable" };
   result: {
     status: RunFinalStatus;
+    stopReason: AgentStopReason;
     failureCategory: RunFailureCategory;
     patchFileCount: number;
     validationCommandCount: number;
@@ -61,6 +94,20 @@ export class RunMetricsTracker {
   private toolCalls = 0;
   private repeatedToolCalls = 0;
   private failedToolCalls = 0;
+  private cacheHits = 0;
+  private emptyResults = 0;
+  private invalidToolCalls = 0;
+  private consecutiveNoProgressSteps = 0;
+  private maxConsecutiveNoProgressSteps = 0;
+  private readonly toolCallDiagnostics = new Map<string, {
+    toolName: string;
+    calls: number;
+    firstStep: number;
+    lastStep: number;
+    observedResults: number;
+    emptyResults: number;
+    cacheHit: boolean;
+  }>();
   private firstTokenLatencyMs: number | null = null;
   private firstTokenLatencySource: RunMetrics["firstTokenLatencySource"] = "unavailable";
   private context: RunMetrics["context"] = { compressionCount: 0, estimatedTokensBefore: null, estimatedTokensAfter: null, estimator: "unavailable" };
@@ -90,14 +137,68 @@ export class RunMetricsTracker {
     return (uncachedInputTokens * this.price.inputPerMillionTokens + this.usage.cachedInputTokens * cachedRate + this.usage.outputTokens * this.price.outputPerMillionTokens) / 1_000_000;
   }
 
-  recordToolCall(input: { repeated?: boolean; failed?: boolean } = {}) {
+  recordToolCall(input: { toolName?: string; signature?: string; step?: number; repeated?: boolean; failed?: boolean; invalid?: boolean } = {}) {
     this.toolCalls += 1;
     if (input.repeated) this.repeatedToolCalls += 1;
     if (input.failed) this.failedToolCalls += 1;
+    if (input.invalid) this.invalidToolCalls += 1;
+
+    if (input.toolName && input.signature && input.step !== undefined) {
+      const existing = this.toolCallDiagnostics.get(input.signature);
+      this.toolCallDiagnostics.set(input.signature, existing
+        ? { ...existing, calls: existing.calls + 1, lastStep: input.step }
+        : {
+            toolName: input.toolName,
+            calls: 1,
+            firstStep: input.step,
+            lastStep: input.step,
+            observedResults: 0,
+            emptyResults: 0,
+            cacheHit: false
+          });
+    }
+  }
+
+  recordToolResult(input: { signature: string; cached?: boolean; empty?: boolean; noProgress?: boolean }) {
+    if (input.cached) this.cacheHits += 1;
+    if (input.empty) this.emptyResults += 1;
+
+    const diagnostic = this.toolCallDiagnostics.get(input.signature);
+    if (diagnostic) {
+      diagnostic.observedResults += 1;
+      if (input.empty) diagnostic.emptyResults += 1;
+      if (input.cached) diagnostic.cacheHit = true;
+    }
+
+    if (input.noProgress ?? Boolean(input.cached || input.empty)) {
+      this.consecutiveNoProgressSteps += 1;
+      this.maxConsecutiveNoProgressSteps = Math.max(this.maxConsecutiveNoProgressSteps, this.consecutiveNoProgressSteps);
+    } else {
+      this.consecutiveNoProgressSteps = 0;
+    }
   }
 
   recordToolFailure() {
     this.failedToolCalls += 1;
+  }
+
+  private getMostRepeatedCall(): MostRepeatedToolCall | null {
+    const repeated = [...this.toolCallDiagnostics.entries()]
+      .filter(([, diagnostic]) => diagnostic.calls > 1)
+      .sort(([, left], [, right]) => right.calls - left.calls || left.firstStep - right.firstStep)[0];
+    if (!repeated) return null;
+
+    const [signature, diagnostic] = repeated;
+    return {
+      toolName: diagnostic.toolName,
+      signature,
+      calls: diagnostic.calls,
+      repeatedCalls: diagnostic.calls - 1,
+      firstStep: diagnostic.firstStep,
+      lastStep: diagnostic.lastStep,
+      allResultsEmpty: diagnostic.observedResults > 0 && diagnostic.emptyResults === diagnostic.observedResults,
+      cacheHit: diagnostic.cacheHit
+    };
   }
 
   recordContextEstimate(estimatedTokensBefore: number, estimatedTokensAfter = estimatedTokensBefore, compressed = false) {
@@ -118,6 +219,7 @@ export class RunMetricsTracker {
 
   async finish(input: {
     status: RunFinalStatus;
+    stopReason?: AgentStopReason;
     failureCategory?: RunFailureCategory;
     patchFileCount?: number;
     validationCommandCount?: number;
@@ -135,10 +237,29 @@ export class RunMetricsTracker {
       firstTokenLatencySource: this.firstTokenLatencySource,
       usage: { ...this.usage },
       estimatedCostUsd: this.estimateCostUsd(),
-      tools: { calls: this.toolCalls, repeatedCalls: this.repeatedToolCalls, failedCalls: this.failedToolCalls },
+      tools: {
+        calls: this.toolCalls,
+        repeatedCalls: this.repeatedToolCalls,
+        cacheHits: this.cacheHits,
+        emptyResults: this.emptyResults,
+        invalidToolCalls: this.invalidToolCalls,
+        consecutiveNoProgressSteps: this.consecutiveNoProgressSteps,
+        maxConsecutiveNoProgressSteps: this.maxConsecutiveNoProgressSteps,
+        failedCalls: this.failedToolCalls,
+        mostRepeatedCall: this.getMostRepeatedCall()
+      },
       context: { ...this.context },
       result: {
         status: input.status,
+        stopReason: input.stopReason ?? (input.status === "completed"
+          ? "completed"
+          : input.status === "awaiting_approval"
+            ? "awaiting_approval"
+            : input.status === "cancelled"
+              ? "cancelled"
+              : input.status === "step_limit_reached"
+                ? "step_limit"
+                : "provider_error"),
         failureCategory: input.failureCategory ?? "none",
         patchFileCount: input.patchFileCount ?? 0,
         validationCommandCount: input.validationCommandCount ?? 0,
