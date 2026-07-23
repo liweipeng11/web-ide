@@ -28,7 +28,7 @@ function createBlockedAgentContext(projectPath: string): AgentContext {
   };
 }
 
-test("Vue 2 夹具稳定复现三项引用解析失败", async (context) => {
+test("Vue 2 夹具在阶段 1 区分真实缺失、别名文件和已安装依赖", async (context) => {
   const fixture = await createVue2RouterFixture();
   context.after(fixture.cleanup);
 
@@ -48,10 +48,15 @@ test("Vue 2 夹具稳定复现三项引用解析失败", async (context) => {
     { kind: "import", value: "vue-router", fromPath: `${fixture.projectPath}/src/router/index.js` }
   ]);
 
+  assert.deepEqual(result.checks.map((check) => check.resolution.status), [
+    "truly_missing",
+    "existing",
+    "dependency_installed"
+  ]);
   assert.deepEqual(
     result.checks.map((check) => check.status),
-    ["missing", "missing", "missing"],
-    "阶段 0 应锁定相对路由、Vue CLI 别名和子包依赖均被当前实现误判的基线"
+    ["missing", "exists", "exists"],
+    "旧三态适配器应继续供阶段 1 之前的工作流兼容使用"
   );
 });
 

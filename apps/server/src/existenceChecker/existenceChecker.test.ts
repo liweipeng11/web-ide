@@ -87,6 +87,34 @@ test("检查器解析 tsconfig 路径别名、工作区包与已安装包", asyn
     { kind: "import", value: "tiny-lib" }
   ]);
   assert.deepEqual(result.checks.map((check) => check.status), ["exists", "exists", "exists"]);
+  assert.deepEqual(result.checks.map((check) => check.resolution.status), ["existing", "existing", "dependency_installed"]);
+});
+
+test("结构化状态区分已安装、已声明、真实缺失和越界引用", async (context) => {
+  const workspaceRoot = await createWorkspace();
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(workspaceRoot, "app", "node_modules", "installed-lib"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "app", "package.json"), JSON.stringify({
+    dependencies: { "installed-lib": "^1.0.0", "declared-lib": "^1.0.0" }
+  }), "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "app", "node_modules", "installed-lib", "package.json"), JSON.stringify({ name: "installed-lib" }), "utf8");
+
+  const result = await checkExistence(workspaceRoot, [
+    { kind: "import", value: "installed-lib", fromPath: "app/src/index.ts" },
+    { kind: "import", value: "declared-lib", fromPath: "app/src/index.ts" },
+    { kind: "import", value: "missing-lib", fromPath: "app/src/index.ts" },
+    { kind: "import", value: "../../../outside", fromPath: "app/src/index.ts" }
+  ]);
+
+  assert.deepEqual(result.checks.map((check) => check.resolution.status), [
+    "dependency_installed",
+    "dependency_declared",
+    "truly_missing",
+    "unknown"
+  ]);
+  // 阶段 1 保留旧三态适配器，避免提前改变编辑门禁。
+  assert.deepEqual(result.checks.map((check) => check.status), ["exists", "missing", "missing", "ambiguous"]);
+  assert.equal(result.checks[3].resolution.blocking, true);
 });
 
 test("检查器识别 Python、Vue 符号，并忽略示例环境文件造成的假歧义", async (context) => {

@@ -1,6 +1,17 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ExistenceCandidate, ExistenceCheckResult, ExistenceCheckTarget, ExistenceCheckerResult, ExistenceStatus, ImportReference } from "./types.js";
+import { resolvePathAlias } from "./aliasResolver.js";
+import { resolvePackageImport } from "./packageResolver.js";
+import type {
+  ExistenceCandidate,
+  ExistenceCheckResult,
+  ExistenceCheckTarget,
+  ExistenceCheckerResult,
+  ExistenceStatus,
+  ImportReference,
+  ReferenceResolution,
+  ReferenceResolutionStatus
+} from "./types.js";
 
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".vue", ".mjs", ".cjs", ".py"];
 const IMPORT_EXTENSIONS = ["", ...SOURCE_EXTENSIONS, ".json"];
@@ -11,8 +22,42 @@ function normalizeRelativePath(value: string) {
   return value.replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
-function createResult(target: ExistenceCheckTarget, status: ExistenceStatus, candidates: ExistenceCandidate[], reason: string): ExistenceCheckResult {
-  return { target: { ...target, value: target.value.trim(), ...(target.fromPath ? { fromPath: normalizeRelativePath(target.fromPath) } : {}) }, status, candidates, reason };
+function toLegacyStatus(status: ReferenceResolutionStatus): ExistenceStatus {
+  if (status === "existing" || status === "dependency_installed" || status === "planned_create") return "exists";
+  if (status === "ambiguous" || status === "unknown") return "ambiguous";
+  return "missing";
+}
+
+function createResult(
+  target: ExistenceCheckTarget,
+  status: ReferenceResolutionStatus,
+  candidates: ExistenceCandidate[],
+  reason: string,
+  extras: Pick<ReferenceResolution, "blocking" | "packageRoot" | "resolvedPath"> = { blocking: status !== "existing" && status !== "dependency_installed" && status !== "planned_create" }
+): ExistenceCheckResult {
+  const resolution: ReferenceResolution = {
+    status,
+    blocking: extras.blocking,
+    reason,
+    candidates,
+    ...(extras.packageRoot !== undefined ? { packageRoot: extras.packageRoot } : {}),
+    ...(extras.resolvedPath !== undefined ? { resolvedPath: extras.resolvedPath } : {})
+  };
+  return {
+    target: { ...target, value: target.value.trim(), ...(target.fromPath ? { fromPath: normalizeRelativePath(target.fromPath) } : {}) },
+    status: toLegacyStatus(status),
+    candidates,
+    reason,
+    resolution
+  };
+}
+
+function createResultFromResolution(target: ExistenceCheckTarget, resolution: ReferenceResolution) {
+  return createResult(target, resolution.status, resolution.candidates, resolution.reason, {
+    blocking: resolution.blocking,
+    ...(resolution.packageRoot !== undefined ? { packageRoot: resolution.packageRoot } : {}),
+    ...(resolution.resolvedPath !== undefined ? { resolvedPath: resolution.resolvedPath } : {})
+  });
 }
 
 async function pathExists(targetPath: string) {
@@ -62,38 +107,6 @@ async function resolveFileCandidates(workspaceRoot: string, basePath: string, de
   return candidates;
 }
 
-async function readJson<T>(filePath: string): Promise<T | null> {
-  const content = await fs.readFile(filePath, "utf8").catch(() => "");
-  try {
-    return content ? (JSON.parse(content) as T) : null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveTsPathAliases(workspaceRoot: string, specifier: string) {
-  const tsconfigPaths = await collectFiles(workspaceRoot, (filePath) => path.posix.basename(filePath) === "tsconfig.json");
-  const bases: string[] = [];
-  for (const tsconfigPath of tsconfigPaths) {
-    const config = await readJson<{ compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> } }>(path.join(workspaceRoot, tsconfigPath));
-    const options = config?.compilerOptions;
-    if (!options?.paths) continue;
-    const configDirectory = path.dirname(path.join(workspaceRoot, tsconfigPath));
-    for (const [alias, targets] of Object.entries(options.paths)) {
-      const wildcardIndex = alias.indexOf("*");
-      const matches = wildcardIndex === -1 ? specifier === alias : specifier.startsWith(alias.slice(0, wildcardIndex)) && specifier.endsWith(alias.slice(wildcardIndex + 1));
-      if (!matches) continue;
-      const wildcardValue = wildcardIndex === -1 ? "" : specifier.slice(alias.slice(0, wildcardIndex).length, specifier.length - alias.slice(wildcardIndex + 1).length);
-      for (const target of targets) bases.push(path.resolve(configDirectory, options.baseUrl || ".", target.replace("*", wildcardValue)));
-    }
-  }
-  return bases;
-}
-
-function uniqueCandidates(candidates: ExistenceCandidate[]) {
-  return candidates.filter((candidate, index) => candidates.findIndex((item) => item.path === candidate.path) === index);
-}
-
 /** 提取 JavaScript/TypeScript 静态 import，作为生成或写入前的最后一道路径核验依据。 */
 export function extractImportReferences(content: string): ImportReference[] {
   const references: ImportReference[] = [];
@@ -126,50 +139,26 @@ export async function checkCodeImports(workspaceRoot: string, content: string, f
 
 async function checkImport(workspaceRoot: string, target: ExistenceCheckTarget) {
   const specifier = target.value.trim();
-  if (!specifier) return createResult(target, "missing", [], "import 路径不能为空");
+  if (!specifier) return createResult(target, "truly_missing", [], "import 路径不能为空");
 
   if (specifier.startsWith(".") || specifier.startsWith("/")) {
     const basePath = specifier.startsWith("/") ? path.resolve(workspaceRoot, `.${specifier}`) : path.resolve(resolveFromPath(workspaceRoot, target.fromPath), specifier);
+    if (!isInsideWorkspace(workspaceRoot, basePath)) {
+      return createResult(target, "unknown", [], "import 路径试图越出工作区，已阻止解析", { blocking: true });
+    }
     const candidates = await resolveFileCandidates(workspaceRoot, basePath, "相对 import 目标");
     return candidates.length === 1
-      ? createResult(target, "exists", candidates, "import 路径已解析到唯一文件")
+      ? createResult(target, "existing", candidates, "import 路径已解析到唯一文件", { blocking: false, resolvedPath: candidates[0].path })
       : candidates.length > 1
         ? createResult(target, "ambiguous", candidates, "import 路径可解析到多个文件，请明确扩展名或路径")
-        : createResult(target, "missing", [], "未找到 import 路径对应的文件或目录 index 文件");
+        : createResult(target, "truly_missing", [], "未找到 import 路径对应的文件或目录 index 文件");
   }
 
-  const packageName = specifier.startsWith("@") ? specifier.split("/").slice(0, 2).join("/") : specifier.split("/")[0];
-  const packageJsonPaths = await collectFiles(workspaceRoot, (filePath) => path.posix.basename(filePath) === "package.json");
-  const subpath = specifier.slice(packageName.length).replace(/^\//, "");
-  const aliasBases = await resolveTsPathAliases(workspaceRoot, specifier);
-  const aliasCandidates = uniqueCandidates((await Promise.all(aliasBases.map((basePath) => resolveFileCandidates(workspaceRoot, basePath, "tsconfig 路径别名目标")))).flat());
-  if (aliasCandidates.length) return aliasCandidates.length === 1 ? createResult(target, "exists", aliasCandidates, "import 已通过 tsconfig 路径别名解析") : createResult(target, "ambiguous", aliasCandidates, "路径别名解析到多个候选文件");
+  const aliasResolution = await resolvePathAlias({ workspaceRoot, specifier, ...(target.fromPath ? { fromPath: target.fromPath } : {}) });
+  if (aliasResolution) return createResultFromResolution(target, aliasResolution);
 
-  const candidates: ExistenceCandidate[] = [];
-  const declaredPackages: ExistenceCandidate[] = [];
-  for (const packageJsonPath of packageJsonPaths) {
-    const absolutePackageJsonPath = path.join(workspaceRoot, packageJsonPath);
-    const packageJson = await readJson<{ name?: string; dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> }>(absolutePackageJsonPath);
-    if (!packageJson) continue;
-    if (packageJson.name === packageName) {
-      const packageDirectory = path.dirname(absolutePackageJsonPath);
-      const workspaceCandidates = subpath ? await resolveFileCandidates(workspaceRoot, path.join(packageDirectory, subpath), "工作区包子路径") : [{ path: packageJsonPath, detail: "工作区包定义" }];
-      candidates.push(...workspaceCandidates);
-    }
-    if (packageJson.dependencies?.[packageName] || packageJson.devDependencies?.[packageName]) declaredPackages.push({ path: packageJsonPath, detail: `声明依赖 ${packageName}` });
-  }
-  const installDirectories = [path.join(workspaceRoot, "node_modules", packageName), path.join(resolveFromPath(workspaceRoot, target.fromPath), "node_modules", packageName)];
-  for (const installDirectory of [...new Set(installDirectories)]) {
-    const manifest = await readJson<{ name?: string }>(path.join(installDirectory, "package.json"));
-    if (!manifest?.name) continue;
-    const installedCandidates = subpath ? await resolveFileCandidates(workspaceRoot, path.join(installDirectory, subpath), "已安装包子路径") : [{ path: normalizeRelativePath(path.relative(workspaceRoot, path.join(installDirectory, "package.json"))), detail: "已安装包" }];
-    candidates.push(...installedCandidates);
-  }
-  const resolvedCandidates = uniqueCandidates(candidates);
-  if (resolvedCandidates.length === 1) return createResult(target, "exists", resolvedCandidates, "import 包或子路径真实存在");
-  if (resolvedCandidates.length > 1) return createResult(target, "ambiguous", resolvedCandidates, "import 包解析到多个候选，请指定所属工作区包");
-  if (declaredPackages.length) return createResult(target, "missing", declaredPackages, "package.json 已声明依赖，但未解析到已安装包或子路径");
-  return createResult(target, "missing", [], "未找到 import 包、工作区包或路径别名目标");
+  const packageResolution = await resolvePackageImport({ workspaceRoot, specifier, ...(target.fromPath ? { fromPath: target.fromPath } : {}) });
+  return createResultFromResolution(target, packageResolution);
 }
 
 function symbolExpression(symbol: string) {
@@ -179,7 +168,7 @@ function symbolExpression(symbol: string) {
 
 async function checkSymbol(workspaceRoot: string, target: ExistenceCheckTarget) {
   const symbol = target.value.trim();
-  if (!symbol) return createResult(target, "missing", [], "符号名称不能为空");
+  if (!symbol) return createResult(target, "truly_missing", [], "符号名称不能为空");
   const expression = symbolExpression(symbol);
   const files = target.fromPath ? [normalizeRelativePath(target.fromPath)] : await collectFiles(workspaceRoot, (filePath) => SOURCE_EXTENSIONS.includes(path.extname(filePath).toLowerCase()));
   const candidates: ExistenceCandidate[] = [];
@@ -190,10 +179,10 @@ async function checkSymbol(workspaceRoot: string, target: ExistenceCheckTarget) 
     if (expression.test(content) || pythonExpression.test(content) || vueComponentName) candidates.push({ path: filePath, detail: `定义或导出符号 ${symbol}` });
   }
   return candidates.length === 1
-    ? createResult(target, "exists", candidates, "符号定义唯一")
+    ? createResult(target, "existing", candidates, "符号定义唯一", { blocking: false, resolvedPath: candidates[0].path })
     : candidates.length > 1
       ? createResult(target, "ambiguous", candidates, "发现多个同名符号，请指定定义文件")
-      : createResult(target, "missing", [], "未找到符号定义或导出");
+      : createResult(target, "truly_missing", [], "未找到符号定义或导出");
 }
 
 async function checkScript(workspaceRoot: string, target: ExistenceCheckTarget) {
@@ -201,11 +190,11 @@ async function checkScript(workspaceRoot: string, target: ExistenceCheckTarget) 
   const raw = await fs.readFile(path.join(workspaceRoot, requestedPath), "utf8").catch(() => "");
   try {
     const packageJson = JSON.parse(raw) as { scripts?: Record<string, unknown> };
-    if (typeof packageJson.scripts?.[target.value.trim()] === "string") return createResult(target, "exists", [{ path: requestedPath, detail: `scripts.${target.value.trim()}` }], "package.json 脚本已定义");
+    if (typeof packageJson.scripts?.[target.value.trim()] === "string") return createResult(target, "existing", [{ path: requestedPath, detail: `scripts.${target.value.trim()}` }], "package.json 脚本已定义", { blocking: false, resolvedPath: requestedPath });
   } catch {
-    return createResult(target, "missing", [], "未找到可解析的 package.json");
+    return createResult(target, "truly_missing", [], "未找到可解析的 package.json");
   }
-  return createResult(target, "missing", [], "package.json 中未定义该脚本");
+  return createResult(target, "truly_missing", [], "package.json 中未定义该脚本");
 }
 
 async function checkEnvironment(workspaceRoot: string, target: ExistenceCheckTarget) {
@@ -219,17 +208,18 @@ async function checkEnvironment(workspaceRoot: string, target: ExistenceCheckTar
   }
   const activeCandidates = candidates.filter((candidate) => !path.posix.basename(candidate.path).includes("example"));
   const effectiveCandidates = activeCandidates.length ? activeCandidates : candidates;
-  if (effectiveCandidates.length === 1) return createResult(target, "exists", effectiveCandidates, activeCandidates.length ? "环境变量具有有效配置来源" : "环境变量仅在示例配置中定义");
+  if (effectiveCandidates.length === 1) return createResult(target, "existing", effectiveCandidates, activeCandidates.length ? "环境变量具有有效配置来源" : "环境变量仅在示例配置中定义", { blocking: false, resolvedPath: effectiveCandidates[0].path });
   if (effectiveCandidates.length > 1) return createResult(target, "ambiguous", effectiveCandidates, "多个有效环境文件定义了该变量，请确认加载优先级");
-  return createResult(target, "missing", [], "未在 .env 类文件中找到环境变量定义");
+  return createResult(target, "truly_missing", [], "未在 .env 类文件中找到环境变量定义");
 }
 
 async function checkDirectory(workspaceRoot: string, target: ExistenceCheckTarget) {
   const directoryPath = path.resolve(workspaceRoot, target.value.trim());
+  if (!isInsideWorkspace(workspaceRoot, directoryPath)) return createResult(target, "unknown", [], "目录路径超出工作区，已阻止解析");
   const stat = await fs.stat(directoryPath).catch(() => null);
   return stat?.isDirectory()
-    ? createResult(target, "exists", [{ path: normalizeRelativePath(path.relative(workspaceRoot, directoryPath)), detail: "目录已存在" }], "目录真实存在")
-    : createResult(target, "missing", [], "目录不存在或目标不是目录");
+    ? createResult(target, "existing", [{ path: normalizeRelativePath(path.relative(workspaceRoot, directoryPath)), detail: "目录已存在" }], "目录真实存在", { blocking: false, resolvedPath: normalizeRelativePath(path.relative(workspaceRoot, directoryPath)) })
+    : createResult(target, "truly_missing", [], "目录不存在或目标不是目录");
 }
 
 /** 在实际工作区中核验 Agent 即将引用的路径、符号、脚本与配置来源。 */
