@@ -6,6 +6,65 @@ import { requestChatCompletion, requestChatCompletionStream, type OpenAiCompatib
 import type { AgentCompletionResponse } from "../agentToolTypes.js";
 import { ProviderError, type ModelProvider } from "./types.js";
 
+const SAFE_TOOL_NAME_NORMALIZATION = new Set([
+  "inspectProject",
+  "listFiles",
+  "listCodeDefinitionNames",
+  "searchFilesByName",
+  "searchCode",
+  "searchCodeRegex",
+  "readFile",
+  "readFileChunk",
+  "readFileRange"
+]);
+const SPECIAL_CHANNEL_MARKER = /<\|[^<>|]+\|>/;
+
+function getAdvertisedToolNames(tools: unknown[] | undefined) {
+  const names = new Set<string>();
+
+  for (const tool of tools || []) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) continue;
+    const fn = (tool as { function?: unknown }).function;
+    if (!fn || typeof fn !== "object" || Array.isArray(fn)) continue;
+    const name = (fn as { name?: unknown }).name;
+    if (typeof name === "string" && name.trim()) names.add(name.trim());
+  }
+
+  return names;
+}
+
+function normalizeProviderToolName(rawName: string, advertisedToolNames: Set<string>) {
+  if (advertisedToolNames.has(rawName)) return rawName;
+
+  const marker = SPECIAL_CHANNEL_MARKER.exec(rawName);
+  if (!marker) return null;
+
+  // 只允许剥离模型误拼接的特殊通道后缀，不做大小写、前缀或编辑距离模糊匹配。
+  const candidate = rawName.slice(0, marker.index);
+  const suffix = rawName.slice(marker.index);
+  const hasSingleMarker = suffix.match(new RegExp(SPECIAL_CHANNEL_MARKER.source, "g"))?.length === 1;
+  const safeSuffix = /^<\|[^<>|]+\|>[a-z_]+$/i.test(suffix);
+  if (!hasSingleMarker || !safeSuffix || !SAFE_TOOL_NAME_NORMALIZATION.has(candidate)) return null;
+
+  return advertisedToolNames.has(candidate) ? candidate : null;
+}
+
+function normalizeResponseToolNames(response: ModelResponse, request: ModelRequest) {
+  const toolCalls = response.message.toolCalls;
+  if (!toolCalls?.length) return response;
+
+  const advertisedToolNames = getAdvertisedToolNames(request.tools);
+  const normalizedToolCalls = toolCalls.map((toolCall) => {
+    const normalizedName = normalizeProviderToolName(toolCall.name, advertisedToolNames);
+    if (!normalizedName) {
+      throw new ProviderError("invalid_tool_name", `模型 Provider 返回了未注册或不安全的工具名：${toolCall.name}`, false);
+    }
+    return normalizedName === toolCall.name ? toolCall : { ...toolCall, name: normalizedName };
+  });
+
+  return { ...response, message: { ...response.message, toolCalls: normalizedToolCalls } };
+}
+
 function mapProviderError(error: unknown): ProviderError {
   if (error instanceof ProviderError) return error;
   if (error instanceof SyntaxError) return new ProviderError("invalid_response", "模型 Provider 返回了无效响应", false);
@@ -93,7 +152,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
     if (signal?.aborted) throw new ProviderError("cancelled", "模型请求已取消", false);
     try {
       const response = await requestChatCompletion(toOpenAiChatCompletionBody(request), signal, this.runtime) as AgentCompletionResponse;
-      return adaptOpenAiCompletionResponse(response);
+      return normalizeResponseToolNames(adaptOpenAiCompletionResponse(response), request);
     } catch (error) {
       throw mapProviderError(error);
     }
@@ -104,6 +163,7 @@ export class OpenAiCompatibleProvider implements ModelProvider {
     let wake: (() => void) | null = null;
     let finished = false;
     const toolCalls = new Map<number, { id: string; name: string; rawArguments: string }>();
+    const advertisedToolNames = getAdvertisedToolNames(request.tools);
     let finishReason: string | undefined;
     const push = (event: ModelEvent) => { events.push(event); wake?.(); wake = null; };
 
@@ -113,12 +173,10 @@ export class OpenAiCompatibleProvider implements ModelProvider {
       for (const delta of choice?.delta?.tool_calls || []) {
         const index = delta.index ?? 0;
         const current = toolCalls.get(index) || { id: delta.id || `tool-${index}`, name: delta.function?.name || "", rawArguments: "" };
-        if (!toolCalls.has(index)) push({ type: "tool_call_start", call: { id: current.id, name: current.name } });
         if (delta.id) current.id = delta.id;
         if (delta.function?.name) current.name = delta.function.name;
         if (delta.function?.arguments) {
           current.rawArguments += delta.function.arguments;
-          push({ type: "tool_call_arguments_delta", id: current.id, delta: delta.function.arguments });
         }
         toolCalls.set(index, current);
       }
@@ -140,9 +198,22 @@ export class OpenAiCompatibleProvider implements ModelProvider {
     void requestChatCompletionStream(body, (delta) => push({ type: "text_delta", delta }), signal, handleChunk, this.runtime)
       .then((answer) => {
         for (const current of toolCalls.values()) {
+          const normalizedName = normalizeProviderToolName(current.name, advertisedToolNames);
+          if (!normalizedName) {
+            push({
+              type: "error",
+              code: "invalid_tool_name",
+              message: `模型 Provider 返回了未注册或不安全的工具名：${current.name}`,
+              retryable: false
+            });
+            continue;
+          }
           let argumentsValue: Record<string, unknown> = {};
           try { argumentsValue = JSON.parse(current.rawArguments) as Record<string, unknown>; } catch { /* 无效参数交给上层统一校验。 */ }
-          push({ type: "tool_call_end", call: { id: current.id, name: current.name, arguments: argumentsValue, rawArguments: current.rawArguments } });
+          // 名称完整后再发出工具事件，避免消费者提前看到未经白名单校验的流式片段。
+          push({ type: "tool_call_start", call: { id: current.id, name: normalizedName } });
+          if (current.rawArguments) push({ type: "tool_call_arguments_delta", id: current.id, delta: current.rawArguments });
+          push({ type: "tool_call_end", call: { id: current.id, name: normalizedName, arguments: argumentsValue, rawArguments: current.rawArguments } });
         }
         push({ type: "done", finishReason: signal?.aborted ? "cancelled" : finishReason || (answer ? "stop" : "empty") });
       })

@@ -31,7 +31,11 @@ const promptInjectionPatterns: Array<{ name: string; pattern: RegExp }> = [
   { name: "role_spoofing", pattern: /(?:^|\n)\s*(?:system|assistant|developer)\s*:/i },
   { name: "role_tag", pattern: /<\/?(?:system|assistant|developer|instructions?)\b[^>]*>/i },
   { name: "ignore_instructions", pattern: /\b(?:ignore|disregard|override|bypass)\b.{0,60}\b(?:previous|prior|system|developer|instructions?|rules?)\b/is },
-  { name: "execute_directive", pattern: /\b(?:delete|erase|exfiltrate|leak)\b.{0,60}\b(?:workspace|files?|secrets?|credentials?)\b/is },
+  {
+    name: "execute_directive",
+    // 普通的文件删除是合法开发任务；仅拦截全量破坏工作区或泄露项目数据的指令。
+    pattern: /(?:\b(?:exfiltrate|leak)\b.{0,60}\b(?:workspace|files?|secrets?|credentials?)\b|\b(?:delete|erase)\b(?=[^\n]{0,100}\b(?:all|every)\b)(?=[^\n]{0,100}\b(?:workspace|project)\b)[^\n]{0,100}\bfiles?\b|\b(?:delete|erase)\b.{0,60}\b(?:entire|whole)\s+(?:workspace|project)\b)/is
+  },
   { name: "chinese_instruction_override", pattern: /(?:忽略|绕过|覆盖).{0,30}(?:之前|系统|开发者|指令|规则)/s }
 ];
 

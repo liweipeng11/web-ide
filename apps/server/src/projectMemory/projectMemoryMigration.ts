@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { findMemoryPromptInjectionReason, findSensitiveMemoryReason } from "./memorySanitizer.js";
 import { PROJECT_MEMORY_SCHEMA_VERSION, type ProjectMemory, type ProjectMemoryCreatedBy, type ProjectMemoryItem, type ProjectMemoryKind, type ProjectMemoryPendingItem, type ProjectMemoryRecentChange, type ProjectMemoryScope, type ProjectMemorySourceRef, type ProjectMemoryStatus, type ProjectMemoryTechStack, type ProjectMemoryValidationStatus, type ProjectSnapshot } from "./types.js";
 
 type UnknownRecord = Record<string, unknown>;
@@ -19,6 +20,11 @@ function normalizeStringArray(value: unknown, maxItems = 30, maxLength = 500) {
 
 function normalizeTimestamp(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/** 自动任务历史属于不可信数据，迁移时跳过危险摘要，避免单条旧记录阻断整个 Memory。 */
+function isSafeHistoricalMemoryContent(content: string) {
+  return !findSensitiveMemoryReason(content) && !findMemoryPromptInjectionReason(content);
 }
 
 function normalizeTechStack(value: unknown, now: number): ProjectMemoryTechStack {
@@ -47,7 +53,7 @@ function normalizeRecentChanges(value: unknown, now: number): ProjectMemoryRecen
       files: normalizeStringArray(record.files, 50, 500),
       changedAt: normalizeTimestamp(record.changedAt, now)
     };
-    return change.taskSessionId && change.summary ? [change] : [];
+    return change.taskSessionId && change.summary && isSafeHistoricalMemoryContent(change.summary) ? [change] : [];
   });
   const byTask = new Map(changes.map((change) => [change.taskSessionId, change]));
   return [...byTask.values()].sort((left, right) => right.changedAt - left.changedAt).slice(0, 20);
@@ -65,7 +71,7 @@ function normalizePendingItems(value: unknown, now: number): ProjectMemoryPendin
       status: validStatuses.has(record.status as ProjectMemoryPendingItem["status"]) ? record.status as ProjectMemoryPendingItem["status"] : "running" as const,
       updatedAt: normalizeTimestamp(record.updatedAt, now)
     };
-    return pending.taskSessionId && pending.summary ? [pending] : [];
+    return pending.taskSessionId && pending.summary && isSafeHistoricalMemoryContent(pending.summary) ? [pending] : [];
   });
   const byTask = new Map(items.map((item) => [item.taskSessionId, item]));
   return [...byTask.values()].sort((left, right) => right.updatedAt - left.updatedAt).slice(0, 20);
@@ -165,7 +171,8 @@ function normalizeMemoryItems(value: unknown, now: number): ProjectMemoryItem[] 
 
 function migrateLegacyMemory(record: UnknownRecord, version: 1 | 2, now: number): ProjectMemory {
   const createdAt = normalizeTimestamp(record.createdAt, now);
-  const conventions = normalizeStringArray(record.conventions);
+  // 旧版 conventions 会迁移为候选 Memory，危险内容不能进入新版持久化数据。
+  const conventions = normalizeStringArray(record.conventions).filter(isSafeHistoricalMemoryContent);
   const migratedItems = conventions.map((content): ProjectMemoryItem => ({
     id: stableMigrationId(content),
     kind: "convention",

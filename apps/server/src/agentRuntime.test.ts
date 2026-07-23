@@ -650,11 +650,15 @@ test("agent runtime blocks the third identical tool call and can finish with ano
     createRuntimeTestTool("listFiles", ["src/a.ts"], () => { listExecutions += 1; })
   ]);
   let modelStep = 0;
+  const steps: AgentStep[] = [];
 
   const result = await runAgentRuntime({
     userRequest: "Repeat search then switch strategy",
     registry,
     runId: "test-runtime-repeated-tool-block",
+    onAgentStep(step) {
+      steps.push(step);
+    },
     metricsRecorder: async (metrics) => { capturedMetrics = metrics; },
     requestCompletion: async () => {
       modelStep += 1;
@@ -713,6 +717,8 @@ test("agent runtime blocks the third identical tool call and can finish with ano
   assert.equal(capturedMetrics?.tools.cacheHits, 1);
   assert.equal(capturedMetrics?.tools.failedCalls, 0);
   assert.equal(capturedMetrics?.result.failureCategory, "none");
+  assert.equal(steps.some((step) => step.type === "strategy" && step.event === "repeated_tool_warning"), true);
+  assert.equal(steps.filter((step) => step.type === "strategy" && step.event === "repeated_tool_blocked").length, 2);
 });
 
 test("agent runtime does not block calls with different arguments", async () => {
@@ -788,12 +794,16 @@ test("agent runtime recovers once and then stops after another no-progress windo
   const requests: Record<string, unknown>[] = [];
   let modelStep = 0;
   let capturedMetrics: RunMetrics | undefined;
+  const steps: AgentStep[] = [];
 
   const result = await runAgentRuntime({
     userRequest: "Search without making progress",
     registry,
     maxNoProgressSteps: 2,
     recoveryAttempts: 1,
+    onAgentStep(step) {
+      steps.push(step);
+    },
     metricsRecorder: async (metrics) => { capturedMetrics = metrics; },
     requestCompletion: async (body) => {
       requests.push(body);
@@ -817,11 +827,16 @@ test("agent runtime recovers once and then stops after another no-progress windo
   const recoveryPrompt = requests[2]?.messages as Array<{ role: string; content?: string }>;
   assert.equal(result.status, "no_progress");
   assert.match(result.content, /连续工具调用未取得进展/);
+  assert.match(result.content, /模型轮次：4\/24/);
+  assert.match(result.content, /工具调用：4/);
+  assert.match(result.content, /建议下一步/);
   assert.equal(modelStep, 4);
   assert.equal(recoveryPrompt.some((message) => message.content?.includes("策略恢复")), true);
   assert.equal(capturedMetrics?.tools.recoveryAttempts, 1);
   assert.equal(capturedMetrics?.tools.maxConsecutiveNoProgressSteps, 2);
   assert.equal(capturedMetrics?.result.stopReason, "no_progress");
+  assert.equal(steps.some((step) => step.type === "strategy" && step.event === "no_progress_recovery"), true);
+  assert.equal(steps.some((step) => step.type === "strategy" && step.event === "no_progress_stop"), true);
 });
 
 test("newly discovered files reset the no-progress counter", async () => {
@@ -883,12 +898,16 @@ test("new negative evidence counts as progress even when the search result is em
     }];
   })]);
   let modelStep = 0;
+  const steps: AgentStep[] = [];
 
   const result = await runAgentRuntime({
     userRequest: "Confirm router absence",
     registry,
     maxNoProgressSteps: 1,
     recoveryAttempts: 0,
+    onAgentStep(step) {
+      steps.push(step);
+    },
     requestCompletion: async () => {
       modelStep += 1;
       return modelStep === 1
@@ -899,6 +918,7 @@ test("new negative evidence counts as progress even when the search result is em
 
   assert.equal(result.status, "completed");
   assert.equal(result.agentContext.negativeEvidence?.length, 1);
+  assert.equal(steps.some((step) => step.type === "strategy" && step.event === "negative_evidence"), true);
 });
 
 test("reading a new range of an existing file counts as progress", async () => {
@@ -1388,7 +1408,7 @@ test("agent runtime emits a visible budget warning step before exhausting tool b
     })
   });
 
-  assert.equal(steps.some((step) => step.type === "message" && step.content.includes("预算进入收敛区间")), true);
+  assert.equal(steps.some((step) => step.type === "strategy" && step.event === "budget_convergence"), true);
 });
 
 test("plan mode exposes only readonly tools to the model", async () => {

@@ -41,6 +41,17 @@ function formatAgentStepDetail(step: AgentStep) {
       command: step.command,
       details: step.details
     };
+  } else if (step.type === "strategy") {
+    detail = {
+      type: step.type,
+      event: step.event,
+      message: step.message,
+      toolName: step.toolName,
+      repeatCount: step.repeatCount,
+      currentStep: step.currentStep,
+      maxSteps: step.maxSteps,
+      facts: step.facts
+    };
   } else if (step.type === "tool_call") {
     detail = { type: step.type, toolName: step.toolName, input: step.input };
   } else if (step.type === "tool_result") {
@@ -102,6 +113,14 @@ function formatLineRange(value: unknown) {
 function getAgentObservationChips(step: AgentStep) {
   const chips: string[] = [];
 
+  if (step.type === "strategy") {
+    if (step.toolName) chips.push(`工具：${step.toolName}`);
+    if (step.repeatCount !== undefined) chips.push(`重复 ${step.repeatCount} 次`);
+    if (step.currentStep !== undefined && step.maxSteps !== undefined) chips.push(`轮次 ${step.currentStep}/${step.maxSteps}`);
+    if (step.facts?.length) chips.push(`${step.facts.length} 条已确认事实`);
+    return chips;
+  }
+
   if (step.type === "message" && step.content.includes("Tool budget warning")) {
     return ["预算即将耗尽"];
   }
@@ -152,6 +171,20 @@ function getCommandStatusText(step: Extract<AgentStep, { type: "command" }>) {
 function getAgentStepView(step: AgentStep): { label: string; title: string; detail: string } {
   if (step.type === "message") {
     return { label: "Message", title: step.content, detail: "" };
+  }
+
+  if (step.type === "strategy") {
+    const views = {
+      repeated_tool_warning: { label: "警告", title: "检测到重复工具调用" },
+      repeated_tool_blocked: { label: "已阻止", title: "重复工具调用已阻止" },
+      negative_evidence: { label: "已确认", title: "已确认目标文件或代码不存在" },
+      no_progress_recovery: { label: "切换策略", title: "连续无进展，正在切换策略" },
+      budget_convergence: { label: "收敛", title: "进入预算收敛阶段" },
+      no_progress_stop: { label: "已停止", title: "因连续无进展停止" },
+      budget_stop: { label: "已停止", title: "因模型步骤预算停止" }
+    } as const;
+    const view = views[step.event];
+    return { ...view, detail: step.message };
   }
 
   if (step.type === "approval_request") {
@@ -406,7 +439,7 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
           const showApprovalCard = step.type === "approval_request" && (step.status !== "pending" || isRuntimeApprovalStep(step));
 
           return (
-            <li key={step.id} className={`agent-step-${step.type}`}>
+            <li key={step.id} className={`agent-step-${step.type}${step.type === "strategy" ? ` agent-step-strategy-${step.event}` : ""}`}>
               <span>{view.label}</span>
               <details open={step.type === "approval_request" && step.status === "pending"}>
                 <summary>

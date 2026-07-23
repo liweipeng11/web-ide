@@ -4,7 +4,15 @@ import { OpenAiCompatibleProvider } from "./openAiCompatibleProvider.js";
 import { ProviderError } from "./types.js";
 import { config } from "../config.js";
 
-const request = { model: "mock", messages: [{ role: "user" as const, content: "hello" }] };
+const tool = (name: string) => ({
+  type: "function",
+  function: { name, description: `${name} test tool`, parameters: { type: "object", properties: {} } }
+});
+const request = {
+  model: "mock",
+  messages: [{ role: "user" as const, content: "hello" }],
+  tools: [tool("readFile"), tool("searchCode"), tool("writeFile")]
+};
 
 test("OpenAI-compatible Provider 归一化消息、工具调用和 Usage", async () => {
   const originalFetch = globalThis.fetch;
@@ -15,6 +23,60 @@ test("OpenAI-compatible Provider 归一化消息、工具调用和 Usage", async
     assert.equal(response.usage.inputTokens, 8);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("Provider 仅对唯一且只读的特殊通道后缀工具名进行安全归一化", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{
+      finish_reason: "tool_calls",
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [{
+          id: "call-normalized",
+          type: "function",
+          function: { name: "searchCode<|channel|>commentary", arguments: "{\"query\":\"router\"}" }
+        }]
+      }
+    }]
+  }), { status: 200 });
+
+  try {
+    const response = await new OpenAiCompatibleProvider().complete(request);
+    assert.equal(response.message.toolCalls?.[0].name, "searchCode");
+    assert.deepEqual(response.message.toolCalls?.[0].arguments, { query: "router" });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+for (const invalidName of [
+  "searchCod<|channel|>commentary",
+  "searchCode<|channel|>commentary<|channel|>analysis",
+  "writeFile<|channel|>commentary",
+  "SEARCHCODE",
+  "search"
+]) {
+  test(`Provider 拒绝未注册、歧义或有副作用的工具名：${invalidName}`, async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call-invalid", type: "function", function: { name: invalidName, arguments: "{}" } }]
+        }
+      }]
+    }), { status: 200 });
+
+    try {
+      await assert.rejects(() => new OpenAiCompatibleProvider().complete(request), (error: unknown) => {
+        assert.ok(error instanceof ProviderError);
+        assert.equal(error.code, "invalid_tool_name");
+        return true;
+      });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+}
 
 test("Provider 将 401 转换为统一认证错误且不暴露密钥", async () => {
   const originalFetch = globalThis.fetch;
@@ -58,6 +120,36 @@ test("Provider 归一化流式工具参数、Usage 和完成原因", async () =>
     assert.equal(events.find((event) => event.type === "usage")?.type === "usage" ? events.find((event) => event.type === "usage")?.usage.inputTokens : null, 9);
     const finalEvent = events.at(-1);
     assert.equal(finalEvent?.type === "done" ? finalEvent.finishReason : null, "tool_calls");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("Provider 流式响应在工具名完整后再安全归一化", async () => {
+  const originalFetch = globalThis.fetch;
+  const chunks = [
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-stream-normalized", function: { name: "searchCode<|channel|>commentary", arguments: "{\"query\":" } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "\"router\"}" } }] }, finish_reason: "tool_calls" }] }
+  ];
+  globalThis.fetch = async () => new Response(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n", { status: 200 });
+
+  try {
+    const events = [];
+    for await (const event of new OpenAiCompatibleProvider().stream(request)) events.push(event);
+    const end = events.find((event) => event.type === "tool_call_end");
+    assert.equal(end?.type === "tool_call_end" ? end.call.name : null, "searchCode");
+    assert.equal(events.some((event) => event.type === "error"), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("Provider 流式响应将危险的异常工具名转换为 invalid_tool_name", async () => {
+  const originalFetch = globalThis.fetch;
+  const chunk = { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-stream-invalid", function: { name: "writeFile<|channel|>commentary", arguments: "{}" } }] }, finish_reason: "tool_calls" }] };
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, { status: 200 });
+
+  try {
+    const events = [];
+    for await (const event of new OpenAiCompatibleProvider().stream(request)) events.push(event);
+    assert.equal(events.some((event) => event.type === "tool_call_start"), false);
+    assert.equal(events.some((event) => event.type === "error" && event.code === "invalid_tool_name"), true);
   } finally { globalThis.fetch = originalFetch; }
 });
 

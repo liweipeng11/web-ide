@@ -9,7 +9,7 @@ export interface ModelProvider {
   validateConfig(): Promise<ProviderHealth>;
 }
 
-export type ProviderErrorCode = "authentication" | "rate_limit" | "timeout" | "unavailable" | "invalid_response" | "cancelled" | "unknown";
+export type ProviderErrorCode = "authentication" | "rate_limit" | "timeout" | "unavailable" | "invalid_response" | "invalid_tool_name" | "cancelled" | "unknown";
 
 export class ProviderError extends Error {
   constructor(public readonly code: ProviderErrorCode, message: string, public readonly retryable: boolean, public readonly status?: number) {

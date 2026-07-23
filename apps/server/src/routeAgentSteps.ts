@@ -11,6 +11,23 @@ export type AgentStepPayload =
       content: string;
     }
   | {
+      type: "strategy";
+      event:
+        | "repeated_tool_warning"
+        | "repeated_tool_blocked"
+        | "negative_evidence"
+        | "no_progress_recovery"
+        | "budget_convergence"
+        | "no_progress_stop"
+        | "budget_stop";
+      message: string;
+      toolName?: string;
+      repeatCount?: number;
+      currentStep?: number;
+      maxSteps?: number;
+      facts?: string[];
+    }
+  | {
       type: "approval_request";
       actionId: string;
       actionType: ApprovalActionType;

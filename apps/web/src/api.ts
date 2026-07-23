@@ -279,6 +279,23 @@ export type AgentStep = {
       content: string;
     }
   | {
+      type: "strategy";
+      event:
+        | "repeated_tool_warning"
+        | "repeated_tool_blocked"
+        | "negative_evidence"
+        | "no_progress_recovery"
+        | "budget_convergence"
+        | "no_progress_stop"
+        | "budget_stop";
+      message: string;
+      toolName?: string;
+      repeatCount?: number;
+      currentStep?: number;
+      maxSteps?: number;
+      facts?: string[];
+    }
+  | {
       type: "approval_request";
       actionId: string;
       actionType: "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch" | "write_file" | "delete_file" | "ask_user" | "tool_call";

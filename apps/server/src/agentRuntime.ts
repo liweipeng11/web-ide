@@ -276,10 +276,33 @@ function createNoProgressStopContent(
   threshold: number,
   recoveryAttempts: number,
   agentContext: AgentContext,
-  generatedPatchIds: string[]
+  generatedPatchIds: string[],
+  diagnostics: {
+    currentStep: number;
+    maxSteps: number;
+    toolCalls: number;
+    repeatedCalls: number;
+    primaryRepeatedTool?: ModelToolCall;
+  }
 ) {
   const facts = buildRecoveryFacts(agentContext, generatedPatchIds).map((fact) => `- ${fact}`).join("\n");
-  return `智能体因连续工具调用未取得进展而停止。\n\n连续无进展调用：${threshold}\n已执行策略恢复：${recoveryAttempts} 次\n已确认：\n${facts}\n\n请根据以上事实调整任务目标或明确下一步实现方案。`;
+  const primaryTool = diagnostics.primaryRepeatedTool;
+  const queryTarget = primaryTool
+    ? String(primaryTool.arguments.query || primaryTool.arguments.filePath || primaryTool.arguments.path || "").trim()
+    : "";
+  return [
+    "智能体因连续工具调用未取得进展而停止。",
+    "",
+    `模型轮次：${diagnostics.currentStep}/${diagnostics.maxSteps}`,
+    `工具调用：${diagnostics.toolCalls}`,
+    `重复调用：${diagnostics.repeatedCalls}`,
+    `连续无进展调用：${threshold}`,
+    `已执行策略恢复：${recoveryAttempts} 次`,
+    primaryTool ? `主要重复工具：${primaryTool.name}` : "",
+    queryTarget ? `查询目标：${queryTarget}` : "",
+    `已确认：\n${facts}`,
+    "建议下一步：复用以上事实创建缺失实现或缩小目标范围，并运行必要验证。"
+  ].filter(Boolean).join("\n");
 }
 
 function stableStringify(value: unknown): string {
@@ -586,11 +609,16 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     : config.aiAgentRecoveryAttempts;
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, generatedPatchIds, taskSessionId: options.taskSessionId, onAgentStep: options.onAgentStep, registry, emitToolApprovalSteps: false });
   const toolCallCounts = new Map<string, number>();
+  const toolCallsBySignature = new Map<string, ModelToolCall>();
   const repeatCountsByToolCall = new Map<ModelToolCall, number>();
   const repeatedToolWarnings = new Set<string>();
   let budgetWarningSent = false;
   let consecutiveNoProgressSteps = 0;
   let recoveryAttempts = 0;
+  const emittedNegativeEvidence = new Set(
+    (agentContext.negativeEvidence || []).filter((item) => item.exhaustive)
+      .map((item) => `${item.kind}:${item.scope}:${item.query}`)
+  );
   const readScopes = new Set(agentContext.filesRead.map((filePath) => `file:${filePath}`));
   let latestContextBudgetSnapshot: ContextBudgetSnapshot | undefined;
   let latestContextSummary: StructuredContextSummary | null = null;
@@ -622,7 +650,13 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       await persistAgentMessage(options.taskSessionId, warningMessage);
       budgetWarningSent = true;
       // 把预算预警写入步骤流，前端可直接展示“即将触达工具预算”的观测信号。
-      options.onAgentStep?.(createAgentStep({ type: "message", content: `预算进入收敛区间：剩余 ${remainingSteps} 个模型步骤，宽泛搜索工具已禁用。` }));
+      options.onAgentStep?.(createAgentStep({
+        type: "strategy",
+        event: "budget_convergence",
+        message: `剩余 ${remainingSteps} 个模型步骤，宽泛搜索工具已禁用。`,
+        currentStep: step + 1,
+        maxSteps
+      }));
       logAi(runId, "runtime.budgetConvergence", { step, remainingSteps, generatedPatchIds, tools: [...currentAvailableToolNames] });
     }
 
@@ -711,6 +745,14 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const assistantMessage: ModelMessage = { role: "assistant", content };
       messages.push(assistantMessage);
       await persistAgentMessage(options.taskSessionId, assistantMessage);
+      options.onAgentStep?.(createAgentStep({
+        type: "strategy",
+        event: "budget_stop",
+        message: content,
+        currentStep: step + 1,
+        maxSteps,
+        facts: buildRecoveryFacts(agentContext, generatedPatchIds)
+      }));
       options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
       logAi(runId, "runtime.forceFinalToolCallBlocked", { step, toolNames: toolCalls.map((toolCall) => toolCall.name) });
       await metrics.finish({ status: "step_limit_reached", stopReason: "step_limit", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
@@ -763,6 +805,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const signature = getToolCallSignature(toolCall);
       const nextCount = (toolCallCounts.get(signature) || 0) + 1;
       toolCallCounts.set(signature, nextCount);
+      toolCallsBySignature.set(signature, toolCall);
       repeatCountsByToolCall.set(toolCall, nextCount);
       metrics.recordToolCall({
         toolName: toolCall.name,
@@ -789,6 +832,15 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const blockedMessage = createRepeatedToolCallBlockedMessage(toolCall, repeatCount);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
+        options.onAgentStep?.(createAgentStep({
+          type: "strategy",
+          event: "repeated_tool_blocked",
+          message: "相同参数的工具调用已获得完整结果，Runtime 已阻止再次执行。",
+          toolName: toolCall.name,
+          repeatCount,
+          currentStep: step + 1,
+          maxSteps
+        }));
         logAi(runId, "runtime.repeatedToolCallBlocked", { toolName: toolCall.name, repeatCount });
         continue;
       }
@@ -919,6 +971,25 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         consecutiveNoProgressSteps = progressed ? 0 : consecutiveNoProgressSteps + 1;
         messages.push(result);
         await persistAgentMessage(options.taskSessionId, result);
+        const newEvidence = (agentContext.negativeEvidence || []).filter((item) => {
+          if (!item.exhaustive) return false;
+          const key = `${item.kind}:${item.scope}:${item.query}`;
+          if (emittedNegativeEvidence.has(key)) return false;
+          emittedNegativeEvidence.add(key);
+          return true;
+        });
+        if (newEvidence.length) {
+          const facts = newEvidence.map((item) => `已完整检查 ${item.scope}，未发现“${item.query}”`);
+          options.onAgentStep?.(createAgentStep({
+            type: "strategy",
+            event: "negative_evidence",
+            message: facts.join("；"),
+            toolName: toolCall.name,
+            currentStep: step + 1,
+            maxSteps,
+            facts
+          }));
+        }
       } catch (error) {
         metrics.recordToolFailure();
         throw error;
@@ -929,6 +1000,16 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const repeatedWarningMessage = createRepeatedToolWarningMessage([...new Set(repeatedToolNames)]);
       messages.push(repeatedWarningMessage);
       await persistAgentMessage(options.taskSessionId, repeatedWarningMessage);
+      for (const toolName of [...new Set(repeatedToolNames)]) {
+        options.onAgentStep?.(createAgentStep({
+          type: "strategy",
+          event: "repeated_tool_warning",
+          message: "检测到相同参数的重复调用，请复用已有结果或切换到实现与验证。",
+          toolName,
+          currentStep: step + 1,
+          maxSteps
+        }));
+      }
       logAi(runId, "runtime.repeatedToolWarning", { toolNames: repeatedToolNames });
     }
 
@@ -946,8 +1027,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         messages.push(recoveryMessage);
         await persistAgentMessage(options.taskSessionId, recoveryMessage);
         options.onAgentStep?.(createAgentStep({
-          type: "message",
-          content: `连续 ${maxNoProgressSteps} 次工具调用无进展，正在切换策略（${recoveryAttempts}/${allowedRecoveryAttempts}）。`
+          type: "strategy",
+          event: "no_progress_recovery",
+          message: `连续 ${maxNoProgressSteps} 次工具调用无进展，正在切换策略（${recoveryAttempts}/${allowedRecoveryAttempts}）。`,
+          currentStep: step + 1,
+          maxSteps,
+          facts: buildRecoveryFacts(agentContext, generatedPatchIds)
         }));
         logAi(runId, "runtime.noProgressRecovery", {
           step,
@@ -955,12 +1040,30 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           recoveryAttempt: recoveryAttempts
         });
       } else {
+        const primaryRepeatedEntry = [...toolCallCounts.entries()]
+          .filter(([, count]) => count > 1)
+          .sort((left, right) => right[1] - left[1])[0];
         const content = createNoProgressStopContent(
           maxNoProgressSteps,
           recoveryAttempts,
           agentContext,
-          generatedPatchIds
+          generatedPatchIds,
+          {
+            currentStep: step + 1,
+            maxSteps,
+            toolCalls: [...toolCallCounts.values()].reduce((sum, count) => sum + count, 0),
+            repeatedCalls: [...toolCallCounts.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0),
+            primaryRepeatedTool: primaryRepeatedEntry ? toolCallsBySignature.get(primaryRepeatedEntry[0]) : undefined
+          }
         );
+        options.onAgentStep?.(createAgentStep({
+          type: "strategy",
+          event: "no_progress_stop",
+          message: content,
+          currentStep: step + 1,
+          maxSteps,
+          facts: buildRecoveryFacts(agentContext, generatedPatchIds)
+        }));
         options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
         logAi(runId, "runtime.noProgressStopped", {
           step,
@@ -994,6 +1097,14 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     generatedPatchIds,
     "模型在预算内未能返回最终结论。"
   );
+  options.onAgentStep?.(createAgentStep({
+    type: "strategy",
+    event: "budget_stop",
+    message: content,
+    currentStep: maxSteps,
+    maxSteps,
+    facts: buildRecoveryFacts(agentContext, generatedPatchIds)
+  }));
   options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
   logAi(runId, "runtime.stepLimitReached", { mode, maxSteps });
   await metrics.finish({ status: "step_limit_reached", stopReason: "step_limit", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });

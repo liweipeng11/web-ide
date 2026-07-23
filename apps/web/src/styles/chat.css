@@ -1420,6 +1420,51 @@
   color: #17613a;
 }
 
+.agent-step-strategy {
+  border-left: 3px solid #3b82f6;
+  padding-left: 6px;
+}
+
+.agent-step-strategy > span {
+  background: #e8f1fb;
+  color: #155aa8;
+}
+
+.agent-step-strategy-repeated_tool_warning,
+.agent-step-strategy-no_progress_recovery,
+.agent-step-strategy-budget_convergence {
+  border-left-color: #d97706;
+}
+
+.agent-step-strategy-repeated_tool_warning > span,
+.agent-step-strategy-no_progress_recovery > span,
+.agent-step-strategy-budget_convergence > span {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.agent-step-strategy-repeated_tool_blocked,
+.agent-step-strategy-no_progress_stop,
+.agent-step-strategy-budget_stop {
+  border-left-color: #b42318;
+}
+
+.agent-step-strategy-repeated_tool_blocked > span,
+.agent-step-strategy-no_progress_stop > span,
+.agent-step-strategy-budget_stop > span {
+  background: #fff1f2;
+  color: #b42318;
+}
+
+.agent-step-strategy-negative_evidence {
+  border-left-color: #17613a;
+}
+
+.agent-step-strategy-negative_evidence > span {
+  background: #ecfdf3;
+  color: #17613a;
+}
+
 .agent-approval-card {
   border: 1px solid #d8dee5;
   border-left: 4px solid #94a3b8;
