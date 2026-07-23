@@ -47,6 +47,11 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
         filePath: {
           type: "string",
           description: "Optional workspace-relative file path to use as selected context."
+        },
+        changeKind: {
+          type: "string",
+          enum: ["create", "modify", "delete"],
+          description: "Optional declared edit type used by the workflow gate. The generated patch is still validated independently."
         }
       },
       additionalProperties: false

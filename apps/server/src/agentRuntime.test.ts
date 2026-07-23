@@ -1639,6 +1639,70 @@ test("analysis-only workflow blocks side-effect tools even in a custom registry"
   assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("only allows read-only")), true);
 });
 
+test("runtime 按本次 create 意图放行 proposePatch，不受无关旧缺失检查阻塞", async () => {
+  let executed = false;
+  let callCount = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("proposePatch", { patchId: "patch-router" }, () => { executed = true; })
+  ]);
+  const workflow = createTaskWorkflow("新增路由文件", {
+    intent: "edit",
+    confidence: 0.9,
+    normalizedGoal: "新增路由文件",
+    reason: "test"
+  });
+
+  const result = await runAgentRuntime({
+    userRequest: "新增路由文件",
+    mode: "act",
+    workflow,
+    registry,
+    agentContext: {
+      userGoal: "新增路由文件",
+      filesRead: ["src/main.js"],
+      searchQueries: [],
+      searchResultFiles: [],
+      relevantFiles: ["src/main.js"],
+      existenceCheckPerformed: true,
+      unresolvedExistenceChecks: ["import:./legacy-missing"],
+      referenceChecks: {
+        "[\"import\",\"./legacy-missing\",\"src/legacy.ts\",\"\"]": {
+          status: "truly_missing",
+          blocking: true,
+          reason: "旧文件中的无关缺失",
+          candidates: []
+        }
+      }
+    },
+    runId: "test-create-gate-unrelated-missing",
+    requestCompletion: async () => {
+      callCount += 1;
+      return callCount === 1
+        ? {
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: "create-router",
+                  type: "function",
+                  function: {
+                    name: "proposePatch",
+                    arguments: JSON.stringify({ filePath: "src/router/index.js", changeKind: "create" })
+                  }
+                }]
+              }
+            }]
+          }
+        : { choices: [{ message: { role: "assistant", content: "已生成路由补丁" } }] };
+    }
+  });
+
+  assert.equal(executed, true);
+  assert.deepEqual(result.generatedPatchIds, []);
+  assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("legacy-missing")), false);
+});
+
 test("refactor workflow requires impact evidence before editing", async () => {
   let executed = false;
   let callCount = 0;

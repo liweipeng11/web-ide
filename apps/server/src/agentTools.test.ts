@@ -172,6 +172,21 @@ test("checkExistence records unresolved references for the runtime edit gate", a
   assert.deepEqual(data.summary, { exists: 1, missing: 1, ambiguous: 0 });
   assert.equal(agentContext.existenceCheckPerformed, true);
   assert.deepEqual(agentContext.unresolvedExistenceChecks, ["import:./missing"]);
+  assert.equal(Object.keys(agentContext.referenceChecks || {}).length, 2);
+
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "missing.ts"), "export const value = true;\n", "utf8");
+  await executeAgentToolCall(
+    createToolCall("checkExistence", {
+      targets: [{ kind: "import", value: "./missing", fromPath: "src/app.ts" }]
+    }),
+    createAgentToolRuntime({ agentContext, runId: "test-check-existence-refresh" })
+  );
+
+  // 同一目标的新检查覆盖旧状态，不累积会永久阻塞的陈旧缺失结论。
+  assert.equal(Object.keys(agentContext.referenceChecks || {}).length, 2);
+  assert.equal(Object.values(agentContext.referenceChecks || {}).some((resolution) => resolution.status === "existing"), true);
+  assert.deepEqual(agentContext.unresolvedExistenceChecks, []);
   await fs.rm(workspaceRoot, { recursive: true, force: true });
 });
 

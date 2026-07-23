@@ -3,6 +3,7 @@ import type { FileEditResult } from "./types.js";
 import type { ContextCache } from "./codeDiscovery/index.js";
 import type { ImpactAnalysisResult } from "./impactAnalyzer/index.js";
 import type { ExternalContextSource } from "./externalContext/types.js";
+import type { ReferenceResolution } from "./existenceChecker/types.js";
 
 export type AgentRole = "system" | "user" | "assistant" | "tool";
 
@@ -57,6 +58,11 @@ export type AgentContext = {
   existenceCheckPerformed?: boolean;
   /** 最近一次检查中仍缺失或歧义的引用，用于阻止不可靠的代码生成。 */
   unresolvedExistenceChecks?: string[];
+  /**
+   * 按检查目标保存最新的结构化引用状态。
+   * key 由 taskWorkflow/referenceChecks 统一生成，旧字符串字段仅用于兼容历史会话。
+   */
+  referenceChecks?: Record<string, ReferenceResolution>;
   /** 保存本轮影响分析证据，Safe Editor 据此生成最小修改集合。 */
   impactAnalyses?: ImpactAnalysisResult[];
   /** 记录 Runtime 实际执行过的命令，bugfix 工作流据此确认已尝试复现或验证。 */

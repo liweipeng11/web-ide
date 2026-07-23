@@ -29,6 +29,23 @@ export type TaskWorkflowDecision = {
   reason: string | null;
   missingEvidence: TaskWorkflowEvidence[];
   recommendedTools: string[];
+  blockingReferences: import("../existenceChecker/types.js").ReferenceResolution[];
+  recoverable: boolean;
+};
+
+export type WorkflowEditKind = "create" | "modify" | "delete" | "proposal";
+
+export type WorkflowEditIntent = {
+  toolName: string;
+  changeKind: WorkflowEditKind;
+  filePath: string | null;
+};
+
+export type WorkflowBlockDecision = {
+  reason: string;
+  blockingReferences: import("../existenceChecker/types.js").ReferenceResolution[];
+  recommendedTools: string[];
+  recoverable: boolean;
 };
 
 export type TaskWorkflowEvidenceState = {

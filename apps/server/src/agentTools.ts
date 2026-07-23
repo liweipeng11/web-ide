@@ -12,6 +12,7 @@ import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { externalContextReadonlyToolDefinitions } from "./externalContext/index.js";
 import { recoverStoredContextArtifact, storeContextArtifact } from "./contextBudget/index.js";
+import { createReferenceCheckKey } from "./taskWorkflow/referenceChecks.js";
 
 export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
@@ -354,6 +355,14 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       if (!workspaceRoot) throw new Error("No workspace selected");
       const result = await checkExistence(workspaceRoot, targets);
       runtime.agentContext.existenceCheckPerformed = true;
+      runtime.agentContext.referenceChecks ??= {};
+      for (const check of result.checks) {
+        runtime.agentContext.referenceChecks[createReferenceCheckKey(check.target)] = {
+          ...check.resolution,
+          candidates: check.resolution.candidates.map((candidate) => ({ ...candidate }))
+        };
+      }
+      // 兼容旧会话字段；新门禁消费 referenceChecks，并按本次编辑目标过滤。
       runtime.agentContext.unresolvedExistenceChecks = result.checks.filter((check) => check.status !== "exists").map((check) => `${check.target.kind}:${check.target.value}`);
       for (const check of result.checks) for (const candidate of check.candidates) uniquePush(runtime.agentContext.relevantFiles, candidate.path);
       return result;

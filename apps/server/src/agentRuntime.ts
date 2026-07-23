@@ -20,6 +20,9 @@ import {
   buildTaskWorkflowProgressPrompt,
   buildTaskWorkflowRuntimePrompt,
   evaluateTaskWorkflowToolDecision,
+  evaluateWorkflowEditGate,
+  resolveWorkflowEditIntent,
+  cloneReferenceChecks,
   type TaskWorkflowSnapshot
 } from "./taskWorkflow/index.js";
 import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
@@ -108,6 +111,7 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
     patternCandidateFiles: [],
     existenceCheckPerformed: false,
     unresolvedExistenceChecks: [],
+    referenceChecks: {},
     commandsRun: [],
     externalSources: []
   };
@@ -128,6 +132,7 @@ function snapshotAgentContext(agentContext: AgentContext): AgentContext {
     negativeEvidence: agentContext.negativeEvidence ? agentContext.negativeEvidence.map((evidence) => ({ ...evidence })) : undefined,
     patternCandidateFiles: agentContext.patternCandidateFiles ? [...agentContext.patternCandidateFiles] : undefined,
     unresolvedExistenceChecks: agentContext.unresolvedExistenceChecks ? [...agentContext.unresolvedExistenceChecks] : undefined,
+    referenceChecks: cloneReferenceChecks(agentContext.referenceChecks),
     impactAnalyses: agentContext.impactAnalyses ? structuredClone(agentContext.impactAnalyses) : undefined,
     commandsRun: agentContext.commandsRun ? agentContext.commandsRun.map((command) => ({ ...command })) : undefined,
     externalSources: agentContext.externalSources ? agentContext.externalSources.map((source) => ({ ...source })) : undefined
@@ -150,22 +155,36 @@ function getPatternFinderBlockReason(toolName: string, agentContext: AgentContex
   return null;
 }
 
-function getExistenceCheckBlockReason(toolName: string, agentContext: AgentContext, registry: AgentToolRegistry) {
+function getExistenceCheckBlockReason(
+  toolName: string,
+  toolArguments: Record<string, unknown>,
+  agentContext: AgentContext,
+  registry: AgentToolRegistry
+) {
   const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile"]);
   if (!editingTools.has(toolName) || !registry.get("checkExistence")) return null;
   if (agentContext.existenceCheckPerformed !== true) return "Before editing, call checkExistence to verify referenced imports, symbols, scripts, or directories.";
+  const intent = resolveWorkflowEditIntent(toolName, toolArguments);
+  if (intent && agentContext.referenceChecks) {
+    return evaluateWorkflowEditGate({
+      intent,
+      agentContext,
+      availableTools: new Set(registry.definitions.map((definition) => definition.name))
+    })?.reason || null;
+  }
   if (agentContext.unresolvedExistenceChecks?.length) return `Resolve missing or ambiguous references before editing: ${agentContext.unresolvedExistenceChecks.join(", ")}.`;
   return null;
 }
 
 function getWorkflowToolBlockReason(
   toolName: string,
+  toolArguments: Record<string, unknown>,
   agentContext: AgentContext,
   availableTools: ReadonlySet<string>,
   workflow?: TaskWorkflowSnapshot
 ) {
   if (!workflow) return null;
-  return evaluateTaskWorkflowToolDecision({ workflow, toolName, agentContext, availableTools }).reason;
+  return evaluateTaskWorkflowToolDecision({ workflow, toolName, toolArguments, agentContext, availableTools }).reason;
 }
 
 async function loadProjectMemoryPrompt(userRequest: string, agentContext?: AgentContext) {
@@ -856,10 +875,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         logAi(runId, "runtime.budgetToolBlocked", { step, remainingSteps, budgetPhase, toolName: toolCall.name });
         continue;
       }
-      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, agentContext, currentAvailableToolNames, options.workflow);
+      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, toolCall.arguments, agentContext, currentAvailableToolNames, options.workflow);
       // 旧调用方可能未创建工作流快照，继续使用原有通用门禁保持兼容。
       const patternFinderBlockReason = options.workflow ? null : getPatternFinderBlockReason(toolCall.name, agentContext, registry);
-      const existenceCheckBlockReason = options.workflow ? null : getExistenceCheckBlockReason(toolCall.name, agentContext, registry);
+      const existenceCheckBlockReason = options.workflow ? null : getExistenceCheckBlockReason(toolCall.name, toolCall.arguments, agentContext, registry);
 
       if (workflowBlockReason) {
         metrics.recordToolFailure();

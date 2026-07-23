@@ -53,7 +53,14 @@ export function createStructuredContextSummary(input: {
     generatedAt: Date.now(),
     currentUserGoal: input.agentContext.userGoal,
     confirmedDecisions: unique(decisions),
-    unresolvedQuestions: unique([...(input.agentContext.unresolvedExistenceChecks ?? []), ...(input.unresolvedQuestions ?? [])]),
+    // 新会话使用结构化引用状态；旧字符串只在迁移前的历史上下文中回退使用。
+    unresolvedQuestions: unique([
+      ...(input.agentContext.referenceChecks ? [] : input.agentContext.unresolvedExistenceChecks ?? []),
+      ...(input.unresolvedQuestions ?? [])
+    ]),
+    referenceChecks: input.agentContext.referenceChecks
+      ? structuredClone(input.agentContext.referenceChecks)
+      : undefined,
     filesRead: unique(input.agentContext.filesRead),
     filesModified: unique([...(input.filesModified ?? []), ...modifiedFiles(input.messages)]),
     commands: (input.agentContext.commandsRun ?? []).slice(-10).map((command) => ({ ...command })),

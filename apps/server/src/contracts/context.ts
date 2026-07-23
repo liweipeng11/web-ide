@@ -18,6 +18,8 @@ export type StructuredContextSummary = {
   currentUserGoal: string;
   confirmedDecisions: string[];
   unresolvedQuestions: string[];
+  /** 压缩后仍保留按目标记录的引用状态，避免旧缺失结论污染无关编辑。 */
+  referenceChecks?: Record<string, import("../existenceChecker/types.js").ReferenceResolution>;
   filesRead: string[];
   filesModified: string[];
   commands: Array<{ command: string; status: "success" | "failed" | "running" | "cancelled"; exitCode: number | null }>;

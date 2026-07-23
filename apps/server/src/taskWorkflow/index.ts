@@ -7,6 +7,8 @@ export {
   getTaskWorkflowDecisionPolicy,
   resolveTaskWorkflowDecisionPolicy
 } from "./decisionPolicy.js";
+export { evaluateWorkflowEditGate, resolveWorkflowEditIntent } from "./editGate.js";
+export { cloneReferenceChecks, createReferenceCheckKey, parseReferenceCheckKey } from "./referenceChecks.js";
 export type {
   TaskWorkflowDecision,
   TaskWorkflowDecisionPolicy,
@@ -16,5 +18,8 @@ export type {
   TaskWorkflowSnapshot,
   TaskWorkflowSource,
   TaskWorkflowStep,
-  TaskWorkflowType
+  TaskWorkflowType,
+  WorkflowBlockDecision,
+  WorkflowEditIntent,
+  WorkflowEditKind
 } from "./types.js";

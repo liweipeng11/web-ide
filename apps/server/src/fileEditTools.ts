@@ -247,6 +247,10 @@ export const fileEditToolDefinitions: AgentToolDefinition[] = [
       await ensureWrittenImportsExist(requiredRawString(args, "content"), filePath);
       const result = await executeFileEditWithLifecycle("writeFile", filePath, runtime, async () => {
         const exists = await workspacePathExists(filePath);
+        // createIfMissing 只是创建授权，不得用它覆盖未读取的已有文件。
+        if (exists && !runtime.agentContext.filesRead.includes(filePath)) {
+          throw new Error(`Cannot overwrite unread file: ${filePath}. Read the existing file before writing.`);
+        }
         const oldContent = exists ? await readWorkspaceFile(filePath) : "";
         assertDirectEditIsSafe({ filePath, status: exists ? "modify" : "create", oldContent, newContent: requiredRawString(args, "content"), runtime });
         return writeFile({

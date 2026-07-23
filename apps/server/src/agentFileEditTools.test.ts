@@ -259,6 +259,47 @@ test("writeFile 工具支持创建新文件并返回 finalContent", async () => 
   });
 });
 
+test("writeFile 的 createIfMissing 授权不能覆盖未读取的已有文件", async () => {
+  await withTempWorkspace(async (workspaceRoot) => {
+    await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+    await fs.writeFile(path.join(workspaceRoot, "src", "existing.ts"), "export const value = 1;\n", "utf8");
+    const tool = fileEditToolDefinitions.find((definition) => definition.name === "writeFile");
+
+    assert.ok(tool);
+    await assert.rejects(
+      () => tool.execute(
+        {
+          filePath: "src/existing.ts",
+          content: "export const value = 2;\n",
+          createIfMissing: true
+        },
+        createToolRuntime()
+      ),
+      /Cannot overwrite unread file/
+    );
+    assert.equal(await fs.readFile(path.join(workspaceRoot, "src", "existing.ts"), "utf8"), "export const value = 1;\n");
+  });
+});
+
+test("writeFile 创建工作区外文件仍会被路径策略阻止", async () => {
+  await withTempWorkspace(async () => {
+    const tool = fileEditToolDefinitions.find((definition) => definition.name === "writeFile");
+
+    assert.ok(tool);
+    await assert.rejects(
+      () => tool.execute(
+        {
+          filePath: "../outside.ts",
+          content: "export const outside = true;\n",
+          createIfMissing: true
+        },
+        createToolRuntime()
+      ),
+      /outside WORKSPACE_ROOT/
+    );
+  });
+});
+
 test("executeAgentToolCall 会为编辑工具产生日志步骤和工具结果", async () => {
   await withTempWorkspace(async (workspaceRoot) => {
     await fs.writeFile(path.join(workspaceRoot, "target.ts"), "const name = 'old';\n", "utf8");

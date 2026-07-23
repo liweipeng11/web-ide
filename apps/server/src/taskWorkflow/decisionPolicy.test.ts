@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { AgentContext } from "../agentToolTypes.js";
 import { buildTaskWorkflowProgressPrompt, createTaskWorkflow, evaluateTaskWorkflowToolDecision, getTaskWorkflowDecisionPolicy } from "./index.js";
+import { createReferenceCheckKey } from "./referenceChecks.js";
+import type { ExistenceCheckTarget, ReferenceResolution } from "../existenceChecker/types.js";
 
 const allTools = new Set([
   "readFile",
@@ -36,6 +38,21 @@ function context(overrides: Partial<AgentContext> = {}): AgentContext {
 
 function workflow(intent: "inspect" | "edit" | "diagnose_then_edit", goal: string) {
   return createTaskWorkflow(goal, { intent, confidence: 0.9, normalizedGoal: goal, reason: "test" });
+}
+
+function referenceCheck(target: ExistenceCheckTarget, resolution: ReferenceResolution) {
+  return { [createReferenceCheckKey(target)]: resolution };
+}
+
+function readyFeatureContext(overrides: Partial<AgentContext> = {}) {
+  return context({
+    filesRead: ["src/main.js"],
+    patternSearchPerformed: true,
+    patternCandidateFiles: ["src/main.js"],
+    existenceCheckPerformed: true,
+    referenceChecks: {},
+    ...overrides
+  });
 }
 
 test("所有工作流策略返回独立副本且权限边界明确", () => {
@@ -244,4 +261,91 @@ test("动态决策提示展示事实、缺口与最低成本下一步", () => {
   assert.match(prompt, /impact_analysis/);
   assert.match(prompt, /recommended next tools: findSimilarPatterns, checkExistence, analyzeImpact/);
   assert.match(prompt, /stop discovery once evidence is sufficient/);
+});
+
+test("proposePatch(create) 不会被旧缺失检查或 planned_create 循环阻塞", () => {
+  const missingRouter: ReferenceResolution = {
+    status: "planned_create",
+    blocking: false,
+    reason: "补丁将创建路由入口",
+    candidates: [{ path: "src/router/index.js", detail: "planned file" }],
+    resolvedPath: "src/router/index.js"
+  };
+  const decision = evaluateTaskWorkflowToolDecision({
+    workflow: workflow("edit", "新增路由文件"),
+    toolName: "proposePatch",
+    toolArguments: { filePath: "src/router/index.js", changeKind: "create" },
+    agentContext: readyFeatureContext({
+      unresolvedExistenceChecks: ["import:./legacy-missing"],
+      referenceChecks: referenceCheck(
+        { kind: "import", value: "./router", fromPath: "src/main.js" },
+        missingRouter
+      )
+    }),
+    availableTools: allTools
+  });
+
+  assert.equal(decision.allowed, true);
+  assert.deepEqual(decision.blockingReferences, []);
+  assert.equal(decision.recommendedTools.includes("checkExistence"), false);
+});
+
+test("旧缺失检查不阻止无关文件编辑，但相关真实缺失仍阻止直接写入", () => {
+  const trulyMissing: ReferenceResolution = {
+    status: "truly_missing",
+    blocking: true,
+    reason: "引用目标不存在",
+    candidates: []
+  };
+  const referenceChecks = referenceCheck(
+    { kind: "import", value: "./missing", fromPath: "src/main.js" },
+    trulyMissing
+  );
+  const currentWorkflow = workflow("edit", "更新配置");
+
+  const unrelated = evaluateTaskWorkflowToolDecision({
+    workflow: currentWorkflow,
+    toolName: "writeFile",
+    toolArguments: { filePath: "src/config.ts" },
+    agentContext: readyFeatureContext({ filesRead: ["src/main.js", "src/config.ts"], referenceChecks }),
+    availableTools: allTools
+  });
+  const related = evaluateTaskWorkflowToolDecision({
+    workflow: currentWorkflow,
+    toolName: "writeFile",
+    toolArguments: { filePath: "src/main.js" },
+    agentContext: readyFeatureContext({ referenceChecks }),
+    availableTools: allTools
+  });
+
+  assert.equal(unrelated.allowed, true);
+  assert.equal(related.allowed, false);
+  assert.equal(related.blockingReferences[0]?.status, "truly_missing");
+  assert.deepEqual(related.recommendedTools, ["proposePatch"]);
+  assert.equal(related.recoverable, true);
+});
+
+test("modify 与 delete 使用独立前置条件", () => {
+  const currentWorkflow = workflow("edit", "维护服务文件");
+  const unreadModify = evaluateTaskWorkflowToolDecision({
+    workflow: currentWorkflow,
+    toolName: "replaceInFile",
+    toolArguments: { filePath: "src/service.ts" },
+    agentContext: readyFeatureContext(),
+    availableTools: allTools
+  });
+  const deleteWithoutImpact = evaluateTaskWorkflowToolDecision({
+    workflow: currentWorkflow,
+    toolName: "deleteFile",
+    toolArguments: { filePath: "src/service.ts" },
+    agentContext: readyFeatureContext({ filesRead: ["src/main.js", "src/service.ts"] }),
+    availableTools: allTools
+  });
+
+  assert.equal(unreadModify.allowed, false);
+  assert.match(unreadModify.reason || "", /read the existing file/);
+  assert.deepEqual(unreadModify.recommendedTools, ["readFile"]);
+  assert.equal(deleteWithoutImpact.allowed, false);
+  assert.match(deleteWithoutImpact.reason || "", /impact analysis/);
+  assert.deepEqual(deleteWithoutImpact.recommendedTools, ["analyzeImpact"]);
 });

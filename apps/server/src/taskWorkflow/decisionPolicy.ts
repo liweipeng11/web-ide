@@ -7,8 +7,9 @@ import type {
   TaskWorkflowSnapshot,
   TaskWorkflowType
 } from "./types.js";
+import { evaluateWorkflowEditGate, resolveWorkflowEditIntent } from "./editGate.js";
 
-const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile", "applyPatch"]);
+const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile", "deleteFile", "applyPatch"]);
 const sideEffectTools = new Set([...editingTools, "runCommand", "automateBrowser"]);
 
 const decisionPolicies: Record<TaskWorkflowType, TaskWorkflowDecisionPolicy> = {
@@ -99,7 +100,9 @@ export function collectTaskWorkflowEvidence(agentContext: AgentContext): TaskWor
     patternCandidateRead: agentContext.patternSearchPerformed === true
       && (candidates.length === 0 || candidates.some((filePath) => agentContext.filesRead.includes(filePath))),
     existenceCheck: agentContext.existenceCheckPerformed === true,
-    referencesResolved: agentContext.existenceCheckPerformed === true && !(agentContext.unresolvedExistenceChecks?.length),
+    // 结构化状态由编辑门禁按目标过滤；只有历史上下文才继续使用全局字符串结论。
+    referencesResolved: agentContext.existenceCheckPerformed === true
+      && (agentContext.referenceChecks !== undefined || !(agentContext.unresolvedExistenceChecks?.length)),
     impactAnalysis: Boolean(agentContext.impactAnalyses?.length),
     commandAttempt: Boolean(agentContext.commandsRun?.length)
   };
@@ -161,10 +164,11 @@ function recommendEvidenceTools(missingEvidence: TaskWorkflowEvidence[], availab
 export function evaluateTaskWorkflowToolDecision(input: {
   workflow: TaskWorkflowSnapshot;
   toolName: string;
+  toolArguments?: Record<string, unknown>;
   agentContext: AgentContext;
   availableTools: ReadonlySet<string>;
 }): TaskWorkflowDecision {
-  const { workflow, toolName, agentContext, availableTools } = input;
+  const { workflow, toolName, toolArguments = {}, agentContext, availableTools } = input;
   const policy = resolveTaskWorkflowDecisionPolicy(workflow);
 
   if (!policy.mutationAllowed && sideEffectTools.has(toolName)) {
@@ -172,7 +176,9 @@ export function evaluateTaskWorkflowToolDecision(input: {
       allowed: false,
       reason: `Task workflow ${workflow.type} only allows read-only inspection tools.`,
       missingEvidence: [],
-      recommendedTools: []
+      recommendedTools: [],
+      blockingReferences: [],
+      recoverable: false
     };
   }
 
@@ -181,23 +187,31 @@ export function evaluateTaskWorkflowToolDecision(input: {
       allowed: false,
       reason: `Task workflow ${workflow.type} does not allow command execution.`,
       missingEvidence: [],
-      recommendedTools: []
+      recommendedTools: [],
+      blockingReferences: [],
+      recoverable: false
     };
   }
 
   if (!editingTools.has(toolName)) {
-    return { allowed: true, reason: null, missingEvidence: [], recommendedTools: [] };
+    return { allowed: true, reason: null, missingEvidence: [], recommendedTools: [], blockingReferences: [], recoverable: true };
   }
 
   const state = collectTaskWorkflowEvidence(agentContext);
   const missingEvidence = policy.requiredBeforeEdit.filter((evidence) => !hasEvidence(evidence, state, availableTools));
   const recommendedTools = recommendEvidenceTools(missingEvidence, availableTools);
+  const editIntent = resolveWorkflowEditIntent(toolName, toolArguments);
+  const editBlock = missingEvidence.length === 0 && editIntent
+    ? evaluateWorkflowEditGate({ intent: editIntent, agentContext, availableTools })
+    : null;
 
   return {
-    allowed: missingEvidence.length === 0,
-    reason: missingEvidence.length ? formatBlockReason(workflow, missingEvidence) : null,
+    allowed: missingEvidence.length === 0 && !editBlock,
+    reason: missingEvidence.length ? formatBlockReason(workflow, missingEvidence) : editBlock?.reason || null,
     missingEvidence,
-    recommendedTools
+    recommendedTools: missingEvidence.length ? recommendedTools : editBlock?.recommendedTools || [],
+    blockingReferences: editBlock?.blockingReferences || [],
+    recoverable: missingEvidence.length ? recommendedTools.length > 0 : editBlock?.recoverable ?? true
   };
 }
 
