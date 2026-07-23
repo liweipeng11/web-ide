@@ -9,7 +9,12 @@ import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { AgentMessage as PersistedAgentMessage, AgentStep, PendingAgentToolCall } from "./types.js";
-import { buildTaskWorkflowRuntimePrompt, type TaskWorkflowSnapshot } from "./taskWorkflow/index.js";
+import {
+  buildTaskWorkflowProgressPrompt,
+  buildTaskWorkflowRuntimePrompt,
+  evaluateTaskWorkflowToolDecision,
+  type TaskWorkflowSnapshot
+} from "./taskWorkflow/index.js";
 import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
 import { adaptOpenAiCompletionResponse, toOpenAiChatCompletionBody, type ModelDescriptor, type ModelMessage, type ModelRequest, type ModelResponse, type ModelToolCall } from "./contracts/index.js";
 import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "./observability/index.js";
@@ -149,28 +154,14 @@ function getExistenceCheckBlockReason(toolName: string, agentContext: AgentConte
   return null;
 }
 
-function getWorkflowToolBlockReason(toolName: string, agentContext: AgentContext, workflow?: TaskWorkflowSnapshot) {
+function getWorkflowToolBlockReason(
+  toolName: string,
+  agentContext: AgentContext,
+  availableTools: ReadonlySet<string>,
+  workflow?: TaskWorkflowSnapshot
+) {
   if (!workflow) return null;
-  const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile", "applyPatch"]);
-  const sideEffectTools = new Set([...editingTools, "runCommand", "automateBrowser"]);
-
-  if (workflow.type === "analysis-only" && sideEffectTools.has(toolName)) {
-    return `Task workflow ${workflow.type} only allows read-only inspection tools.`;
-  }
-
-  if (workflow.type === "refactor" && editingTools.has(toolName) && !(agentContext.impactAnalyses?.length)) {
-    return "Refactor workflow requires analyzeImpact evidence before editing.";
-  }
-
-  if (workflow.type === "bugfix" && editingTools.has(toolName) && !agentContext.filesRead.length) {
-    return "Bugfix workflow requires reading failure-related code or evidence before editing.";
-  }
-
-  if (workflow.type === "bugfix" && editingTools.has(toolName) && !(agentContext.commandsRun?.length)) {
-    return "Bugfix workflow requires a reproduction or validation command attempt before editing.";
-  }
-
-  return null;
+  return evaluateTaskWorkflowToolDecision({ workflow, toolName, agentContext, availableTools }).reason;
 }
 
 async function loadProjectMemoryPrompt(userRequest: string, agentContext?: AgentContext) {
@@ -538,6 +529,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     ? options.recoveryAttempts as number
     : config.aiAgentRecoveryAttempts;
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, generatedPatchIds, taskSessionId: options.taskSessionId, onAgentStep: options.onAgentStep, registry, emitToolApprovalSteps: false });
+  const availableToolNames = new Set(registry.definitions.map((definition) => definition.name));
   const toolCallCounts = new Map<string, number>();
   const repeatCountsByToolCall = new Map<ModelToolCall, number>();
   const repeatedToolWarnings = new Set<string>();
@@ -578,10 +570,14 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
     logAi(runId, "runtime.completion.request", { step, messageCount: messages.length });
     const negativeEvidenceMessage = buildNegativeEvidenceMessage(agentContext);
+    const workflowProgressMessage: ModelMessage | null = options.workflow
+      ? { role: "system", content: buildTaskWorkflowProgressPrompt(options.workflow, agentContext, availableToolNames) }
+      : null;
+    const transientDecisionMessages = [negativeEvidenceMessage, workflowProgressMessage].filter((message): message is ModelMessage => Boolean(message));
     const fullModelRequest: ModelRequest = {
       model: modelId,
       temperature: config.aiChatTemperature,
-      messages: negativeEvidenceMessage ? [...messages, negativeEvidenceMessage] : messages,
+      messages: transientDecisionMessages.length ? [...messages, ...transientDecisionMessages] : messages,
       tools: registry.schemas,
       toolChoice: "auto"
     };
@@ -697,9 +693,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       }
 
       const definition = registry.get(toolCall.name);
-      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, agentContext, options.workflow);
-      const patternFinderBlockReason = getPatternFinderBlockReason(toolCall.name, agentContext, registry);
-      const existenceCheckBlockReason = getExistenceCheckBlockReason(toolCall.name, agentContext, registry);
+      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, agentContext, availableToolNames, options.workflow);
+      // 旧调用方可能未创建工作流快照，继续使用原有通用门禁保持兼容。
+      const patternFinderBlockReason = options.workflow ? null : getPatternFinderBlockReason(toolCall.name, agentContext, registry);
+      const existenceCheckBlockReason = options.workflow ? null : getExistenceCheckBlockReason(toolCall.name, agentContext, registry);
 
       if (workflowBlockReason) {
         metrics.recordToolFailure();

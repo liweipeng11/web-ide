@@ -193,6 +193,13 @@ function normalizeTaskWorkflow(value: unknown): TaskWorkflowSnapshot | undefined
     source: record.source,
     confidence: typeof record.confidence === "number" && Number.isFinite(record.confidence) ? Math.max(0, Math.min(1, record.confidence)) : 0.5,
     reason: typeof record.reason === "string" ? record.reason : "",
+    authorization: record.authorization && typeof record.authorization === "object" && !Array.isArray(record.authorization)
+      ? {
+          workspaceMutation: (record.authorization as Record<string, unknown>).workspaceMutation !== false,
+          commandExecution: (record.authorization as Record<string, unknown>).commandExecution !== false,
+          source: (record.authorization as Record<string, unknown>).source === "user" ? "user" : "workflow"
+        }
+      : undefined,
     steps,
     version: typeof record.version === "number" ? record.version : 1,
     selectedAt: typeof record.selectedAt === "number" ? record.selectedAt : Date.now()
@@ -618,6 +625,7 @@ export async function setTaskSessionWorkflow(taskSessionId: string | null | unde
     // 写入快照副本，避免调用方后续修改模板对象污染已保存的任务历史。
     workflow: {
       ...workflow,
+      authorization: workflow.authorization ? { ...workflow.authorization } : undefined,
       steps: workflow.steps.map((step) => ({ ...step }))
     },
     updatedAt: Date.now()

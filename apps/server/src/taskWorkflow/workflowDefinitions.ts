@@ -1,4 +1,5 @@
 import type { TaskWorkflowSnapshot, TaskWorkflowStep, TaskWorkflowType } from "./types.js";
+import { resolveTaskWorkflowDecisionPolicy } from "./decisionPolicy.js";
 
 const workflowDefinitions: Record<TaskWorkflowType, TaskWorkflowStep[]> = {
   bugfix: [
@@ -38,33 +39,20 @@ export function getTaskWorkflowSteps(type: TaskWorkflowType): TaskWorkflowStep[]
   return workflowDefinitions[type].map((step) => ({ ...step }));
 }
 
-const workflowRuntimeRules: Record<TaskWorkflowType, string[]> = {
-  bugfix: [
-    "Collect concrete failure evidence and attempt reproduction before editing.",
-    "State the root cause supported by the evidence, then make the smallest repair.",
-    "Add or update a regression test and run focused regression validation."
-  ],
-  feature: [
-    "Inspect the project and at least one similar implementation before editing.",
-    "Confirm the smallest file plan, implement only that scope, then validate it.",
-    "Finish with a concise change summary after validation."
-  ],
-  refactor: [
-    "Establish the current behavior baseline and preserve external contracts.",
-    "Run impact analysis before editing shared or multi-file behavior.",
-    "Keep behavior unchanged and finish with regression validation."
-  ],
-  "analysis-only": [
-    "Use read-only inspection tools only.",
-    "Do not generate or apply patches, edit or delete files, or run commands.",
-    "Report evidence, conclusions, uncertainty, and optional next actions without changing the workspace."
-  ]
-};
-
 // Runtime 使用同一份工作流快照生成约束，避免计划面板和实际执行策略发生漂移。
 export function buildTaskWorkflowRuntimePrompt(workflow: TaskWorkflowSnapshot): string {
+  const policy = resolveTaskWorkflowDecisionPolicy(workflow);
   const phases = workflow.steps.map((step, index) => `${index + 1}. ${step.title}: ${step.description}`).join("\n");
-  const rules = workflowRuntimeRules[workflow.type].map((rule) => `- ${rule}`).join("\n");
+  const rules = policy.runtimeRules.map((rule) => `- ${rule}`).join("\n");
+  const requiredEvidence = policy.requiredBeforeEdit.length ? policy.requiredBeforeEdit.join(", ") : "none";
 
-  return `Task workflow: ${workflow.type}\nReason: ${workflow.reason}\nRequired phases (follow in order):\n${phases}\nWorkflow enforcement rules:\n${rules}`;
+  return `Task workflow: ${workflow.type}
+Selection source: ${workflow.source}; confidence: ${workflow.confidence.toFixed(2)}
+Reason: ${workflow.reason}
+Authorization boundary: workspace mutation=${policy.mutationAllowed}; command execution=${policy.commandAllowed}
+Required evidence before editing: ${requiredEvidence}
+Required phases (follow in order):
+${phases}
+Workflow enforcement rules:
+${rules}`;
 }

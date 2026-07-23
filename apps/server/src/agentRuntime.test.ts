@@ -1376,6 +1376,8 @@ test("analysis-only workflow injects its prompt and exposes only read-only tools
   assert.equal(tools.includes("replaceInFile"), false);
   assert.equal(tools.includes("runCommand"), false);
   assert.match(messages[0]?.content || "", /Task workflow: analysis-only/);
+  assert.equal(messages.some((message) => message.role === "system" && message.content?.includes("Workflow decision state")), true);
+  assert.equal(messages.some((message) => message.content?.includes("workspace mutation allowed: false")), true);
 });
 
 test("analysis-only workflow blocks side-effect tools even in a custom registry", async () => {
@@ -1412,6 +1414,7 @@ test("analysis-only workflow blocks side-effect tools even in a custom registry"
 test("refactor workflow requires impact evidence before editing", async () => {
   let executed = false;
   let callCount = 0;
+  const requests: Record<string, unknown>[] = [];
   const registry = createAgentToolRegistry([createRuntimeTestTool("proposePatch", { patchId: "patch-1" }, () => { executed = true; })]);
   const workflow = createTaskWorkflow("重构任务存储", {
     intent: "edit",
@@ -1431,7 +1434,8 @@ test("refactor workflow requires impact evidence before editing", async () => {
       relevantFiles: ["src/store.ts"]
     },
     runId: "test-refactor-workflow-impact",
-    requestCompletion: async () => {
+    requestCompletion: async (body) => {
+      requests.push(body);
       callCount += 1;
       if (callCount === 1) {
         return {
@@ -1444,11 +1448,13 @@ test("refactor workflow requires impact evidence before editing", async () => {
 
   assert.equal(executed, false);
   assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("requires analyzeImpact")), true);
+  assert.equal((requests[0]?.messages as Array<{ content?: string }>).some((message) => message.content?.includes("evidence missing before edit: impact_analysis")), true);
 });
 
 test("bugfix workflow requires a reproduction command attempt before editing", async () => {
   let executed = false;
   let callCount = 0;
+  const requests: Record<string, unknown>[] = [];
   const registry = createAgentToolRegistry([createRuntimeTestTool("proposePatch", { patchId: "patch-1" }, () => { executed = true; })]);
   const workflow = createTaskWorkflow("修复登录失败", {
     intent: "diagnose_then_edit",
@@ -1469,7 +1475,8 @@ test("bugfix workflow requires a reproduction command attempt before editing", a
       commandsRun: []
     },
     runId: "test-bugfix-workflow-reproduction",
-    requestCompletion: async () => {
+    requestCompletion: async (body) => {
+      requests.push(body);
       callCount += 1;
       if (callCount === 1) {
         return {
@@ -1482,4 +1489,5 @@ test("bugfix workflow requires a reproduction command attempt before editing", a
 
   assert.equal(executed, false);
   assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("command attempt")), true);
+  assert.equal((requests[0]?.messages as Array<{ content?: string }>).some((message) => message.content?.includes("evidence missing before edit: command_attempt")), true);
 });

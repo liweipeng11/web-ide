@@ -12,6 +12,31 @@ test("routes warning plus repair requests to diagnose_then_edit in local fallbac
   assert.equal(shouldGeneratePatchForIntent(classification.intent), true);
 });
 
+test("显式只读约束覆盖同一句中的修复和命令关键词", () => {
+  const chinese = inferAgentRequestClassification("只分析构建错误如何修复，不要修改或运行命令");
+  const english = inferAgentRequestClassification("analysis only: explain how to fix this error, do not edit");
+
+  assert.equal(chinese.intent, "inspect");
+  assert.equal(english.intent, "inspect");
+  assert.equal(chinese.confidence, 0.95);
+  assert.match(chinese.reason, /read-only/);
+});
+
+test("运行并修复的混合请求进入诊断编辑而不是纯命令", () => {
+  const classification = inferAgentRequestClassification("运行测试并修复所有失败用例");
+  assert.equal(classification.intent, "diagnose_then_edit");
+});
+
+test("禁止运行命令不会撤销显式代码修改授权", () => {
+  const classification = inferAgentRequestClassification("修复登录错误，但不要运行测试命令");
+  assert.equal(classification.intent, "diagnose_then_edit");
+});
+
+test("分析后修改的明确授权不会被“即可”误判为只读", () => {
+  const classification = inferAgentRequestClassification("分析问题后直接修改即可");
+  assert.equal(classification.intent, "edit");
+});
+
 test("direct edit classification preserves bugfix intent and upgrades read-only intent", () => {
   const bugfix = ensureEditableAgentRequestClassification({ intent: "diagnose_then_edit", confidence: 0.9, normalizedGoal: "修复构建失败", reason: "test" });
   const inspect = ensureEditableAgentRequestClassification({ intent: "inspect", confidence: 0.7, normalizedGoal: "分析并处理模块", reason: "test" });

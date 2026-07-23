@@ -5,6 +5,14 @@ import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from 
 const bugfixPatterns = [/修复|故障|缺陷|回归|报错|错误|异常|失败|崩溃|不生效|无法|不能|bug|fix|error|failed|failure|exception|crash|regression/i];
 const refactorPatterns = [/重构|整理结构|拆分模块|解耦|抽象|代码清理|不改变行为|refactor|restructure|decouple|cleanup/i];
 const featurePatterns = [/新增|添加|实现|支持|接入|开发|功能|feature|implement|add|introduce|support/i];
+const explicitReadOnlyPatterns = [
+  /只(?:分析|检查|排查|说明|解释|给出方案)|仅(?:分析|检查|排查|说明|解释)|不要(?:修改|改动|编辑)|无需(?:修改|改动)|先(?:分析|检查|排查)(?:即可|就行)$|(?:分析|检查|排查|说明|解释)(?![^\n]{0,20}(?:修改|改动|编辑|修复|实现)).{0,20}(?:即可|就行)/i,
+  /\b(?:analysis only|read[- ]only|do not (?:edit|modify|change)|without (?:editing|modifying|changing))\b/i
+];
+const explicitNoCommandPatterns = [
+  /不要(?:执行|运行)(?:任何)?(?:命令|测试|构建|脚本)?|无需(?:执行|运行)(?:命令|测试|构建|脚本)?/i,
+  /\b(?:do not run|don't run|without running) (?:commands?|tests?|builds?|scripts?)\b/i
+];
 
 type WorkflowSelection = {
   type: TaskWorkflowType;
@@ -21,12 +29,12 @@ function matchesAny(value: string, patterns: RegExp[]) {
 export function classifyTaskWorkflow(userGoal: string, classification?: AgentRequestClassification): WorkflowSelection {
   const normalizedGoal = (classification?.normalizedGoal || userGoal).trim();
 
-  if (classification?.intent === "inspect" || classification?.intent === "chat") {
+  if (matchesAny(normalizedGoal, explicitReadOnlyPatterns) || classification?.intent === "inspect" || classification?.intent === "chat") {
     return {
       type: "analysis-only",
-      source: "intent",
-      confidence: classification.confidence,
-      reason: "当前意图只要求分析或说明，不应修改工作区文件。"
+      source: classification ? "intent" : "keyword",
+      confidence: Math.max(classification?.confidence || 0, matchesAny(normalizedGoal, explicitReadOnlyPatterns) ? 0.95 : 0.7),
+      reason: "当前请求明确限制为分析或说明，不应修改工作区文件或执行命令。"
     };
   }
 
@@ -57,11 +65,19 @@ export function classifyTaskWorkflow(userGoal: string, classification?: AgentReq
 // 生成不可变的会话快照，后续模板升级不会改写历史任务采用的步骤。
 export function createTaskWorkflow(userGoal: string, classification?: AgentRequestClassification): TaskWorkflowSnapshot {
   const selection = classifyTaskWorkflow(userGoal, classification);
+  const normalizedGoal = (classification?.normalizedGoal || userGoal).trim();
+  const commandExplicitlyDisabled = matchesAny(normalizedGoal, explicitNoCommandPatterns);
+  const readOnly = selection.type === "analysis-only";
 
   return {
     ...selection,
+    authorization: {
+      workspaceMutation: !readOnly,
+      commandExecution: !readOnly && !commandExplicitlyDisabled,
+      source: commandExplicitlyDisabled ? "user" : "workflow"
+    },
     steps: getTaskWorkflowSteps(selection.type),
-    version: 1,
+    version: 2,
     selectedAt: Date.now()
   };
 }

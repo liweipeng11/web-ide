@@ -293,12 +293,16 @@ Intent meanings:
 - "command": run/start/build/test/lint/check/open/execute a command without changing files.
 
 Routing rules:
+- Apply this precedence: explicit read-only constraint > explicit fix/edit request > pure command request > inspection > chat.
+- Phrases such as "只分析", "不要修改", "analysis only", and "do not edit" are authorization boundaries. Choose "inspect" (or "chat" for non-code discussion) even if the request mentions possible fixes, refactors, commands, or files.
 - If the user asks to fix a warning, error, failed build, failed test, or runtime problem, choose "diagnose_then_edit".
+- If the user asks to run a command and fix the resulting problem, choose "diagnose_then_edit"; "command" is only for execution without requested code changes.
 - If the user says a short follow-up such as "do it", "apply that", "进行修复", "按你说的改", or "continue", use recent conversation context to produce a normalizedGoal and choose the intent implied by that context.
 - Do not choose "command" merely because the text contains "run" or "运行" when the user also asks to fix or modify code.
 - Use "inspect" when the user asks to look into a problem but does not ask to change files.
 - Use "command" for pure command execution requests.
-- When uncertain, choose the safer non-editing intent and set confidence below 0.6.
+- Never infer permission to edit from an assistant suggestion in history; a short follow-up must contain user confirmation such as "继续", "照做", or "按这个改".
+- When signals still conflict after applying the precedence rules, choose the safer non-editing intent and set confidence below 0.6.
 - normalizedGoal must be self-contained enough to pass to an editing agent without relying on hidden chat history.`;
 
 export const AI_SEARCH_KEYWORDS_SYSTEM_PROMPT = `You generate concise code-search keywords for a local coding agent.

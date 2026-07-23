@@ -38,6 +38,57 @@ test("uses analysis-only workflow for inspect tasks even when goal mentions refa
   assert.equal(result.type, "analysis-only");
 });
 
+test("显式只读约束优先于修复、重构和命令关键词", () => {
+  for (const goal of [
+    "只分析这个报错如何修复，不要修改代码",
+    "检查重构方案即可，不要执行命令",
+    "analysis only: explain how to fix and refactor this module"
+  ]) {
+    const result = classifyTaskWorkflow(goal, {
+      intent: "edit",
+      confidence: 0.82,
+      normalizedGoal: goal,
+      reason: "conflicting model result"
+    });
+    assert.equal(result.type, "analysis-only");
+    assert.equal(result.confidence, 0.95);
+  }
+});
+
+test("没有模型分类时仍能识别中文和英文显式只读约束", () => {
+  assert.equal(classifyTaskWorkflow("不要修改，只给出方案").type, "analysis-only");
+  assert.equal(classifyTaskWorkflow("read-only review of the router").type, "analysis-only");
+});
+
+test("编辑任务可以单独禁止命令而不丢失修改授权", () => {
+  const workflow = createTaskWorkflow("修复登录错误，但不要运行命令", {
+    intent: "diagnose_then_edit",
+    confidence: 0.9,
+    normalizedGoal: "修复登录错误，但不要运行命令",
+    reason: "test"
+  });
+
+  assert.equal(workflow.type, "bugfix");
+  assert.deepEqual(workflow.authorization, {
+    workspaceMutation: true,
+    commandExecution: false,
+    source: "user"
+  });
+});
+
+test("无模型分类时覆盖修复、功能和安全兜底分支", () => {
+  assert.deepEqual(
+    ["修复缓存错误", "新增数据导出", "评估当前代码"].map((goal) => classifyTaskWorkflow(goal).type),
+    ["bugfix", "feature", "analysis-only"]
+  );
+  assert.equal(classifyTaskWorkflow("调整颜色", {
+    intent: "edit",
+    confidence: 0.76,
+    normalizedGoal: "调整颜色",
+    reason: "test"
+  }).source, "intent");
+});
+
 test("creates feature workflow snapshots with independent template steps", () => {
   const workflow = createTaskWorkflow("新增任务工作流引擎", {
     intent: "edit",
@@ -50,6 +101,7 @@ test("creates feature workflow snapshots with independent template steps", () =>
   workflow.steps[0].title = "已修改";
 
   assert.equal(workflow.type, "feature");
+  assert.equal(workflow.version, 2);
   assert.equal(freshSteps[0].title, "分析项目与需求");
   assert.equal(workflow.steps.length, 6);
 });
@@ -80,6 +132,8 @@ test("builds runtime instructions from the persisted workflow snapshot", () => {
   const prompt = buildTaskWorkflowRuntimePrompt(workflow);
 
   assert.match(prompt, /Task workflow: analysis-only/);
+  assert.match(prompt, /Authorization boundary: workspace mutation=false; command execution=false/);
+  assert.match(prompt, /Required evidence before editing: none/);
   assert.match(prompt, /1\. 明确分析问题/);
   assert.match(prompt, /Do not generate or apply patches/);
 });

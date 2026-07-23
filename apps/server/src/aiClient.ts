@@ -78,6 +78,15 @@ const explicitEditPatterns = [
   /\b(?:fix|implement|add|remove|delete|rename|refactor|change|update|create|replace|configure|upgrade|migrate)\b/
 ];
 
+const explicitReadOnlyPatterns = [
+  /只(?:分析|检查|排查|说明|解释|给出方案)|仅(?:分析|检查|排查|说明|解释)|不要(?:修改|改动|编辑)|无需(?:修改|改动)|先(?:分析|检查|排查)(?:即可|就行)$|(?:分析|检查|排查|说明|解释)(?![^\n]{0,20}(?:修改|改动|编辑|修复|实现)).{0,20}(?:即可|就行)/i,
+  /\b(?:analysis only|read[- ]only|do not (?:edit|modify|change)|without (?:editing|modifying|changing))\b/i
+];
+
+function hasExplicitReadOnlyConstraint(userRequest: string) {
+  return explicitReadOnlyPatterns.some((pattern) => pattern.test(userRequest.trim()));
+}
+
 function isCommandExecutionRequest(userRequest: string) {
   const normalized = userRequest.trim().toLowerCase();
   const commandPatterns = [
@@ -99,12 +108,15 @@ function hasExplicitEditRequest(userRequest: string) {
 }
 
 export function inferAgentRequestClassification(userRequest: string): AgentRequestClassification {
+  const hasReadOnlyConstraint = hasExplicitReadOnlyConstraint(userRequest);
   const hasEditIntent = hasExplicitEditRequest(userRequest);
   const hasCommandIntent = isCommandExecutionRequest(userRequest);
   const hasDiagnosticIntent = isDiagnosticRequest(userRequest);
   let intent: AgentIntent = "chat";
 
-  if (hasEditIntent && hasDiagnosticIntent) {
+  if (hasReadOnlyConstraint) {
+    intent = hasDiagnosticIntent || hasEditIntent ? "inspect" : "chat";
+  } else if (hasEditIntent && hasDiagnosticIntent) {
     intent = "diagnose_then_edit";
   } else if (hasEditIntent) {
     intent = "edit";
@@ -116,9 +128,9 @@ export function inferAgentRequestClassification(userRequest: string): AgentReque
 
   return {
     intent,
-    confidence: intent === "chat" ? 0.55 : 0.7,
+    confidence: hasReadOnlyConstraint ? 0.95 : intent === "chat" ? 0.55 : 0.7,
     normalizedGoal: userRequest.trim(),
-    reason: "Local heuristic fallback"
+    reason: hasReadOnlyConstraint ? "Local heuristic fallback; explicit read-only constraint preserved" : "Local heuristic fallback"
   };
 }
 
@@ -131,6 +143,15 @@ function normalizeConfidence(value: unknown, fallback: number) {
 }
 
 function protectExplicitEditIntent(userRequest: string, classification: AgentRequestClassification): AgentRequestClassification {
+  if (hasExplicitReadOnlyConstraint(userRequest)) {
+    return {
+      ...classification,
+      intent: isDiagnosticRequest(userRequest) || hasExplicitEditRequest(userRequest) ? "inspect" : "chat",
+      confidence: Math.max(classification.confidence, 0.95),
+      reason: `${classification.reason || "Model route"}; explicit read-only constraint preserved`
+    };
+  }
+
   if (!hasExplicitEditRequest(userRequest)) {
     return classification;
   }

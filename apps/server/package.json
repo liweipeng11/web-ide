@@ -10,7 +10,7 @@
     "test:symbol-graph": "tsx --test src/symbolGraph/symbolGraph.test.ts",
     "test:impact-analyzer": "tsx --test src/impactAnalyzer/impactAnalyzer.test.ts",
     "test:safe-editor": "tsx --test src/safeEditor/safeEditor.test.ts",
-    "test:task-workflow": "tsx --test src/taskWorkflow/taskWorkflowEngine.test.ts",
+    "test:task-workflow": "tsx --test src/taskWorkflow/taskWorkflowEngine.test.ts src/taskWorkflow/decisionPolicy.test.ts",
     "test:external-context": "tsx --test src/externalContext/externalContextGateway.test.ts src/externalContext/browserAutomation.test.ts",
     "test:language-service": "tsx --test src/languageService/*.test.ts",
     "test:inline-edit": "tsx --test src/inlineEdit/*.test.ts",

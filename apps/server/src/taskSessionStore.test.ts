@@ -556,7 +556,13 @@ test("persists bugfix workflow selection with its required phases", async () => 
       planned?.planItems?.map((item) => item.title),
       ["收集问题现象", "尝试复现问题", "定位问题根因", "实施最小修复", "补充回归测试", "执行回归验证"]
     );
-    assert.equal((await getTaskSession(session.id)).workflow?.steps[0]?.id, "collect-symptoms");
+    const persistedWorkflow = (await getTaskSession(session.id)).workflow;
+    assert.equal(persistedWorkflow?.steps[0]?.id, "collect-symptoms");
+    assert.deepEqual(persistedWorkflow?.authorization, {
+      workspaceMutation: true,
+      commandExecution: true,
+      source: "workflow"
+    });
   } finally {
     config.aiApiKey = previousAiApiKey;
   }
