@@ -91,6 +91,7 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
     searchQueries: [],
     searchResultFiles: [],
     relevantFiles: [],
+    negativeEvidence: [],
     patternSearchPerformed: false,
     patternCandidateFiles: [],
     existenceCheckPerformed: false,
@@ -112,6 +113,7 @@ function snapshotAgentContext(agentContext: AgentContext): AgentContext {
     searchQueries: [...agentContext.searchQueries],
     searchResultFiles: [...agentContext.searchResultFiles],
     relevantFiles: [...agentContext.relevantFiles],
+    negativeEvidence: agentContext.negativeEvidence ? agentContext.negativeEvidence.map((evidence) => ({ ...evidence })) : undefined,
     patternCandidateFiles: agentContext.patternCandidateFiles ? [...agentContext.patternCandidateFiles] : undefined,
     unresolvedExistenceChecks: agentContext.unresolvedExistenceChecks ? [...agentContext.unresolvedExistenceChecks] : undefined,
     impactAnalyses: agentContext.impactAnalyses ? structuredClone(agentContext.impactAnalyses) : undefined,
@@ -240,6 +242,21 @@ function analyzeToolResult(content: ModelMessage["content"]) {
   } catch {
     return { cached: false, empty: false, failed: false };
   }
+}
+
+function buildNegativeEvidenceMessage(agentContext: AgentContext): ModelMessage | null {
+  const evidence = (agentContext.negativeEvidence || []).filter((item) => item.exhaustive);
+  if (!evidence.length) return null;
+
+  const facts = evidence.map((item) => {
+    const targetLabel = item.kind === "path_absent" ? "路径或文件" : item.kind === "symbol_absent" ? "符号" : "文本";
+    return `- 已完整检查 ${item.scope}，未发现${targetLabel}“${item.query}”（来源：${item.sourceTool}）。`;
+  });
+
+  return {
+    role: "user",
+    content: `以下是本轮已经确认的负面证据：\n${facts.join("\n")}\n请复用这些事实，判断是否需要创建目标实现或调整方案，不要重复搜索相同范围。`
+  };
 }
 
 function createToolBudgetWarningMessage(remainingSteps: number, hasGeneratedPatch: boolean): ModelMessage {
@@ -472,10 +489,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     }
 
     logAi(runId, "runtime.completion.request", { step, messageCount: messages.length });
+    const negativeEvidenceMessage = buildNegativeEvidenceMessage(agentContext);
     const fullModelRequest: ModelRequest = {
       model: modelId,
       temperature: config.aiChatTemperature,
-      messages,
+      messages: negativeEvidenceMessage ? [...messages, negativeEvidenceMessage] : messages,
       tools: registry.schemas,
       toolChoice: "auto"
     };

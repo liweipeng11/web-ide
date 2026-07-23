@@ -122,10 +122,13 @@ test("searchFilesByName finds workspace paths without reading files", async () =
     createToolCall("searchFilesByName", { query: "SettingsPage" }),
     createAgentToolRuntime({ agentContext, runId: "test-search-files-by-name" })
   );
-  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+  const data = JSON.parse(response.content) as { matches: Array<Record<string, unknown>>; conclusion: string; exhaustive: boolean; cached: boolean };
 
-  assert.equal(data[0].path, "src/views/SettingsPage.tsx");
-  assert.equal(data[0].matchedBy, "name");
+  assert.equal(data.matches[0].path, "src/views/SettingsPage.tsx");
+  assert.equal(data.matches[0].matchedBy, "name");
+  assert.equal(data.conclusion, "matches_found");
+  assert.equal(data.exhaustive, true);
+  assert.equal(data.cached, false);
   assert.deepEqual(agentContext.filesRead, []);
   assert.deepEqual(agentContext.searchResultFiles, ["src/views/SettingsPage.tsx"]);
 });
@@ -200,12 +203,13 @@ test("searchCodeRegex searches code patterns and records relevant files", async 
     createToolCall("searchCodeRegex", { regex: "get(User|Order)List", path: "src", filePattern: "*.ts" }),
     createAgentToolRuntime({ agentContext, runId: "test-search-code-regex" })
   );
-  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+  const data = JSON.parse(response.content) as { matches: Array<Record<string, unknown>>; conclusion: string };
 
-  assert.equal(data.length, 1);
-  assert.equal(data[0].filePath, "src/api.ts");
-  assert.equal(data[0].line, 1);
-  assert.equal(data[0].match, "getUserList");
+  assert.equal(data.matches.length, 1);
+  assert.equal(data.matches[0].filePath, "src/api.ts");
+  assert.equal(data.matches[0].line, 1);
+  assert.equal(data.matches[0].match, "getUserList");
+  assert.equal(data.conclusion, "matches_found");
   assert.deepEqual(agentContext.searchQueries, ["regex:get(User|Order)List"]);
   assert.deepEqual(agentContext.searchResultFiles, ["src/api.ts"]);
   assert.deepEqual(agentContext.relevantFiles, ["src/api.ts"]);
@@ -222,10 +226,10 @@ test("searchCode accepts filePattern filters while preserving literal search beh
     createToolCall("searchCode", { query: "literalMarker", path: "src", filePattern: "*.ts" }),
     createAgentToolRuntime({ agentContext: createAgentContext(), runId: "test-search-code-options" })
   );
-  const data = JSON.parse(response.content) as Array<Record<string, unknown>>;
+  const data = JSON.parse(response.content) as { matches: Array<Record<string, unknown>> };
 
   assert.deepEqual(
-    data.map((entry) => entry.filePath),
+    data.matches.map((entry) => entry.filePath),
     ["src/api.ts"]
   );
 });
@@ -441,11 +445,11 @@ test("case-sensitive searchCode cache keeps differently cased queries separate",
 
   const firstResponse = await executeAgentToolCall(createToolCall("searchCode", { query: "Foo", caseSensitive: true }), runtime);
   const secondResponse = await executeAgentToolCall(createToolCall("searchCode", { query: "foo", caseSensitive: true }), runtime);
-  const firstData = JSON.parse(firstResponse.content) as Array<Record<string, unknown>>;
-  const secondData = JSON.parse(secondResponse.content) as Array<Record<string, unknown>>;
+  const firstData = JSON.parse(firstResponse.content) as { matches: Array<Record<string, unknown>> };
+  const secondData = JSON.parse(secondResponse.content) as { matches: Array<Record<string, unknown>> };
 
-  assert.equal(firstData.length, 1);
-  assert.equal(secondData.length, 0);
+  assert.equal(firstData.matches.length, 1);
+  assert.equal(secondData.matches.length, 0);
 });
 
 test("empty searchCode cache is invalidated when the searched directory changes", async () => {
@@ -459,13 +463,89 @@ test("empty searchCode cache is invalidated when the searched directory changes"
   await new Promise((resolve) => setTimeout(resolve, 25));
   await fs.writeFile(path.join(workspaceRoot, "src", "feature.ts"), "export const newMarker = true;\n", "utf8");
   const secondResponse = await executeAgentToolCall(createToolCall("searchCode", { query: "newMarker", path: "src" }), runtime);
-  const firstData = JSON.parse(firstResponse.content) as Array<Record<string, unknown>>;
-  const secondData = JSON.parse(secondResponse.content) as Array<Record<string, unknown>>;
+  const firstData = JSON.parse(firstResponse.content) as { matches: Array<Record<string, unknown>> };
+  const secondData = JSON.parse(secondResponse.content) as { matches: Array<Record<string, unknown>>; cached: boolean };
 
-  assert.equal(firstData.length, 0);
-  assert.equal(secondData.length, 1);
-  assert.equal(secondData[0].cached, undefined);
-  assert.equal(secondData[0].filePath, "src/feature.ts");
+  assert.equal(firstData.matches.length, 0);
+  assert.equal(secondData.matches.length, 1);
+  assert.equal(secondData.cached, false);
+  assert.equal(secondData.matches[0].filePath, "src/feature.ts");
+  assert.deepEqual(runtime.agentContext.negativeEvidence, []);
+});
+
+test("完整空搜索返回 target_absent 并写入可复用负面证据", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "main.ts"), "export const app = true;\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const agentContext = createAgentContext();
+
+  const response = await executeAgentToolCall(
+    createToolCall("searchFilesByName", { query: "router", path: "src" }),
+    createAgentToolRuntime({ agentContext, runId: "test-negative-evidence" })
+  );
+  const data = JSON.parse(response.content) as { matches: unknown[]; conclusion: string; exhaustive: boolean; searchedPath: string };
+
+  assert.deepEqual(data.matches, []);
+  assert.equal(data.conclusion, "target_absent");
+  assert.equal(data.exhaustive, true);
+  assert.equal(data.searchedPath, "src");
+  assert.deepEqual(agentContext.negativeEvidence?.map(({ createdAt: _createdAt, ...evidence }) => evidence), [{
+    kind: "path_absent", query: "router", scope: "src", sourceTool: "searchFilesByName", exhaustive: true
+  }]);
+});
+
+test("数量上限截断时标记搜索范围不完整且不产生负面证据", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "router-a.ts"), "router\n", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "src", "router-b.ts"), "router\n", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const agentContext = createAgentContext();
+
+  const response = await executeAgentToolCall(
+    createToolCall("searchFilesByName", { query: "router", path: "src", limit: 1 }),
+    createAgentToolRuntime({ agentContext, runId: "test-incomplete-search" })
+  );
+  const data = JSON.parse(response.content) as { matches: unknown[]; conclusion: string; exhaustive: boolean };
+
+  assert.equal(data.matches.length, 1);
+  assert.equal(data.conclusion, "matches_found");
+  assert.equal(data.exhaustive, false);
+  assert.deepEqual(agentContext.negativeEvidence, undefined);
+});
+
+test("文件系统异常不会被误判为目标不存在", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const agentContext = createAgentContext();
+
+  const response = await executeAgentToolCall(
+    createToolCall("searchFilesByName", { query: "router", path: "missing-directory" }),
+    createAgentToolRuntime({ agentContext, runId: "test-search-error" })
+  );
+  const data = JSON.parse(response.content) as { error?: string; conclusion?: string };
+
+  assert.match(data.error || "", /not found/i);
+  assert.equal(data.conclusion, undefined);
+  assert.deepEqual(agentContext.negativeEvidence, undefined);
+});
+
+test("相同空搜索命中缓存时不会重复写入负面证据", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const agentContext = createAgentContext();
+  const runtime = createAgentToolRuntime({ agentContext, runId: "test-negative-evidence-cache" });
+  const call = createToolCall("searchCode", { query: "missingSymbol", path: "src" });
+
+  await executeAgentToolCall(call, runtime);
+  const cachedResponse = await executeAgentToolCall(call, runtime);
+  const cachedData = JSON.parse(cachedResponse.content) as { cached: boolean; conclusion: string };
+
+  assert.equal(cachedData.cached, true);
+  assert.equal(cachedData.conclusion, "target_absent");
+  assert.equal(agentContext.negativeEvidence?.length, 1);
 });
 
 test("listFiles cache is invalidated when a listed directory changes", async () => {

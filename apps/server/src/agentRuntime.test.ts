@@ -82,6 +82,36 @@ test("agent runtime keeps calling model after tool results", async () => {
   assert.match(firstMessages[0]?.content || "", /PROJECT_MEMORY_SENTINEL/);
 });
 
+test("agent runtime injects confirmed negative evidence into subsequent model requests", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchFilesByName", {
+    matches: [], query: "router", searchedPath: "src", exhaustive: true, cached: false, conclusion: "target_absent"
+  }, (runtime) => {
+    runtime.agentContext.negativeEvidence = [{
+      kind: "path_absent", query: "router", scope: "src", sourceTool: "searchFilesByName", exhaustive: true, createdAt: 1
+    }];
+  })]);
+  const requests: Record<string, unknown>[] = [];
+  let completionCount = 0;
+
+  await runAgentRuntime({
+    userRequest: "配置路由",
+    registry,
+    contextBudgetEnabled: false,
+    requestCompletion: async (body) => {
+      requests.push(body);
+      completionCount += 1;
+      return completionCount === 1
+        ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "negative-search", type: "function", function: { name: "searchFilesByName", arguments: JSON.stringify({ query: "router", path: "src" }) } }] } }] }
+        : { choices: [{ message: { role: "assistant", content: "将创建路由配置。" } }] };
+    }
+  });
+
+  const secondMessages = requests[1].messages as Array<{ role: string; content?: string }>;
+  const evidencePrompt = secondMessages.find((message) => message.role === "user" && message.content?.includes("负面证据"));
+  assert.match(evidencePrompt?.content || "", /已完整检查 src，未发现路径或文件“router”/);
+  assert.match(evidencePrompt?.content || "", /不要重复搜索相同范围/);
+});
+
 test("context budget v2 compresses the model view while preserving the full runtime history", async () => {
   const registry = createAgentToolRegistry([]);
   const messages = [

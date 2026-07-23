@@ -306,6 +306,7 @@ export type AgentContextSnapshot = {
   searchQueries: string[];
   searchResultFiles: string[];
   relevantFiles: string[];
+  negativeEvidence?: import("./agentToolTypes.js").NegativeEvidence[];
   patternSearchPerformed?: boolean;
   patternCandidateFiles?: string[];
   existenceCheckPerformed?: boolean;

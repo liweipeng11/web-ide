@@ -695,12 +695,18 @@ test("stores and clears pending tool calls for approval resume", async () => {
     toolName: "runCommand",
     arguments: { command: "pnpm test" },
     riskLevel: "medium",
-    agentContext: { userGoal: "运行测试", filesRead: ["src/service.ts"], searchQueries: ["impact:src/service.ts"], searchResultFiles: [], relevantFiles: ["src/service.ts"] }
+    agentContext: {
+      userGoal: "运行测试", filesRead: ["src/service.ts"], searchQueries: ["impact:src/service.ts"], searchResultFiles: [], relevantFiles: ["src/service.ts"],
+      negativeEvidence: [{ kind: "path_absent", query: "router", scope: "src", sourceTool: "searchFilesByName", exhaustive: true, createdAt: 1 }]
+    }
   });
 
   assert.equal(pending?.status, "awaiting_approval");
   assert.equal(pending?.pendingToolCall?.toolName, "runCommand");
   assert.deepEqual(pending?.pendingToolCall?.agentContext?.filesRead, ["src/service.ts"]);
+  assert.deepEqual(pending?.pendingToolCall?.agentContext?.negativeEvidence, [
+    { kind: "path_absent", query: "router", scope: "src", sourceTool: "searchFilesByName", exhaustive: true, createdAt: 1 }
+  ]);
   assert.deepEqual(await getPendingAgentToolCall(session.id), pending?.pendingToolCall);
 
   await recordTaskSessionContextBudget(session.id, {

@@ -8,7 +8,7 @@ import { buildSymbolGraph, querySymbolGraph, type SymbolGraphQuery, type SymbolQ
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
-import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
+import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage, AgentToolRuntime, NegativeEvidence, SearchToolResult } from "./agentToolTypes.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { externalContextReadonlyToolDefinitions } from "./externalContext/index.js";
 import { recoverStoredContextArtifact, storeContextArtifact } from "./contextBudget/index.js";
@@ -21,9 +21,54 @@ const MAX_AUTO_READ_FILES = 8;
 const MAX_READ_FILE_CHARS = 20_000;
 const DEFAULT_READ_CHUNK_LINES = 200;
 const MAX_READ_RANGE_LINES = 240;
+const MAX_TEXT_SEARCH_RESULTS = 200;
+const MAX_FILE_SEARCH_RESULTS = 2000;
 
 function uniquePush(values: string[], value: string) {
   if (value && !values.includes(value)) values.push(value);
+}
+
+function normalizeSearchScope(pathValue: string, filePattern = "") {
+  const searchedPath = pathValue || ".";
+  return filePattern ? `${searchedPath} (glob: ${filePattern})` : searchedPath;
+}
+
+function recordNegativeEvidence(agentContext: AgentContext, evidence: Omit<NegativeEvidence, "createdAt">) {
+  agentContext.negativeEvidence ||= [];
+  const duplicate = agentContext.negativeEvidence.some(
+    (item) => item.kind === evidence.kind && item.query === evidence.query && item.scope === evidence.scope && item.sourceTool === evidence.sourceTool
+  );
+
+  // 同一工具、查询和范围只记录一次，避免证据列表随缓存命中持续膨胀。
+  if (!duplicate) agentContext.negativeEvidence.push({ ...evidence, createdAt: Date.now() });
+}
+
+function removeNegativeEvidence(agentContext: AgentContext, evidence: Pick<NegativeEvidence, "query" | "scope" | "sourceTool">) {
+  if (!agentContext.negativeEvidence?.length) return;
+  agentContext.negativeEvidence = agentContext.negativeEvidence.filter(
+    (item) => item.query !== evidence.query || item.scope !== evidence.scope || item.sourceTool !== evidence.sourceTool
+  );
+}
+
+function createSearchToolResult<T>(options: {
+  matches: T[];
+  query: string;
+  searchedPath: string;
+  requestedLimit: number;
+  hardLimit: number;
+}): SearchToolResult<T> {
+  const effectiveLimit = Math.min(options.requestedLimit, options.hardLimit);
+  // 底层能力无法越过硬上限多取一条；正好达到硬上限时保守视为可能截断。
+  const truncated = options.matches.length > effectiveLimit || (effectiveLimit === options.hardLimit && options.matches.length >= options.hardLimit);
+  const matches = options.matches.slice(0, effectiveLimit);
+  return {
+    matches,
+    query: options.query,
+    searchedPath: options.searchedPath || ".",
+    exhaustive: !truncated,
+    cached: false,
+    conclusion: matches.length > 0 ? "matches_found" : truncated ? "scope_incomplete" : "target_absent"
+  };
 }
 
 function requiredString(args: Record<string, unknown>, name: string) {
@@ -475,21 +520,47 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       const includeIgnored = optionalBoolean(args, "includeIgnored");
       uniquePush(runtime.agentContext.searchQueries, `file:${query}`);
 
-      const results = await searchWorkspaceFilesByName(query, dir, limit, { allowIgnored: includeIgnored });
+      // 多取一条用于区分“完整空结果”和“命中数量被上限截断”。
+      const results = await searchWorkspaceFilesByName(query, dir, Math.min(limit, MAX_FILE_SEARCH_RESULTS) + 1, { allowIgnored: includeIgnored });
+      const searchResult = createSearchToolResult({ matches: results, query, searchedPath: dir, requestedLimit: limit, hardLimit: MAX_FILE_SEARCH_RESULTS });
 
-      for (const result of results) {
+      if (searchResult.exhaustive) {
+        const scannedEntries = await listWorkspaceFiles(dir, { recursive: true, allowIgnored: includeIgnored, limit: MAX_FILE_SEARCH_RESULTS });
+        // 达到目录扫描硬上限时无法证明后续未扫描条目中也没有目标。
+        if (scannedEntries.length >= MAX_FILE_SEARCH_RESULTS) {
+          searchResult.exhaustive = false;
+          if (searchResult.conclusion === "target_absent") searchResult.conclusion = "scope_incomplete";
+        }
+      }
+
+      for (const result of searchResult.matches) {
         uniquePush(runtime.agentContext.searchResultFiles, result.path);
         uniquePush(runtime.agentContext.relevantFiles, result.path);
       }
 
-      return results;
+      if (searchResult.conclusion === "target_absent") {
+        recordNegativeEvidence(runtime.agentContext, {
+          kind: "path_absent",
+          query,
+          scope: normalizeSearchScope(dir),
+          sourceTool: "searchFilesByName",
+          exhaustive: true
+        });
+      } else if (searchResult.conclusion === "matches_found") {
+        removeNegativeEvidence(runtime.agentContext, { query, scope: normalizeSearchScope(dir), sourceTool: "searchFilesByName" });
+      }
+
+      return searchResult;
     },
     summarize(result, cached, args) {
-      const results = Array.isArray(result) ? (result as Array<{ path?: unknown; matchedBy?: unknown }>) : [];
+      const value = result && typeof result === "object" ? (result as SearchToolResult<{ path?: unknown; matchedBy?: unknown }>) : null;
+      const results = value?.matches || [];
       return {
         query: args.query,
         path: args.path || "",
         cached,
+        exhaustive: value?.exhaustive === true,
+        conclusion: value?.conclusion,
         resultCount: results.length,
         matches: results
           .map((item) => ({
@@ -605,7 +676,10 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       const query = requiredString(args, "query");
       const options = getSearchOptions(args);
       uniquePush(runtime.agentContext.searchQueries, query);
-      const results = (await searchWorkspaceCode(query, options)).map((result) => ({
+      const requestedLimit = options.limit;
+      const searchOptions = { ...options, limit: Math.min(requestedLimit, MAX_TEXT_SEARCH_RESULTS - 1) + 1 };
+      const evidenceScope = normalizeSearchScope(options.path, options.filePattern);
+      const results = (await searchWorkspaceCode(query, searchOptions)).map((result) => ({
         filePath: result.filePath,
         line: result.line,
         column: result.column,
@@ -615,21 +689,43 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         contextAfter: result.contextAfter
       }));
 
-      for (const result of results) {
+      const searchResult = createSearchToolResult({
+        matches: results,
+        query,
+        searchedPath: options.path,
+        requestedLimit,
+        hardLimit: MAX_TEXT_SEARCH_RESULTS
+      });
+      for (const result of searchResult.matches) {
         uniquePush(runtime.agentContext.searchResultFiles, result.filePath);
         uniquePush(runtime.agentContext.relevantFiles, result.filePath);
       }
 
-      return results;
+      if (searchResult.conclusion === "target_absent") {
+        recordNegativeEvidence(runtime.agentContext, {
+          kind: "text_absent",
+          query,
+          scope: evidenceScope,
+          sourceTool: "searchCode",
+          exhaustive: true
+        });
+      } else if (searchResult.conclusion === "matches_found") {
+        removeNegativeEvidence(runtime.agentContext, { query, scope: evidenceScope, sourceTool: "searchCode" });
+      }
+
+      return searchResult;
     },
     summarize(result, cached, args) {
-      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown; line?: unknown; column?: unknown; content?: unknown; match?: unknown }>) : [];
+      const value = result && typeof result === "object" ? (result as SearchToolResult<{ filePath?: unknown; line?: unknown; column?: unknown; content?: unknown; match?: unknown }>) : null;
+      const results = value?.matches || [];
       return {
         query: args.query,
         path: args.path || "",
         filePattern: args.filePattern || "",
         caseSensitive: args.caseSensitive === true,
         cached,
+        exhaustive: value?.exhaustive === true,
+        conclusion: value?.conclusion,
         resultCount: results.length,
         files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10),
         // 仅保留定位所需的命中文件、行号与短片段，完整文件继续通过读取工具按需获取。
@@ -684,7 +780,10 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       const options = getSearchOptions(args);
       uniquePush(runtime.agentContext.searchQueries, `regex:${regex}`);
 
-      const results = (await searchTextRegex(regex, options)).map((result) => ({
+      const requestedLimit = options.limit;
+      const searchOptions = { ...options, limit: Math.min(requestedLimit, MAX_TEXT_SEARCH_RESULTS - 1) + 1 };
+      const evidenceScope = normalizeSearchScope(options.path, options.filePattern);
+      const results = (await searchTextRegex(regex, searchOptions)).map((result) => ({
         filePath: result.filePath,
         line: result.line,
         column: result.column,
@@ -694,21 +793,43 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         contextAfter: result.contextAfter
       }));
 
-      for (const result of results) {
+      const searchResult = createSearchToolResult({
+        matches: results,
+        query: regex,
+        searchedPath: options.path,
+        requestedLimit,
+        hardLimit: MAX_TEXT_SEARCH_RESULTS
+      });
+      for (const result of searchResult.matches) {
         uniquePush(runtime.agentContext.searchResultFiles, result.filePath);
         uniquePush(runtime.agentContext.relevantFiles, result.filePath);
       }
 
-      return results;
+      if (searchResult.conclusion === "target_absent") {
+        recordNegativeEvidence(runtime.agentContext, {
+          kind: "text_absent",
+          query: regex,
+          scope: evidenceScope,
+          sourceTool: "searchCodeRegex",
+          exhaustive: true
+        });
+      } else if (searchResult.conclusion === "matches_found") {
+        removeNegativeEvidence(runtime.agentContext, { query: regex, scope: evidenceScope, sourceTool: "searchCodeRegex" });
+      }
+
+      return searchResult;
     },
     summarize(result, cached, args) {
-      const results = Array.isArray(result) ? (result as Array<{ filePath?: unknown; line?: unknown; column?: unknown; content?: unknown; match?: unknown }>) : [];
+      const value = result && typeof result === "object" ? (result as SearchToolResult<{ filePath?: unknown; line?: unknown; column?: unknown; content?: unknown; match?: unknown }>) : null;
+      const results = value?.matches || [];
       return {
         regex: args.regex,
         path: args.path || "",
         filePattern: args.filePattern || "",
         caseSensitive: args.caseSensitive === true,
         cached,
+        exhaustive: value?.exhaustive === true,
+        conclusion: value?.conclusion,
         resultCount: results.length,
         files: [...new Set(results.map((item) => (typeof item.filePath === "string" ? item.filePath : "")).filter(Boolean))].slice(0, 10),
         matches: results.slice(0, 20).map((item) => ({
@@ -1204,6 +1325,14 @@ function collectCacheResourcePaths(toolName: string, args: Record<string, unknow
   if (result && typeof result === "object") {
     const value = result as Record<string, unknown>;
     if (typeof value.filePath === "string") resourcePaths.add(value.filePath);
+    if (Array.isArray(value.matches)) {
+      for (const item of value.matches) {
+        if (!item || typeof item !== "object") continue;
+        const match = item as Record<string, unknown>;
+        if (typeof match.filePath === "string") resourcePaths.add(match.filePath);
+        if (typeof match.path === "string") resourcePaths.add(match.path);
+      }
+    }
   }
 
   return [...resourcePaths];
@@ -1212,9 +1341,9 @@ function collectCacheResourcePaths(toolName: string, args: Record<string, unknow
 function withCacheMarker(result: unknown, toolName: string) {
   if (result && typeof result === "object" && !Array.isArray(result)) {
     return {
+      ...result,
       note: `${toolName} was already called with these arguments.`,
-      cached: true,
-      ...result
+      cached: true
     };
   }
 

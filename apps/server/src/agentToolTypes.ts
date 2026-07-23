@@ -6,12 +6,34 @@ import type { ExternalContextSource } from "./externalContext/types.js";
 
 export type AgentRole = "system" | "user" | "assistant" | "tool";
 
+export type SearchConclusion = "matches_found" | "target_absent" | "scope_incomplete";
+
+export type SearchToolResult<T> = {
+  matches: T[];
+  query: string;
+  searchedPath: string;
+  exhaustive: boolean;
+  cached: boolean;
+  conclusion: SearchConclusion;
+};
+
+export type NegativeEvidence = {
+  kind: "path_absent" | "symbol_absent" | "text_absent";
+  query: string;
+  scope: string;
+  sourceTool: string;
+  exhaustive: boolean;
+  createdAt: number;
+};
+
 export type AgentContext = {
   userGoal: string;
   filesRead: string[];
   searchQueries: string[];
   searchResultFiles: string[];
   relevantFiles: string[];
+  /** 完整搜索得到的未命中事实；Runtime 会把它作为后续决策依据，避免重复搜索。 */
+  negativeEvidence?: NegativeEvidence[];
   /** 记录本轮是否已经执行过相似实现检索，供编辑门禁判断。 */
   patternSearchPerformed?: boolean;
   /** 最近一次检索得到的候选文件，存在候选时至少应阅读一个。 */
