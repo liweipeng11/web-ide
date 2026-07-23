@@ -103,4 +103,5 @@ test("resolves Plan mode completion without claiming edit workflows succeeded", 
   assert.equal(resolvePlanModeTaskStatus("refactor", "completed"), "paused");
   assert.equal(resolvePlanModeTaskStatus("analysis-only", "completed"), "success");
   assert.equal(resolvePlanModeTaskStatus(undefined, "step_limit_reached"), "failed");
+  assert.equal(resolvePlanModeTaskStatus("analysis-only", "no_progress"), "failed");
 });

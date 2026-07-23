@@ -34,6 +34,7 @@ export type ToolRuntimeMetrics = {
   invalidToolCalls: number;
   consecutiveNoProgressSteps: number;
   maxConsecutiveNoProgressSteps: number;
+  recoveryAttempts: number;
   failedCalls: number;
   mostRepeatedCall: MostRepeatedToolCall | null;
 };
@@ -99,6 +100,7 @@ export class RunMetricsTracker {
   private invalidToolCalls = 0;
   private consecutiveNoProgressSteps = 0;
   private maxConsecutiveNoProgressSteps = 0;
+  private recoveryAttempts = 0;
   private readonly toolCallDiagnostics = new Map<string, {
     toolName: string;
     calls: number;
@@ -178,6 +180,14 @@ export class RunMetricsTracker {
     }
   }
 
+  /**
+   * 恢复提示开启新的策略窗口，因此清零“连续”计数，但保留历史峰值。
+   */
+  recordStrategyRecovery() {
+    this.recoveryAttempts += 1;
+    this.consecutiveNoProgressSteps = 0;
+  }
+
   recordToolFailure() {
     this.failedToolCalls += 1;
   }
@@ -245,6 +255,7 @@ export class RunMetricsTracker {
         invalidToolCalls: this.invalidToolCalls,
         consecutiveNoProgressSteps: this.consecutiveNoProgressSteps,
         maxConsecutiveNoProgressSteps: this.maxConsecutiveNoProgressSteps,
+        recoveryAttempts: this.recoveryAttempts,
         failedCalls: this.failedToolCalls,
         mostRepeatedCall: this.getMostRepeatedCall()
       },

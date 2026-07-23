@@ -66,7 +66,7 @@ export function createTaskWorkflow(userGoal: string, classification?: AgentReque
   };
 }
 
-export function resolvePlanModeTaskStatus(workflowType: TaskWorkflowType | undefined, runtimeStatus: "completed" | "awaiting_approval" | "step_limit_reached") {
+export function resolvePlanModeTaskStatus(workflowType: TaskWorkflowType | undefined, runtimeStatus: "completed" | "awaiting_approval" | "step_limit_reached" | "no_progress") {
   if (runtimeStatus === "awaiting_approval") return "awaiting_approval" as const;
   if (runtimeStatus !== "completed") return "failed" as const;
 

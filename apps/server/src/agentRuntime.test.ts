@@ -7,7 +7,7 @@ import type { AgentCompletionResponse, AgentToolDefinition, AgentToolRuntime } f
 import type { AgentStep } from "./types.js";
 import { createTaskWorkflow } from "./taskWorkflow/index.js";
 import type { RunMetrics } from "./observability/index.js";
-import { resolveAgentRepeatToolCallThresholds } from "./config.js";
+import { resolveAgentNoProgressPolicy, resolveAgentRepeatToolCallThresholds } from "./config.js";
 
 function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runtime: AgentToolRuntime) => void): AgentToolDefinition {
   return {
@@ -293,7 +293,10 @@ test("agent runtime direct edit tools do not create pending patch ids", async ()
 });
 
 test("agent runtime default budget allows more than eight tool rounds", async () => {
-  const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [], (runtime) => {
+    // 长任务只有持续获得新文件时才应继续占用完整工具预算。
+    runtime.agentContext.searchResultFiles.push(`src/result-${runtime.agentContext.searchResultFiles.length + 1}.ts`);
+  })]);
   const requests: Record<string, unknown>[] = [];
   let callCount = 0;
 
@@ -556,6 +559,216 @@ test("repeat tool-call thresholds require positive ordered integers", () => {
     AI_AGENT_REPEAT_WARNING_THRESHOLD: "4",
     AI_AGENT_REPEAT_BLOCK_THRESHOLD: "4"
   }), { warning: 2, block: 3 });
+});
+
+test("no-progress policy validates the threshold and recovery attempts", () => {
+  assert.deepEqual(resolveAgentNoProgressPolicy({
+    AI_AGENT_MAX_NO_PROGRESS_STEPS: "6",
+    AI_AGENT_RECOVERY_ATTEMPTS: "2"
+  }), { maxSteps: 6, recoveryAttempts: 2 });
+  assert.deepEqual(resolveAgentNoProgressPolicy({
+    AI_AGENT_MAX_NO_PROGRESS_STEPS: "0",
+    AI_AGENT_RECOVERY_ATTEMPTS: "-1"
+  }), { maxSteps: 4, recoveryAttempts: 1 });
+  assert.deepEqual(resolveAgentNoProgressPolicy({
+    AI_AGENT_MAX_NO_PROGRESS_STEPS: "3",
+    AI_AGENT_RECOVERY_ATTEMPTS: "0"
+  }), { maxSteps: 3, recoveryAttempts: 0 });
+});
+
+test("agent runtime recovers once and then stops after another no-progress window", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
+  const requests: Record<string, unknown>[] = [];
+  let modelStep = 0;
+  let capturedMetrics: RunMetrics | undefined;
+
+  const result = await runAgentRuntime({
+    userRequest: "Search without making progress",
+    registry,
+    maxNoProgressSteps: 2,
+    recoveryAttempts: 1,
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; },
+    requestCompletion: async (body) => {
+      requests.push(body);
+      modelStep += 1;
+      return {
+        choices: [{
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: `no-progress-${modelStep}`,
+              type: "function",
+              function: { name: "searchCode", arguments: JSON.stringify({ query: `missing-${modelStep}` }) }
+            }]
+          }
+        }]
+      };
+    }
+  });
+
+  const recoveryPrompt = requests[2]?.messages as Array<{ role: string; content?: string }>;
+  assert.equal(result.status, "no_progress");
+  assert.match(result.content, /连续工具调用未取得进展/);
+  assert.equal(modelStep, 4);
+  assert.equal(recoveryPrompt.some((message) => message.content?.includes("策略恢复")), true);
+  assert.equal(capturedMetrics?.tools.recoveryAttempts, 1);
+  assert.equal(capturedMetrics?.tools.maxConsecutiveNoProgressSteps, 2);
+  assert.equal(capturedMetrics?.result.stopReason, "no_progress");
+});
+
+test("newly discovered files reset the no-progress counter", async () => {
+  let execution = 0;
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [], (runtime) => {
+    execution += 1;
+    if (execution === 2) runtime.agentContext.searchResultFiles.push("src/new-result.ts");
+  })]);
+  const requests: Record<string, unknown>[] = [];
+  let modelStep = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "Discover a file between empty searches",
+    registry,
+    maxNoProgressSteps: 2,
+    recoveryAttempts: 1,
+    requestCompletion: async (body) => {
+      requests.push(body);
+      modelStep += 1;
+      if (modelStep <= 4) {
+        return {
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: `progress-reset-${modelStep}`,
+                type: "function",
+                function: { name: "searchCode", arguments: JSON.stringify({ query: `query-${modelStep}` }) }
+              }]
+            }
+          }]
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "Changed strategy after discovery." } }] };
+    }
+  });
+
+  // 若第二次调用没有重置计数，恢复提示会在第三次模型请求前出现。
+  const thirdRequestMessages = requests[2]?.messages as Array<{ content?: string }>;
+  const fifthRequestMessages = requests[4]?.messages as Array<{ content?: string }>;
+  assert.equal(result.status, "completed");
+  assert.equal(thirdRequestMessages.some((message) => message.content?.includes("策略恢复")), false);
+  assert.equal(fifthRequestMessages.some((message) => message.content?.includes("策略恢复")), true);
+});
+
+test("new negative evidence counts as progress even when the search result is empty", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchFilesByName", {
+    matches: [],
+    conclusion: "target_absent"
+  }, (runtime) => {
+    runtime.agentContext.negativeEvidence = [{
+      kind: "path_absent",
+      query: "router",
+      scope: "src",
+      sourceTool: "searchFilesByName",
+      exhaustive: true,
+      createdAt: Date.now()
+    }];
+  })]);
+  let modelStep = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "Confirm router absence",
+    registry,
+    maxNoProgressSteps: 1,
+    recoveryAttempts: 0,
+    requestCompletion: async () => {
+      modelStep += 1;
+      return modelStep === 1
+        ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "negative-progress", type: "function", function: { name: "searchFilesByName", arguments: "{}" } }] } }] }
+        : { choices: [{ message: { role: "assistant", content: "Absence confirmed." } }] };
+    }
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.agentContext.negativeEvidence?.length, 1);
+});
+
+test("reading a new range of an existing file counts as progress", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("readFileRange", { content: "range" })]);
+  let modelStep = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "Read two ranges",
+    agentContext: {
+      userGoal: "Read two ranges",
+      filesRead: ["src/large.ts"],
+      searchQueries: [],
+      searchResultFiles: [],
+      relevantFiles: ["src/large.ts"]
+    },
+    registry,
+    maxNoProgressSteps: 1,
+    recoveryAttempts: 0,
+    requestCompletion: async () => {
+      modelStep += 1;
+      if (modelStep <= 2) {
+        const startLine = modelStep === 1 ? 1 : 101;
+        return {
+          choices: [{
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [{
+                id: `range-progress-${modelStep}`,
+                type: "function",
+                function: {
+                  name: "readFileRange",
+                  arguments: JSON.stringify({ filePath: "src/large.ts", startLine, endLine: startLine + 99 })
+                }
+              }]
+            }
+          }]
+        };
+      }
+      return { choices: [{ message: { role: "assistant", content: "Both ranges read." } }] };
+    }
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(modelStep, 3);
+});
+
+test("generating a patch resets the no-progress counter", async () => {
+  const registry = createAgentToolRegistry([{
+    name: "proposePatch",
+    description: "Generate a test patch",
+    parameters: { type: "object", properties: {}, additionalProperties: true },
+    async execute(_args, runtime) {
+      runtime.generatedPatchIds?.push("progress-patch");
+      return { patchId: "progress-patch" };
+    },
+    summarize(value, cached) {
+      return { cached, value };
+    }
+  }]);
+  let modelStep = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "Generate patch",
+    registry,
+    maxNoProgressSteps: 1,
+    recoveryAttempts: 0,
+    requestCompletion: async () => {
+      modelStep += 1;
+      return modelStep === 1
+        ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "patch-progress", type: "function", function: { name: "proposePatch", arguments: "{}" } }] } }] }
+        : { choices: [{ message: { role: "assistant", content: "Patch generated." } }] };
+    }
+  });
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.generatedPatchIds, ["progress-patch"]);
 });
 
 test("agent runtime pauses before approval-required tools", async () => {

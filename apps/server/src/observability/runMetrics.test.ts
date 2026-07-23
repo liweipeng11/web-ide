@@ -33,6 +33,7 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
       invalidToolCalls: 0,
       consecutiveNoProgressSteps: 2,
       maxConsecutiveNoProgressSteps: 2,
+      recoveryAttempts: 0,
       failedCalls: 1,
       mostRepeatedCall: {
         toolName: "searchCode",

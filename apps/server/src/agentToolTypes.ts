@@ -26,6 +26,21 @@ export type NegativeEvidence = {
   createdAt: number;
 };
 
+/**
+ * Agent 每次工具调用前后的可比较状态。
+ * 这里只保存计数，不包含文件内容或命令输出，避免快照扩大运行时上下文。
+ */
+export type AgentProgressSnapshot = {
+  discoveredFiles: number;
+  filesRead: number;
+  searchResults: number;
+  negativeEvidence: number;
+  generatedPatches: number;
+  modifiedFiles: number;
+  commandsRun: number;
+  completedWorkflowSteps: number;
+};
+
 export type AgentContext = {
   userGoal: string;
   filesRead: string[];

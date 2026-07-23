@@ -25,9 +25,19 @@ export type AgentRepeatToolCallThresholds = {
   block: number;
 };
 
+export type AgentNoProgressPolicy = {
+  maxSteps: number;
+  recoveryAttempts: number;
+};
+
 const DEFAULT_AGENT_REPEAT_TOOL_CALL_THRESHOLDS: AgentRepeatToolCallThresholds = {
   warning: 2,
   block: 3
+};
+
+const DEFAULT_AGENT_NO_PROGRESS_POLICY: AgentNoProgressPolicy = {
+  maxSteps: 4,
+  recoveryAttempts: 1
 };
 
 function positiveIntegerFromEnv(name: string, fallback: number, env: NodeJS.ProcessEnv) {
@@ -56,6 +66,26 @@ export function resolveAgentRepeatToolCallThresholds(env: NodeJS.ProcessEnv = pr
   return block > warning
     ? { warning, block }
     : { ...DEFAULT_AGENT_REPEAT_TOOL_CALL_THRESHOLDS };
+}
+
+/**
+ * 读取无进展熔断策略。恢复次数允许为 0，便于需要快速失败的部署直接启用熔断。
+ */
+export function resolveAgentNoProgressPolicy(env: NodeJS.ProcessEnv = process.env): AgentNoProgressPolicy {
+  const maxSteps = positiveIntegerFromEnv(
+    "AI_AGENT_MAX_NO_PROGRESS_STEPS",
+    DEFAULT_AGENT_NO_PROGRESS_POLICY.maxSteps,
+    env
+  );
+  const recoveryValue = env.AI_AGENT_RECOVERY_ATTEMPTS;
+  const parsedRecoveryAttempts = recoveryValue === undefined || recoveryValue.trim() === ""
+    ? DEFAULT_AGENT_NO_PROGRESS_POLICY.recoveryAttempts
+    : Number(recoveryValue);
+  const recoveryAttempts = Number.isInteger(parsedRecoveryAttempts) && parsedRecoveryAttempts >= 0
+    ? parsedRecoveryAttempts
+    : DEFAULT_AGENT_NO_PROGRESS_POLICY.recoveryAttempts;
+
+  return { maxSteps, recoveryAttempts };
 }
 
 function optionalNumberFromEnv(name: string) {
@@ -108,6 +138,7 @@ function modelCatalogFromEnv(): Array<Record<string, unknown>> {
 }
 
 const agentRepeatToolCallThresholds = resolveAgentRepeatToolCallThresholds();
+const agentNoProgressPolicy = resolveAgentNoProgressPolicy();
 
 export const config = {
   aiApiKey: process.env.AI_API_KEY || "",
@@ -126,6 +157,8 @@ export const config = {
   aiContextSafetyMarginTokens: numberFromEnv("AI_CONTEXT_SAFETY_MARGIN_TOKENS", 2_048),
   aiAgentRepeatWarningThreshold: agentRepeatToolCallThresholds.warning,
   aiAgentRepeatBlockThreshold: agentRepeatToolCallThresholds.block,
+  aiAgentMaxNoProgressSteps: agentNoProgressPolicy.maxSteps,
+  aiAgentRecoveryAttempts: agentNoProgressPolicy.recoveryAttempts,
   braveSearchApiKey: process.env.BRAVE_SEARCH_API_KEY || "",
   braveSearchBaseUrl: process.env.BRAVE_SEARCH_BASE_URL || "https://api.search.brave.com/res/v1/web/search",
   externalContextTimeoutMs: numberFromEnv("EXTERNAL_CONTEXT_TIMEOUT_MS", 15_000),
