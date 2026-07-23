@@ -52,3 +52,9 @@ test("agent, edit, and chat prompts all include the shared discovery strategy", 
   assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "Do not edit an impacted file merely because analyzeImpact returned it");
   assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "Before changing a shared symbol");
 });
+
+test("command prompts require cwd for a named subproject", () => {
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "pass that workspace-relative directory as runCommand.cwd");
+  assertIncludes(AI_FILE_CHAT_SYSTEM_PROMPT, "cwd is required");
+  assertIncludes(AI_FILE_CHAT_SYSTEM_PROMPT, "workspace-relative directory");
+});

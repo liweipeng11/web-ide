@@ -51,6 +51,7 @@ export type AutoFixState = {
 
 export type CommandSuggestion = {
   command: string;
+  cwd?: string;
   reason?: string;
   risk?: string;
 };

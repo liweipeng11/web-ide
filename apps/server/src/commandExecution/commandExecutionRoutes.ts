@@ -1,11 +1,8 @@
 import { Router, type RequestHandler } from "express";
-import path from "node:path";
 import { HttpError } from "../errors.js";
 import { evaluateCommandPolicy } from "../commandPolicy.js";
-import { resolveCommandCwd } from "../commandRunner.js";
-import { checkExistence } from "../existenceChecker/index.js";
 import { getWorkspaceRoot } from "../workspaceStore.js";
-import { parsePackageScript } from "./commandClassifier.js";
+import { resolvePackageScriptExecution } from "./packageScriptResolver.js";
 import type { CommandExecutionFilter, CommandExecutionMode, CommandExecutionState } from "./types.js";
 import { commandExecutionService, type CommandExecutionService } from "./index.js";
 
@@ -32,22 +29,6 @@ function routeId(value: string | string[]) {
   return Array.isArray(value) ? value[0] : value;
 }
 
-async function verifyPackageScript(command: string, cwd: string) {
-  const parsed = parsePackageScript(command);
-  const workspaceRoot = getWorkspaceRoot();
-  if (!parsed || !workspaceRoot) return;
-
-  const packageDirectory = parsed.directory || path.relative(workspaceRoot, cwd);
-  const relativeDirectory = path.isAbsolute(packageDirectory) ? path.relative(workspaceRoot, packageDirectory) : packageDirectory;
-  const result = await checkExistence(workspaceRoot, [{
-    kind: "script",
-    value: parsed.script,
-    ...(relativeDirectory ? { fromPath: `${relativeDirectory.replace(/[\\/]+$/, "")}/package.json` } : {})
-  }]);
-  const check = result.checks[0];
-  if (check?.status !== "exists") throw new HttpError(400, `Package script "${parsed.script}" is ${check?.status || "missing"}.`);
-}
-
 /** 对外提供结构化命令执行 API，所有状态均来自统一执行内核。 */
 export function createCommandExecutionRouter(dependencies: RouteDependencies = {}) {
   const router = Router();
@@ -67,8 +48,15 @@ export function createCommandExecutionRouter(dependencies: RouteDependencies = {
     if (policy.level === "blocked") throw new HttpError(403, policy.reason);
     if (policy.level === "confirm" && request.body?.confirmed !== true) throw new HttpError(409, policy.reason);
 
-    const cwd = resolveCommandCwd(typeof request.body?.cwd === "string" ? request.body.cwd : undefined);
-    await verifyPackageScript(command, cwd);
+    const workspaceRoot = getWorkspaceRoot();
+    if (!workspaceRoot) throw new HttpError(400, "Open a workspace before running commands");
+    const cwd = (
+      await resolvePackageScriptExecution(
+        workspaceRoot,
+        command,
+        typeof request.body?.cwd === "string" ? request.body.cwd : undefined
+      )
+    ).cwd;
     const requestedMode = request.body?.mode;
     if (requestedMode !== undefined && !modes.has(requestedMode)) throw new HttpError(400, "mode must be foreground, background, or auto");
     const readyPattern = request.body?.readyPattern;

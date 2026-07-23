@@ -1,11 +1,11 @@
 import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { runProjectCommand } from "./commandRunner.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import { checkExistence } from "./existenceChecker/index.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
 import type { CommandPolicyResult, CommandResult } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { parsePackageScript } from "./commandExecution/commandClassifier.js";
+import { resolvePackageScriptExecution } from "./commandExecution/packageScriptResolver.js";
 import type { RunProjectCommandOptions } from "./commandRunner.js";
 
 export { parsePackageScript } from "./commandExecution/commandClassifier.js";
@@ -13,24 +13,19 @@ export { parsePackageScript } from "./commandExecution/commandClassifier.js";
 type CommandToolDependencies = {
   evaluateCommandPolicy: (command: string) => CommandPolicyResult;
   runProjectCommand: (command: string, cwd?: string, chatId?: string, confirmed?: boolean, options?: RunProjectCommandOptions) => Promise<CommandResult>;
-  verifyPackageScript: (command: string, cwd?: string) => Promise<string | null>;
+  resolvePackageScriptCwd: (command: string, cwd?: string) => Promise<string | undefined>;
 };
 
-async function verifyPackageScript(command: string, cwd?: string) {
-  const parsed = parsePackageScript(command);
-  if (!parsed) return null;
+async function resolvePackageScriptCwd(command: string, cwd?: string) {
   const workspaceRoot = getWorkspaceRoot();
-  if (!workspaceRoot) return null;
-  const packageDirectory = parsed.directory || cwd;
-  const result = await checkExistence(workspaceRoot, [{ kind: "script", value: parsed.script, ...(packageDirectory ? { fromPath: `${packageDirectory.replace(/[\\/]+$/, "")}/package.json` } : {}) }]);
-  const check = result.checks[0];
-  return check?.status === "exists" ? null : `Package script "${parsed.script}" is ${check?.status || "missing"}.`;
+  if (!workspaceRoot) return cwd;
+  return (await resolvePackageScriptExecution(workspaceRoot, command, cwd)).cwd;
 }
 
 const defaultDependencies: CommandToolDependencies = {
   evaluateCommandPolicy,
   runProjectCommand,
-  verifyPackageScript
+  resolvePackageScriptCwd
 };
 
 function optionalString(args: Record<string, unknown>, name: string) {
@@ -130,15 +125,18 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
           runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status: "blocked", result: null }));
           throw new Error(policy.reason);
         }
-        const scriptProblem = await dependencies.verifyPackageScript(command, cwd);
-        if (scriptProblem) {
+        let effectiveCwd: string | undefined;
+        try {
+          // 包脚本必须先解析到确定目录；多包歧义时禁止依赖模型猜测。
+          effectiveCwd = await dependencies.resolvePackageScriptCwd(command, cwd);
+        } catch (error) {
           runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status: "blocked", result: null }));
-          throw new Error(scriptProblem);
+          throw error;
         }
 
         // Runtime 已经完成用户审批，这里仍传 confirmed=true，让 commandRunner 复用原有二次策略校验。
         runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status: "running", result: null }));
-        const result = await dependencies.runProjectCommand(command, cwd, chatId, true, { mode, waitTimeoutMs, executionTimeoutMs, readyPattern, initiator: "agent" });
+        const result = await dependencies.runProjectCommand(command, effectiveCwd, chatId, true, { mode, waitTimeoutMs, executionTimeoutMs, readyPattern, initiator: "agent" });
         // ready 的后台服务仍是 running，不把“可以继续下一步”伪装成进程已成功退出。
         const status = result.status === "success"
           ? "success"

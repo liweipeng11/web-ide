@@ -7,6 +7,7 @@ import { evaluateCommandPolicy } from "./commandPolicy.js";
 import { classifyCommand } from "./commandExecution/commandClassifier.js";
 import { parseCommandOutput } from "./commandExecution/commandOutputParser.js";
 import { commandExecutionService } from "./commandExecution/index.js";
+import { resolvePackageScriptExecution } from "./commandExecution/packageScriptResolver.js";
 
 const commandTimeoutMs = 120_000;
 
@@ -41,7 +42,10 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
   const trimmedCommand = command.trim();
   if (!trimmedCommand) throw new HttpError(400, "command is required");
 
-  const resolvedCwd = resolveCommandCwd(cwd);
+  const workspaceRoot = getWorkspaceRoot();
+  if (!workspaceRoot) throw new HttpError(400, "Open a workspace before running commands");
+  // 所有兼容调用路径都在执行内核前再次绑定包目录，避免绕过 Agent/HTTP 层校验。
+  const resolvedCwd = (await resolvePackageScriptExecution(workspaceRoot, trimmedCommand, cwd)).cwd;
   const policy = evaluateCommandPolicy(trimmedCommand);
   if (policy.level === "blocked") throw new HttpError(403, policy.reason);
   if (policy.level === "confirm" && !confirmed) throw new HttpError(409, policy.reason);

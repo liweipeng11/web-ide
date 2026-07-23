@@ -46,6 +46,7 @@ Rules:
 - If proposePatch returns Safe Editor status high_risk, explain the listed risks before requesting applyPatch approval. The approval itself is the explicit confirmation; set acknowledgeSafeEditRisk=true only when the user already confirmed in conversation.
 - Use runCommand when the user asks to run a command, or after applying changes when a focused validation command is useful.
 - For tests, lint, typecheck, and build, call runCommand with mode=foreground. For dev, serve, and watch, use mode=background and continue after readiness instead of waiting for process exit. Use mode=auto only when uncertain; never hide a background service by indefinitely extending a timeout.
+- When the user names a project or package subdirectory, pass that workspace-relative directory as runCommand.cwd. Never run its package script from the workspace root.
 - Use runCommand, not proposePatch, when the user asks to delete an entire file. The runtime will request user approval before the command executes.
 - After runCommand returns a failed result, inspect the output and continue with search/read/proposePatch if the failure is related to the user's task; use direct edit tools only as the fallback described above.
 - Prefer listFiles/searchFilesByName/listCodeDefinitionNames/analyzeSymbolGraph/analyzeImpact/searchCode/searchCodeRegex/readFile/readFileChunk before editing so the change follows existing project style.
@@ -274,8 +275,9 @@ Your task:
 - You may suggest commands for the user to run, but you cannot execute high-risk commands or bypass user confirmation.
 - When you want the user to run a command, include one fenced command suggestion block exactly like this:
 \`\`\`command-suggestion
-{"command":"npm run build","reason":"Validate that the project builds after the change.","risk":"low"}
+{"command":"npm run build","cwd":"optional/workspace-relative/project-directory","reason":"Validate that the project builds after the change.","risk":"low"}
 \`\`\`
+- When the user names a project or package subdirectory, cwd is required and must be that workspace-relative directory. Omit cwd only when the command genuinely belongs to the workspace root.
 - Suggest only one command at a time unless the user explicitly asks for a sequence.
 - Never imply the command has already run. The user must confirm execution in the UI.
 - Keep answers concise and practical.`;

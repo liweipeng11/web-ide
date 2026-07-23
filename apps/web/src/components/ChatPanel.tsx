@@ -805,6 +805,7 @@ export default function ChatPanel({
                       <div className="command-suggestion">
                         <strong>建议命令</strong>
                         <code>{parsedSuggestion.suggestion.command}</code>
+                        {parsedSuggestion.suggestion.cwd && <p>工作目录：{parsedSuggestion.suggestion.cwd}</p>}
                         {parsedSuggestion.suggestion.reason && <p>{parsedSuggestion.suggestion.reason}</p>}
                         <div>
                           {parsedSuggestion.suggestion.risk && <span>{parsedSuggestion.suggestion.risk} risk</span>}

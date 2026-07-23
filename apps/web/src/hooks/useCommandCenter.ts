@@ -362,7 +362,7 @@ export function useCommandCenter({ state, setState, setTerminalOpen, refreshTask
       setTerminalOpen(true);
       const { execution } = await startCommandExecution({
         command: suggestion.command,
-        cwd: state.workspaceRoot,
+        cwd: suggestion.cwd,
         chatId: state.chatId,
         taskSessionId: state.currentTaskSessionId,
         mode: "auto",

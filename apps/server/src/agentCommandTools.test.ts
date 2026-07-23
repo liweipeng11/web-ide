@@ -34,14 +34,23 @@ function createRuntime(onAgentStep?: (step: AgentStep) => void): AgentToolRuntim
   };
 }
 
-function createTool(options: { policy?: CommandPolicyResult; result?: CommandResult; onRun?: (runOptions?: import("./commandRunner.js").RunProjectCommandOptions) => void; scriptProblem?: string | null } = {}) {
+function createTool(options: {
+  policy?: CommandPolicyResult;
+  result?: CommandResult;
+  onRun?: (cwd: string | undefined, runOptions?: import("./commandRunner.js").RunProjectCommandOptions) => void;
+  scriptProblem?: string | null;
+  resolvedCwd?: string;
+} = {}) {
   return createCommandAgentToolDefinitions({
     evaluateCommandPolicy: () => options.policy || { level: "safe", reason: "allowlisted" },
-    runProjectCommand: async (_command, _cwd, _chatId, _confirmed, runOptions) => {
-      options.onRun?.(runOptions);
+    runProjectCommand: async (_command, cwd, _chatId, _confirmed, runOptions) => {
+      options.onRun?.(cwd, runOptions);
       return options.result || commandResult("success");
     },
-    verifyPackageScript: async () => options.scriptProblem || null
+    resolvePackageScriptCwd: async (_command, cwd) => {
+      if (options.scriptProblem) throw new Error(options.scriptProblem);
+      return options.resolvedCwd || cwd;
+    }
   })[0];
 }
 
@@ -88,7 +97,7 @@ test("runCommand 保留用户主动取消状态", async () => {
 test("runCommand 将后台模式和超时参数传给统一执行内核", async () => {
   let received: import("./commandRunner.js").RunProjectCommandOptions | undefined;
   const steps: AgentStep[] = [];
-  const tool = createTool({ result: commandResult("running", "npm run dev"), onRun: (options) => { received = options; } });
+  const tool = createTool({ result: commandResult("running", "npm run dev"), onRun: (_cwd, options) => { received = options; } });
   await tool.execute({ command: "npm run dev", mode: "background", waitTimeoutMs: 15000, readyPattern: "ready" }, createRuntime((step) => steps.push(step)));
   assert.deepEqual(received, { mode: "background", waitTimeoutMs: 15000, executionTimeoutMs: undefined, readyPattern: "ready", initiator: "agent" });
   assert.deepEqual(commandStatuses(steps), ["running", "running"]);
@@ -120,4 +129,18 @@ test("runCommand blocks missing package scripts before execution", async () => {
 test("识别 Monorepo 包目录中的包管理器脚本", () => {
   assert.deepEqual(parsePackageScript("pnpm --dir apps/server typecheck"), { script: "typecheck", directory: "apps/server" });
   assert.deepEqual(parsePackageScript("npm --prefix apps/server run test"), { script: "test", directory: "apps/server" });
+});
+
+test("runCommand 将解析出的子项目目录传给执行内核", async () => {
+  let receivedCwd: string | undefined;
+  const tool = createTool({
+    resolvedCwd: "C:/workspace/clr-vue-app",
+    onRun: (cwd) => {
+      receivedCwd = cwd;
+    }
+  });
+
+  await tool.execute({ command: "npm run serve", mode: "background" }, createRuntime());
+
+  assert.equal(receivedCwd, "C:/workspace/clr-vue-app");
 });

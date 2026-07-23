@@ -112,3 +112,25 @@ test("execution HTTP API 保留策略、确认、cwd 和 package script 校验",
   assert.equal((await requestJson(server.baseUrl, "/api/command-executions", "POST", { command: "node -e \"console.log(1)\"", cwd: "..", confirmed: true })).response.status, 400);
   assert.equal((await requestJson(server.baseUrl, "/api/command-executions", "POST", { command: "npm run test" })).response.status, 400);
 });
+
+test("execution HTTP API 自动在唯一包含脚本的子项目中执行", async (context) => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "command-routes-package-"));
+  const packageRoot = path.join(workspaceRoot, "clr-vue-app");
+  await fs.mkdir(packageRoot, { recursive: true });
+  await fs.writeFile(
+    path.join(packageRoot, "package.json"),
+    JSON.stringify({ scripts: { serve: "vue-cli-service serve" } }),
+    "utf8"
+  );
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  const server = await createTestServer(workspaceRoot);
+  context.after(() => server.close());
+
+  const result = await requestJson(server.baseUrl, "/api/command-executions", "POST", {
+    command: "npm run serve",
+    mode: "background"
+  });
+
+  assert.equal(result.response.status, 201);
+  assert.equal(result.data.execution.cwd, packageRoot);
+});

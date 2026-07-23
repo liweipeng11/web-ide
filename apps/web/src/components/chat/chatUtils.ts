@@ -2,6 +2,7 @@ import type { CommandResult } from "../../api";
 
 export type CommandSuggestion = {
   command: string;
+  cwd?: string;
   reason?: string;
   risk?: string;
 };
@@ -46,6 +47,7 @@ export function parseCommandSuggestion(content: string): { suggestion: CommandSu
     return {
       suggestion: {
         command: parsed.command.trim(),
+        cwd: typeof parsed.cwd === "string" && parsed.cwd.trim() ? parsed.cwd.trim() : undefined,
         reason: typeof parsed.reason === "string" ? parsed.reason : "",
         risk: typeof parsed.risk === "string" ? parsed.risk : ""
       },
