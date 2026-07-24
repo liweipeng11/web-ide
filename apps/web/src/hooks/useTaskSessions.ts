@@ -7,26 +7,44 @@ type UseTaskSessionsOptions = {
   setState: Dispatch<SetStateAction<AppState>>;
 };
 
+function normalizeTaskSessionRuntimeStatus(session: TaskSession): TaskSession {
+  if (session.runtimeStatus) return session;
+  const runtimeStatus = session.status === "success"
+    ? "completed"
+    : session.status === "awaiting_approval"
+      ? "awaiting_approval"
+      : session.status === "incomplete"
+        ? "incomplete"
+        : session.status === "blocked"
+          ? "blocked"
+          : undefined;
+  return runtimeStatus ? { ...session, runtimeStatus } : session;
+}
+
 // 管理任务会话和计划项，避免聊天、文件编辑与计划逻辑交叉耦合。
 export function useTaskSessions({ state, setState }: UseTaskSessionsOptions) {
   async function refreshTaskSessions(selectedTaskSessionId?: string | null) {
     if (!state.workspaceRoot) return;
 
     const taskHistory = await fetchTaskSessions();
-    const selectedTaskSession = selectedTaskSessionId ? await fetchTaskSession(selectedTaskSessionId).then((data) => data.session).catch(() => null) : null;
+    const normalizedHistory = taskHistory.sessions.map(normalizeTaskSessionRuntimeStatus);
+    const selectedTaskSession = selectedTaskSessionId
+      ? await fetchTaskSession(selectedTaskSessionId).then((data) => normalizeTaskSessionRuntimeStatus(data.session)).catch(() => null)
+      : null;
     setState((current) => ({
       ...current,
-      taskSessions: taskHistory.sessions,
+      taskSessions: normalizedHistory,
       selectedTaskSession: selectedTaskSessionId ? selectedTaskSession : current.selectedTaskSession
     }));
   }
 
   // 计划更新后同步任务列表和详情，避免两个区域显示不同版本。
   function mergeTaskSession(session: TaskSession) {
+    const normalized = normalizeTaskSessionRuntimeStatus(session);
     setState((current) => ({
       ...current,
-      taskSessions: [session, ...current.taskSessions.filter((item) => item.id !== session.id)].sort((left, right) => right.createdAt - left.createdAt),
-      selectedTaskSession: current.selectedTaskSession?.id === session.id ? session : current.selectedTaskSession
+      taskSessions: [normalized, ...current.taskSessions.filter((item) => item.id !== normalized.id)].sort((left, right) => right.createdAt - left.createdAt),
+      selectedTaskSession: current.selectedTaskSession?.id === normalized.id ? normalized : current.selectedTaskSession
     }));
   }
 

@@ -46,6 +46,10 @@ test("编辑任务零交付物会恢复一次并返回 incomplete", async () => 
   });
 
   assert.equal(result.status, "incomplete");
+  assert.equal(result.completionEvidence?.generatedPatchCount, 0);
+  assert.equal(result.completionEvidence?.changedFileCount, 0);
+  assert.equal(result.requestedStatus, "completed");
+  assert.match(result.statusReason || "", /没有生成补丁/);
   assert.equal(completionCount, 2);
   assert.equal(steps.some((step) => step.type === "strategy" && step.event === "completion_recovery"), true);
 });
@@ -1924,6 +1928,7 @@ test("runtime 按本次 create 意图放行 proposePatch，不受无关旧缺失
     normalizedGoal: "新增路由文件",
     reason: "test"
   });
+  const steps: AgentStep[] = [];
 
   const result = await runAgentRuntime({
     userRequest: "新增路由文件",
@@ -1948,6 +1953,7 @@ test("runtime 按本次 create 意图放行 proposePatch，不受无关旧缺失
       }
     },
     runId: "test-create-gate-unrelated-missing",
+    onAgentStep: (step) => steps.push(step),
     requestCompletion: async () => {
       callCount += 1;
       return callCount === 1
@@ -1974,6 +1980,10 @@ test("runtime 按本次 create 意图放行 proposePatch，不受无关旧缺失
   assert.equal(executed, true);
   assert.deepEqual(result.generatedPatchIds, []);
   assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("legacy-missing")), false);
+  const decision = steps.find((step): step is Extract<AgentStep, { type: "workflow_decision" }> => step.type === "workflow_decision");
+  assert.equal(decision?.decision, "allowed");
+  assert.deepEqual(decision?.plannedFiles, ["src/router/index.js"]);
+  assert.equal(decision?.references[0]?.status, "truly_missing");
 });
 
 test("refactor workflow requires impact evidence before editing", async () => {

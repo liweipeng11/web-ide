@@ -112,6 +112,15 @@ function isTaskSessionStatus(value: unknown): value is TaskSession["status"] {
   ].includes(String(value));
 }
 
+function isAgentRuntimeStatus(value: unknown): value is NonNullable<TaskSession["runtimeStatus"]> {
+  return value === "completed"
+    || value === "awaiting_approval"
+    || value === "incomplete"
+    || value === "blocked"
+    || value === "step_limit_reached"
+    || value === "no_progress";
+}
+
 function normalizeTaskPlanItems(items: unknown): TaskPlanItem[] {
   if (!Array.isArray(items)) return [];
 
@@ -508,6 +517,15 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     ...session,
     // 未识别的历史状态回退为 failed，避免损坏记录被误显示为成功。
     status: isTaskSessionStatus(session.status) ? session.status : "failed",
+    runtimeStatus: isAgentRuntimeStatus(session.runtimeStatus) ? session.runtimeStatus : undefined,
+    runtimeStatusReason: typeof session.runtimeStatusReason === "string" ? session.runtimeStatusReason : undefined,
+    completionEvidence: session.completionEvidence && typeof session.completionEvidence === "object" ? session.completionEvidence : undefined,
+    runtimeOutcome: session.runtimeOutcome
+      && typeof session.runtimeOutcome === "object"
+      && isAgentRuntimeStatus(session.runtimeOutcome.requestedStatus)
+      && isAgentRuntimeStatus(session.runtimeOutcome.effectiveStatus)
+      ? session.runtimeOutcome
+      : undefined,
     agentMode: isAgentMode(session.agentMode) ? session.agentMode : "act",
     workflow: normalizeTaskWorkflow(session.workflow),
     // 旧任务记录没有 Agent 消息字段，读取时补齐，后续 runtime 可以直接追加和恢复。
@@ -597,8 +615,17 @@ async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
 }
 
 async function writeTaskSession(session: TaskSession) {
-  await fs.mkdir(taskSessionDirectory(), { recursive: true });
-  await fs.writeFile(taskSessionPath(session.id), `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  const directory = taskSessionDirectory();
+  const destination = taskSessionPath(session.id);
+  const temporary = path.join(directory, `.${session.id}.${crypto.randomUUID()}.tmp`);
+  await fs.mkdir(directory, { recursive: true });
+  try {
+    // 同目录临时文件 + rename 保证读者只会看到旧版本或完整新版本，且显式使用 UTF-8 保存中文。
+    await fs.writeFile(temporary, `${JSON.stringify(session, null, 2)}\n`, "utf8");
+    await fs.rename(temporary, destination);
+  } finally {
+    await fs.rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
 export async function createTaskSession(userGoal: string, options: { chatId?: string; messageIds?: string[]; agentMode?: AgentMode; modelSelection?: import("./contracts/model.js").ModelSelection } = {}): Promise<TaskSession> {
@@ -745,7 +772,7 @@ export async function approveTaskSessionPlan(taskSessionId: string | null | unde
   }));
 }
 
-// ???????????????? Claude Code ????????????
+// 执行中允许用户中断并进入重规划，保持与 Claude Code 相近的交互方式。
 export async function interruptTaskSessionForReplan(taskSessionId: string | null | undefined, instruction = "") {
   if (!taskSessionId) return null;
 
@@ -759,14 +786,14 @@ export async function interruptTaskSessionForReplan(taskSessionId: string | null
       nextItems[activeIndex] = {
         ...nextItems[activeIndex],
         status: "blocked",
-        note: "?????????????????????",
+        note: "用户已中断执行，等待调整计划后继续。",
         updatedAt: now
       };
     }
 
     const revision = createTaskPlanRevision({
       trigger: "user",
-      reason: instruction.trim() || "???????????????",
+      reason: instruction.trim() || "用户要求中断并重新规划。",
       beforeItems: previousItems,
       afterItems: nextItems
     });
@@ -1399,7 +1426,16 @@ export async function updateTaskSessionAgentMode(taskSessionId: string | null | 
   }));
 }
 
-export async function updateTaskSessionStatus(taskSessionId: string | null | undefined, status: TaskSession["status"]) {
+export async function updateTaskSessionStatus(
+  taskSessionId: string | null | undefined,
+  status: TaskSession["status"],
+  runtimeOutcome?: {
+    runtimeStatus: NonNullable<TaskSession["runtimeStatus"]>;
+    requestedStatus?: NonNullable<TaskSession["runtimeStatus"]>;
+    reason?: string;
+    completionEvidence?: TaskSession["completionEvidence"];
+  }
+) {
   if (!taskSessionId) return null;
 
   let updated = await enqueueTaskSessionUpdate(taskSessionId, (session) => {
@@ -1410,6 +1446,18 @@ export async function updateTaskSessionStatus(taskSessionId: string | null | und
     return {
       ...session,
       status,
+      runtimeStatus: runtimeOutcome?.runtimeStatus ?? session.runtimeStatus,
+      runtimeStatusReason: runtimeOutcome?.reason ?? session.runtimeStatusReason,
+      completionEvidence: runtimeOutcome?.completionEvidence ?? session.completionEvidence,
+      runtimeOutcome: runtimeOutcome
+        ? {
+            requestedStatus: runtimeOutcome.requestedStatus ?? runtimeOutcome.runtimeStatus,
+            effectiveStatus: runtimeOutcome.runtimeStatus,
+            reason: runtimeOutcome.reason,
+            completionEvidence: runtimeOutcome.completionEvidence,
+            recordedAt: Date.now()
+          }
+        : session.runtimeOutcome,
       updatedAt: Date.now()
     };
   });

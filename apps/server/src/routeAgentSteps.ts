@@ -52,6 +52,7 @@ export type AgentStepPayload =
       toolName: string;
       output: unknown;
     }
+  | Omit<Extract<AgentStep, { type: "workflow_decision" }>, "id" | "createdAt">
   | {
       type: "edit";
       files: string[];

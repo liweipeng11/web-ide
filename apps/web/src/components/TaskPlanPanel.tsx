@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from "react";
-import type { AgentMode, TaskPlanItem, TaskPlanItemStatus, TaskSession, TaskWorkflowType } from "../api";
+import type { AgentMode, AgentRuntimeStatus, TaskPlanItem, TaskPlanItemStatus, TaskSession, TaskWorkflowType } from "../api";
 import Icon from "./Icon";
 
 type Props = {
@@ -32,6 +32,15 @@ const workflowText: Record<TaskWorkflowType, string> = {
   feature: "功能开发",
   refactor: "代码重构",
   "analysis-only": "只读分析"
+};
+
+const runtimeStatusView: Record<AgentRuntimeStatus, { label: string; detail: string }> = {
+  completed: { label: "已完成", detail: "交付条件已满足" },
+  awaiting_approval: { label: "等待审批", detail: "补丁或工具操作已准备好" },
+  incomplete: { label: "尚未完成，可继续", detail: "仍有可执行的恢复动作" },
+  blocked: { label: "已阻塞，需要处理", detail: "需要用户、权限或外部条件介入" },
+  step_limit_reached: { label: "达到步骤上限", detail: "本轮已停止，可继续任务" },
+  no_progress: { label: "无进展停止", detail: "策略恢复后仍未获得新进展" }
 };
 
 function getRevisionTriggerText(trigger: string) {
@@ -88,6 +97,8 @@ export default function TaskPlanPanel({
   const completedCount = countByStatus(planItems, "completed");
   const inProgressCount = countByStatus(planItems, "in_progress");
   const blockedCount = countByStatus(planItems, "blocked");
+  const runtimeStatus = session?.runtimeStatus;
+  const completionEvidence = session?.completionEvidence;
 
   useEffect(() => {
     setEditingItemId("");
@@ -153,6 +164,21 @@ export default function TaskPlanPanel({
         </div>
         <span className={`task-plan-mode ${effectiveAgentMode}`}>{effectiveAgentMode === "plan" ? "Plan" : "Act"}</span>
       </div>
+
+      {runtimeStatus && (
+        <div className={`task-runtime-status status-${runtimeStatus}`} role="status">
+          <div>
+            <strong>{runtimeStatusView[runtimeStatus].label}</strong>
+            <span>{session?.runtimeStatusReason || runtimeStatusView[runtimeStatus].detail}</span>
+          </div>
+          {completionEvidence && (
+            <small>
+              补丁 {completionEvidence.generatedPatchCount} · 已变更 {completionEvidence.changedFileCount} ·
+              待处理 {completionEvidence.pendingPlanCount} · 阻塞 {completionEvidence.blockedPlanCount}
+            </small>
+          )}
+        </div>
+      )}
 
       {workflow && (
         <div className={`task-workflow-summary ${workflow.type}`} title={workflow.reason}>

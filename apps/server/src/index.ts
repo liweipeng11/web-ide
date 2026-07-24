@@ -147,7 +147,19 @@ async function readChatContextFiles(paths: string[]) {
 }
 
 function formatTaskSessionStatus(status: TaskSession["status"]) {
-  return status === "running" ? "?????" : status === "success" ? "???" : status === "failed" ? "???" : status === "awaiting_replan" ? "??????" : "?????";
+  const labels: Record<TaskSession["status"], string> = {
+    running: "进行中",
+    awaiting_approval: "等待审批",
+    awaiting_user: "等待用户",
+    paused: "已暂停",
+    success: "已完成",
+    incomplete: "尚未完成",
+    blocked: "已阻塞",
+    failed: "执行失败",
+    cancelled: "已取消",
+    awaiting_replan: "等待重规划"
+  };
+  return labels[status];
 }
 
 async function shouldAutoCancelTaskSession(taskSessionId: string | null) {
@@ -754,9 +766,19 @@ app.post(
     let runtimeStatus;
     if (runtimePatch) {
       await advanceTaskPlanProgress(taskSessionId, "patch_generated");
-      runtimeStatus = await updateTaskSessionStatus(taskSessionId, "awaiting_approval");
+      runtimeStatus = await updateTaskSessionStatus(taskSessionId, "awaiting_approval", {
+        runtimeStatus: "awaiting_approval",
+        requestedStatus: runtimeResult.requestedStatus,
+        reason: runtimeResult.statusReason,
+        completionEvidence: runtimeResult.completionEvidence
+      });
     } else {
-      runtimeStatus = await updateTaskSessionStatus(taskSessionId, resolveRuntimeTaskStatus(runtimeResult.status));
+      runtimeStatus = await updateTaskSessionStatus(taskSessionId, resolveRuntimeTaskStatus(runtimeResult.status), {
+        runtimeStatus: runtimeResult.status,
+        requestedStatus: runtimeResult.requestedStatus,
+        reason: runtimeResult.statusReason,
+        completionEvidence: runtimeResult.completionEvidence
+      });
     }
     const chatId = sessionBeforeDecision.chatId?.trim() || `chat:${taskSessionId}`;
     const runtimeAnswer = buildDeferredRuntimeAnswer(runtimeResult, runtimePatch);
@@ -1008,7 +1030,12 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       if (nextStatus === "success" && workflowType === "analysis-only") {
         await advanceTaskPlanProgress(taskSession.id, "validation_success");
       }
-      const completedTaskSession = await updateTaskSessionStatus(taskSession.id, nextStatus);
+      const completedTaskSession = await updateTaskSessionStatus(taskSession.id, nextStatus, {
+        runtimeStatus: runtimeResult.status,
+        requestedStatus: runtimeResult.requestedStatus,
+        reason: runtimeResult.statusReason,
+        completionEvidence: runtimeResult.completionEvidence
+      });
 
       completed = true;
       await Promise.all(taskStepWrites);
@@ -1048,9 +1075,19 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       let runtimeProgressedTaskSession;
       if (runtimePatch) {
         await advanceTaskPlanProgress(taskSession.id, "patch_generated");
-        runtimeProgressedTaskSession = await updateTaskSessionStatus(taskSession.id, "awaiting_approval");
+        runtimeProgressedTaskSession = await updateTaskSessionStatus(taskSession.id, "awaiting_approval", {
+          runtimeStatus: "awaiting_approval",
+          requestedStatus: runtimeResult.requestedStatus,
+          reason: runtimeResult.statusReason,
+          completionEvidence: runtimeResult.completionEvidence
+        });
       } else {
-        runtimeProgressedTaskSession = await updateTaskSessionStatus(taskSession.id, resolveRuntimeTaskStatus(runtimeResult.status));
+        runtimeProgressedTaskSession = await updateTaskSessionStatus(taskSession.id, resolveRuntimeTaskStatus(runtimeResult.status), {
+          runtimeStatus: runtimeResult.status,
+          requestedStatus: runtimeResult.requestedStatus,
+          reason: runtimeResult.statusReason,
+          completionEvidence: runtimeResult.completionEvidence
+        });
       }
       const runtimeAnswer = buildDeferredRuntimeAnswer(runtimeResult, runtimePatch) || "";
       if (runtimeAnswer) {

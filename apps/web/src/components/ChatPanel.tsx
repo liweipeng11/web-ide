@@ -435,7 +435,19 @@ export default function ChatPanel({
   }
 
   function getTaskStatusText(status: TaskSession["status"]) {
-    return status === "running" ? "?????" : status === "success" ? "???" : status === "failed" ? "???" : status === "awaiting_replan" ? "??????" : "?????";
+    const labels: Record<TaskSession["status"], string> = {
+      running: "进行中",
+      awaiting_approval: "等待审批",
+      awaiting_user: "等待用户",
+      paused: "已暂停",
+      success: "已完成",
+      incomplete: "尚未完成",
+      blocked: "已阻塞",
+      failed: "执行失败",
+      cancelled: "已取消",
+      awaiting_replan: "等待重规划"
+    };
+    return labels[status];
   }
 
   function renderTaskPathList(items: string[], emptyText: string) {

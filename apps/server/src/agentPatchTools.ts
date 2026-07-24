@@ -77,7 +77,7 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
       }
       runtime.generatedPatchIds?.push(patch.patchId);
 
-      // ????????????? HTML diff ??????????????
+      // 工具结果仅返回结构化摘要，避免把完整 HTML diff 重复注入模型上下文。
       return {
         patchId: patch.patchId,
         summary: patch.summary,

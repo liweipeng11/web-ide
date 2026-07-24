@@ -33,8 +33,10 @@ import {
   classifyTaskWorkflow,
   evaluateTaskWorkflowToolDecision,
   evaluateWorkflowEditGate,
+  parseReferenceCheckKey,
   resolveWorkflowEditIntent,
   cloneReferenceChecks,
+  type TaskWorkflowDecision,
   type TaskWorkflowSnapshot
 } from "./taskWorkflow/index.js";
 import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
@@ -58,6 +60,9 @@ export type AgentRuntimeResult = {
   pendingToolCall?: PendingAgentToolCall | null;
   contextBudgetSnapshot?: ContextBudgetSnapshot;
   contextSummary?: StructuredContextSummary | null;
+  completionEvidence?: CompletionEvidence;
+  statusReason?: string;
+  requestedStatus?: AgentRuntimeStatus;
 };
 
 export type AgentRuntimeOptions = {
@@ -200,7 +205,44 @@ function getWorkflowToolBlockReason(
   workflow?: TaskWorkflowSnapshot
 ) {
   if (!workflow) return null;
-  return evaluateTaskWorkflowToolDecision({ workflow, toolName, toolArguments, agentContext, availableTools }).reason;
+  return evaluateTaskWorkflowToolDecision({ workflow, toolName, toolArguments, agentContext, availableTools });
+}
+
+function createWorkflowDecisionStep(
+  workflow: TaskWorkflowSnapshot,
+  toolName: string,
+  toolArguments: Record<string, unknown>,
+  agentContext: AgentContext,
+  decision: TaskWorkflowDecision
+) {
+  const intent = resolveWorkflowEditIntent(toolName, toolArguments);
+  if (!intent) return null;
+  const references = Object.entries(agentContext.referenceChecks || {}).map(([key, resolution]) => {
+    const target = parseReferenceCheckKey(key);
+    return {
+      target: target ? `${target.kind}:${target.value}` : key,
+      status: resolution.status,
+      blocking: resolution.blocking,
+      reason: resolution.reason,
+      resolvedPath: resolution.resolvedPath
+    };
+  });
+  const plannedFiles = intent.changeKind === "create" && intent.filePath ? [intent.filePath] : [];
+
+  return createAgentStep({
+    type: "workflow_decision",
+    workflowType: workflow.type,
+    toolName,
+    plannedFiles,
+    references,
+    blockingReferences: decision.blockingReferences,
+    decision: decision.allowed ? "allowed" : "blocked",
+    reason: decision.reason || undefined,
+    recommendedTools: decision.recommendedTools,
+    recoverable: decision.recoverable,
+    // 没有自动恢复工具的阻塞需要用户或外部条件介入。
+    requiresUserAction: !decision.allowed && !decision.recoverable
+  });
 }
 
 async function loadProjectMemoryPrompt(userRequest: string, agentContext?: AgentContext) {
@@ -1016,7 +1058,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         generatedPatchIds,
         pendingToolCall: null,
         contextBudgetSnapshot: latestContextBudgetSnapshot,
-        contextSummary: latestContextSummary
+        contextSummary: latestContextSummary,
+        completionEvidence: evidence,
+        statusReason: completionDecision.reason,
+        // 模型请求结束不代表交付完成；保留“请求完成”与 Runtime 证据裁决后的有效状态。
+        requestedStatus: "completed"
       };
     }
 
@@ -1110,7 +1156,23 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         });
         continue;
       }
-      const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, toolCall.arguments, agentContext, currentAvailableToolNames, options.workflow);
+      const workflowDecision = getWorkflowToolBlockReason(toolCall.name, toolCall.arguments, agentContext, currentAvailableToolNames, options.workflow);
+      const workflowBlockReason = workflowDecision?.reason || null;
+      if (options.workflow && workflowDecision) {
+        const decisionStep = createWorkflowDecisionStep(options.workflow, toolCall.name, toolCall.arguments, agentContext, workflowDecision);
+        if (decisionStep) options.onAgentStep?.(decisionStep);
+        if (resolveWorkflowEditIntent(toolCall.name, toolCall.arguments)) {
+          logAi(runId, "runtime.workflowDecision", {
+            workflowType: options.workflow.type,
+            toolName: toolCall.name,
+            plannedFiles: decisionStep?.type === "workflow_decision" ? decisionStep.plannedFiles : [],
+            blockingReferences: workflowDecision.blockingReferences,
+            decision: workflowDecision.allowed ? "allowed" : "blocked",
+            recommendedTools: workflowDecision.recommendedTools,
+            recoverable: workflowDecision.recoverable
+          });
+        }
+      }
       // 旧调用方可能未创建工作流快照，继续使用原有通用门禁保持兼容。
       const patternFinderBlockReason = options.workflow ? null : getPatternFinderBlockReason(toolCall.name, agentContext, registry);
       const existenceCheckBlockReason = options.workflow ? null : getExistenceCheckBlockReason(toolCall.name, toolCall.arguments, agentContext, registry);

@@ -56,6 +56,20 @@ function formatAgentStepDetail(step: AgentStep) {
     detail = { type: step.type, toolName: step.toolName, input: step.input };
   } else if (step.type === "tool_result") {
     detail = { type: step.type, toolName: step.toolName, output: step.output };
+  } else if (step.type === "workflow_decision") {
+    detail = {
+      type: step.type,
+      workflowType: step.workflowType,
+      toolName: step.toolName,
+      plannedFiles: step.plannedFiles,
+      references: step.references,
+      blockingReferences: step.blockingReferences,
+      decision: step.decision,
+      reason: step.reason,
+      recommendedTools: step.recommendedTools,
+      recoverable: step.recoverable,
+      requiresUserAction: step.requiresUserAction
+    };
   } else if (step.type === "edit") {
     detail = { type: step.type, files: step.files };
   } else if (step.type === "command") {
@@ -178,7 +192,10 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
       repeated_tool_warning: { label: "警告", title: "检测到重复工具调用" },
       repeated_tool_blocked: { label: "已阻止", title: "重复工具调用已阻止" },
       negative_evidence: { label: "已确认", title: "已确认目标文件或代码不存在" },
+      create_intent: { label: "创建计划", title: "已识别新文件创建意图" },
+      create_intent_search_blocked: { label: "已收敛", title: "已阻止对计划新建文件的重复搜索" },
       no_progress_recovery: { label: "切换策略", title: "连续无进展，正在切换策略" },
+      completion_recovery: { label: "继续交付", title: "完成证据不足，继续执行" },
       budget_convergence: { label: "收敛", title: "进入预算收敛阶段" },
       no_progress_stop: { label: "已停止", title: "因连续无进展停止" },
       budget_stop: { label: "已停止", title: "因模型步骤预算停止" }
@@ -273,6 +290,14 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
     }
 
     return { label: "Result", title: `Received ${step.toolName} result`, detail: summarizeUnknown(step.output) };
+  }
+
+  if (step.type === "workflow_decision") {
+    return {
+      label: step.decision === "allowed" ? "门禁放行" : "门禁阻塞",
+      title: `${step.toolName} · ${step.workflowType}`,
+      detail: step.reason || `${step.references.length} 项引用事实`
+    };
   }
 
   if (step.type === "edit") {
@@ -404,6 +429,43 @@ function AgentStepObservation({ step }: { step: AgentStep }) {
   );
 }
 
+function WorkflowDecisionCard({ step }: { step: Extract<AgentStep, { type: "workflow_decision" }> }) {
+  return (
+    <article className={`agent-workflow-decision decision-${step.decision}`}>
+      {step.plannedFiles.length > 0 && (
+        <div>
+          <strong>计划创建</strong>
+          {step.plannedFiles.map((filePath) => <code key={filePath}>{filePath}</code>)}
+        </div>
+      )}
+      {step.references.length > 0 && (
+        <div>
+          <strong>引用状态</strong>
+          <ul>
+            {step.references.map((reference) => (
+              <li key={`${reference.target}:${reference.resolvedPath || ""}`}>
+                <span className={`reference-status status-${reference.status}`}>
+                  {reference.status === "planned_create" ? "补丁后可解析" : reference.blocking ? "阻塞引用" : "已解析"}
+                </span>
+                <code>{reference.target.replace(/^[^:]+:/, "")}</code>
+                <small>{reference.reason}</small>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {step.decision === "blocked" && (
+        <div className="workflow-block-facts">
+          <strong>阻塞原因</strong>
+          <p>{step.reason || "工作流前置条件尚未满足。"}</p>
+          <span>推荐恢复工具：{step.recommendedTools.join("、") || "无自动恢复工具"}</span>
+          <span>{step.requiresUserAction ? "需要用户操作" : "可由 Agent 自动恢复"}</span>
+        </div>
+      )}
+    </article>
+  );
+}
+
 type Props = {
   disabled?: boolean;
   inline?: boolean;
@@ -447,6 +509,7 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
                   {view.detail && <small>{view.detail}</small>}
                 </summary>
                 <AgentStepObservation step={step} />
+                {step.type === "workflow_decision" && <WorkflowDecisionCard step={step} />}
                 {step.type === "approval_request" && showApprovalCard && <ApprovalRequestCard disabled={disabled} pending={pendingActionId === step.actionId} step={step} onDecideApproval={decideApproval} />}
                 {step.type === "checkpoint" && <CheckpointCard disabled={disabled} step={step} onRollbackCheckpoint={onRollbackCheckpoint} />}
                 <AgentStepDetailBlock step={step} />

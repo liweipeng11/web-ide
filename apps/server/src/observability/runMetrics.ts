@@ -78,10 +78,33 @@ export type RunMetrics = {
 
 export type RunMetricsRecorder = (metrics: RunMetrics) => Promise<void>;
 
+const metricsWriteQueues = new Map<string, Promise<void>>();
+
 export async function appendRunMetrics(metrics: RunMetrics, filePath = appStatePath("run-metrics.jsonl")) {
-  // 仅持久化白名单指标字段；类型中不允许请求正文、Header、密钥或文件内容进入日志。
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.appendFile(filePath, `${JSON.stringify(metrics)}\n`, "utf8");
+  const previous = metricsWriteQueues.get(filePath) || Promise.resolve();
+  const next = previous.catch(() => undefined).then(async () => {
+    const directory = path.dirname(filePath);
+    const temporary = path.join(directory, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+    // 指标量有限，重写完整 JSONL 可确保并发写入时每一行仍可独立 JSON.parse。
+    const existing = await fs.readFile(filePath, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    const content = `${existing}${JSON.stringify(metrics)}\n`;
+    await fs.mkdir(directory, { recursive: true });
+    try {
+      await fs.writeFile(temporary, content, "utf8");
+      await fs.rename(temporary, filePath);
+    } finally {
+      await fs.rm(temporary, { force: true }).catch(() => undefined);
+    }
+  });
+  metricsWriteQueues.set(filePath, next);
+  try {
+    await next;
+  } finally {
+    if (metricsWriteQueues.get(filePath) === next) metricsWriteQueues.delete(filePath);
+  }
 }
 
 export function classifyRunFailure(error: unknown): RunFailureCategory {

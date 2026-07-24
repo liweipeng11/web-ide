@@ -88,6 +88,45 @@ test("任务会话持久化 incomplete 与 blocked 终态", async () => {
   }
 });
 
+test("任务会话以 UTF-8 原子 JSON 保存 Runtime 六态和完成证据", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("修复中文路由与状态展示");
+  try {
+    await updateTaskSessionStatus(session.id, "incomplete", {
+      runtimeStatus: "step_limit_reached",
+      reason: "达到步骤上限，仍有中文计划待处理",
+      completionEvidence: {
+        workflowType: "feature",
+        mutationExpected: true,
+        generatedPatchCount: 0,
+        changedFileCount: 0,
+        pendingPlanCount: 4,
+        blockedPlanCount: 0,
+        validationAttempted: false
+      }
+    });
+
+    const sessionPath = path.join(projectRuntimeDirectory("task-sessions"), `${session.id}.json`);
+    const raw = await fs.readFile(sessionPath, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const loaded = await getTaskSession(session.id);
+
+    assert.match(raw, /中文路由与状态展示/);
+    assert.equal(parsed.runtimeStatus, "step_limit_reached");
+    assert.deepEqual(
+      {
+        requestedStatus: (parsed.runtimeOutcome as Record<string, unknown>).requestedStatus,
+        effectiveStatus: (parsed.runtimeOutcome as Record<string, unknown>).effectiveStatus
+      },
+      { requestedStatus: "step_limit_reached", effectiveStatus: "step_limit_reached" }
+    );
+    assert.equal(loaded.runtimeStatus, "step_limit_reached");
+    assert.equal(loaded.completionEvidence?.pendingPlanCount, 4);
+    assert.deepEqual((await fs.readdir(path.dirname(sessionPath))).filter((name) => name.endsWith(".tmp")), []);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("rejects empty task plan item titles", async () => {
   const { session } = await createIsolatedTaskSession();
 

@@ -318,6 +318,30 @@ export type AgentStep = {
       output: unknown;
     }
   | {
+      type: "workflow_decision";
+      workflowType: TaskWorkflowType;
+      toolName: string;
+      plannedFiles: string[];
+      references: Array<{
+        target: string;
+        status: ReferenceResolutionStatus;
+        blocking: boolean;
+        reason: string;
+        resolvedPath?: string;
+      }>;
+      blockingReferences: Array<{
+        status: ReferenceResolutionStatus;
+        blocking: boolean;
+        reason: string;
+        resolvedPath?: string;
+      }>;
+      decision: "allowed" | "blocked";
+      reason?: string;
+      recommendedTools: string[];
+      recoverable: boolean;
+      requiresUserAction: boolean;
+    }
+  | {
       type: "edit";
       files: string[];
     }
@@ -460,6 +484,25 @@ export type AgentRuntimeStatus =
   | "step_limit_reached"
   | "no_progress";
 
+export type ReferenceResolutionStatus =
+  | "existing"
+  | "planned_create"
+  | "dependency_declared"
+  | "dependency_installed"
+  | "truly_missing"
+  | "ambiguous"
+  | "unknown";
+
+export type CompletionEvidence = {
+  workflowType?: TaskWorkflowType;
+  mutationExpected: boolean;
+  generatedPatchCount: number;
+  changedFileCount: number;
+  pendingPlanCount: number;
+  blockedPlanCount: number;
+  validationAttempted: boolean;
+};
+
 // 任务状态会被连续 Agent 的审批、暂停和重规划流程复用。
 export type TaskSessionStatus =
   | "running"
@@ -516,6 +559,16 @@ export type TaskSession = {
   chatId?: string;
   messageIds?: string[];
   status: TaskSessionStatus;
+  runtimeStatus?: AgentRuntimeStatus;
+  runtimeStatusReason?: string;
+  completionEvidence?: CompletionEvidence;
+  runtimeOutcome?: {
+    requestedStatus: AgentRuntimeStatus;
+    effectiveStatus: AgentRuntimeStatus;
+    reason?: string;
+    completionEvidence?: CompletionEvidence;
+    recordedAt: number;
+  };
   filesRead: string[];
   filesChanged: string[];
   commandsRun: string[];

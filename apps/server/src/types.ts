@@ -268,6 +268,25 @@ export type AgentStep = {
       output: unknown;
     }
   | {
+      type: "workflow_decision";
+      workflowType: import("./taskWorkflow/index.js").TaskWorkflowType;
+      toolName: string;
+      plannedFiles: string[];
+      references: Array<{
+        target: string;
+        status: import("./existenceChecker/types.js").ReferenceResolutionStatus;
+        blocking: boolean;
+        reason: string;
+        resolvedPath?: string;
+      }>;
+      blockingReferences: import("./existenceChecker/types.js").ReferenceResolution[];
+      decision: "allowed" | "blocked";
+      reason?: string;
+      recommendedTools: string[];
+      recoverable: boolean;
+      requiresUserAction: boolean;
+    }
+  | {
       type: "edit";
       files: string[];
     }
@@ -414,6 +433,17 @@ export type TaskSession = {
   chatId?: string;
   messageIds?: string[];
   status: TaskSessionStatus;
+  // 保留 Runtime 原始六态，避免映射成任务历史状态后丢失“步骤上限/无进展”等停止原因。
+  runtimeStatus?: AgentRuntimeStatus;
+  runtimeStatusReason?: string;
+  completionEvidence?: import("./agentCompletionPolicy.js").CompletionEvidence;
+  runtimeOutcome?: {
+    requestedStatus: AgentRuntimeStatus;
+    effectiveStatus: AgentRuntimeStatus;
+    reason?: string;
+    completionEvidence?: import("./agentCompletionPolicy.js").CompletionEvidence;
+    recordedAt: number;
+  };
   filesRead: string[];
   filesChanged: string[];
   commandsRun: string[];

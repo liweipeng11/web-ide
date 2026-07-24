@@ -59,6 +59,59 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
   }
 });
 
+test("并发指标写入保持 UTF-8 JSONL 行完整", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "web-ide-metrics-utf8-"));
+  const filePath = path.join(directory, "运行指标.jsonl");
+  try {
+    const base: RunMetrics = {
+      schemaVersion: 1,
+      scope: "model_run",
+      runId: "中文运行",
+      taskSessionId: "任务-1",
+      provider: "mock",
+      model: "mock",
+      mode: "act",
+      startedAt: new Date(0).toISOString(),
+      finishedAt: new Date(1).toISOString(),
+      durationMs: 1,
+      firstTokenLatencyMs: null,
+      firstTokenLatencySource: "unavailable",
+      usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cachedInputTokens: 0 },
+      estimatedCostUsd: null,
+      tools: {
+        calls: 0,
+        repeatedCalls: 0,
+        cacheHits: 0,
+        emptyResults: 0,
+        invalidToolCalls: 0,
+        consecutiveNoProgressSteps: 0,
+        maxConsecutiveNoProgressSteps: 0,
+        recoveryAttempts: 0,
+        failedCalls: 0,
+        mostRepeatedCall: null
+      },
+      context: { compressionCount: 0, estimatedTokensBefore: null, estimatedTokensAfter: null, estimator: "unavailable" },
+      result: {
+        status: "incomplete",
+        stopReason: "incomplete",
+        failureCategory: "none",
+        patchFileCount: 0,
+        validationCommandCount: 0,
+        validationStatus: "not_run"
+      }
+    };
+
+    await Promise.all(Array.from({ length: 12 }, (_, index) => appendRunMetrics({ ...base, runId: `中文运行-${index}` }, filePath)));
+    const raw = await fs.readFile(filePath, "utf8");
+    const records = raw.trim().split(/\r?\n/).map((line) => JSON.parse(line) as RunMetrics);
+    assert.equal(records.length, 12);
+    assert.equal(new Set(records.map((record) => record.runId)).size, 12);
+    assert.equal(raw.includes("中文运行"), true);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("失败分类区分超时、模型、工具、验证和取消", () => {
   assert.equal(classifyRunFailure({ code: "ETIMEDOUT" }), "timeout");
   assert.equal(classifyRunFailure({ status: 429 }), "model_error");
