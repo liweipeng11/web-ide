@@ -1,4 +1,4 @@
-export { classifyTaskWorkflow, createTaskWorkflow, resolvePlanModeTaskStatus } from "./taskWorkflowEngine.js";
+export { classifyTaskWorkflow, createTaskWorkflow, resolvePlanModeTaskStatus, resolveRuntimeTaskStatus } from "./taskWorkflowEngine.js";
 export { buildTaskWorkflowRuntimePrompt, getTaskWorkflowSteps } from "./workflowDefinitions.js";
 export {
   buildTaskWorkflowProgressPrompt,

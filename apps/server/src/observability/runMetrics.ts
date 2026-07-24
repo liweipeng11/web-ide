@@ -4,10 +4,19 @@ import { appStatePath } from "../statePaths.js";
 import type { ModelPrice, ModelUsage } from "../contracts/model.js";
 
 export type RunFailureCategory = "none" | "timeout" | "model_error" | "tool_error" | "validation_failure" | "cancelled" | "step_limit" | "internal_error";
-export type RunFinalStatus = "completed" | "awaiting_approval" | "failed" | "cancelled" | "step_limit_reached";
+export type RunFinalStatus =
+  | "completed"
+  | "awaiting_approval"
+  | "incomplete"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "step_limit_reached";
 export type AgentStopReason =
   | "completed"
   | "awaiting_approval"
+  | "incomplete"
+  | "blocked"
   | "step_limit"
   | "repeated_tool_call"
   | "no_progress"
@@ -266,6 +275,10 @@ export class RunMetricsTracker {
           ? "completed"
           : input.status === "awaiting_approval"
             ? "awaiting_approval"
+            : input.status === "incomplete"
+              ? "incomplete"
+              : input.status === "blocked"
+                ? "blocked"
             : input.status === "cancelled"
               ? "cancelled"
               : input.status === "step_limit_reached"

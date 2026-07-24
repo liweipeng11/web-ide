@@ -232,6 +232,7 @@ export type AgentStep = {
         | "repeated_tool_blocked"
         | "negative_evidence"
         | "no_progress_recovery"
+        | "completion_recovery"
         | "budget_convergence"
         | "no_progress_stop"
         | "budget_stop";
@@ -335,6 +336,14 @@ export type AgentContextSnapshot = {
 
 export type AgentMode = "plan" | "act";
 
+export type AgentRuntimeStatus =
+  | "completed"
+  | "awaiting_approval"
+  | "incomplete"
+  | "blocked"
+  | "step_limit_reached"
+  | "no_progress";
+
 export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
 
 export type TaskPlanItem = {
@@ -378,7 +387,17 @@ export type TaskPlanApproval = {
 };
 
 // 任务会话状态会被连续 Agent 暂停/恢复复用，后续工具审批和用户追问都依赖这些状态。
-export type TaskSessionStatus = "running" | "awaiting_approval" | "awaiting_user" | "paused" | "success" | "failed" | "cancelled" | "awaiting_replan";
+export type TaskSessionStatus =
+  | "running"
+  | "awaiting_approval"
+  | "awaiting_user"
+  | "paused"
+  | "success"
+  | "incomplete"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "awaiting_replan";
 
 export type TaskSession = {
   id: string;

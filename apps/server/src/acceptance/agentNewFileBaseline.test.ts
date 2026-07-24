@@ -78,7 +78,7 @@ test("未解析引用通过 references_resolved 门禁阻止 proposePatch", asyn
   assert.match(decision.reason || "", /Resolve missing or ambiguous references before editing/);
 });
 
-test("编辑型 Runtime 在零补丁和零文件变更时仍返回 completed", async () => {
+test("编辑型 Runtime 在零补丁和零文件变更时返回 incomplete", async () => {
   const result = await runAgentRuntime({
     userRequest: "创建 src/router/index.js 并修改 src/main.js",
     mode: "act",
@@ -89,21 +89,21 @@ test("编辑型 Runtime 在零补丁和零文件变更时仍返回 completed", a
     metricsRecorder: async () => undefined
   });
 
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "incomplete");
   assert.deepEqual(result.generatedPatchIds, []);
   assert.equal(result.messages.some((message) => message.role === "tool"), false);
 });
 
-test("任务会话允许 filesChanged 为空时标记 success", async (context) => {
+test("任务会话允许 filesChanged 为空时持久化 incomplete", async (context) => {
   const fixture = await createVue2RouterFixture();
   context.after(fixture.cleanup);
   await setWorkspaceRoot(fixture.fixtureRoot, { persist: false });
 
   const session = await createTaskSession("新增 Vue 2 路由");
-  const completed = await updateTaskSessionStatus(session.id, "success");
+  const completed = await updateTaskSessionStatus(session.id, "incomplete");
   const persisted = await getTaskSession(session.id);
 
-  assert.equal(completed?.status, "success");
-  assert.equal(persisted.status, "success");
+  assert.equal(completed?.status, "incomplete");
+  assert.equal(persisted.status, "incomplete");
   assert.deepEqual(persisted.filesChanged, []);
 });

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { alignTaskPlanToWorkflow, reconcileRewrittenTaskPlanWorkflowIds } from "../taskPlanService.js";
 import type { TaskPlanItem } from "../types.js";
-import { buildTaskWorkflowRuntimePrompt, classifyTaskWorkflow, createTaskWorkflow, getTaskWorkflowSteps, resolvePlanModeTaskStatus } from "./index.js";
+import { buildTaskWorkflowRuntimePrompt, classifyTaskWorkflow, createTaskWorkflow, getTaskWorkflowSteps, resolvePlanModeTaskStatus, resolveRuntimeTaskStatus } from "./index.js";
 
 test("selects bugfix workflow for diagnose-then-edit tasks", () => {
   const result = classifyTaskWorkflow("修复登录接口报错", {
@@ -158,4 +158,9 @@ test("resolves Plan mode completion without claiming edit workflows succeeded", 
   assert.equal(resolvePlanModeTaskStatus("analysis-only", "completed"), "success");
   assert.equal(resolvePlanModeTaskStatus(undefined, "step_limit_reached"), "failed");
   assert.equal(resolvePlanModeTaskStatus("analysis-only", "no_progress"), "failed");
+  assert.equal(resolvePlanModeTaskStatus("analysis-only", "incomplete"), "incomplete");
+  assert.equal(resolvePlanModeTaskStatus("analysis-only", "blocked"), "blocked");
+  assert.equal(resolveRuntimeTaskStatus("completed"), "success");
+  assert.equal(resolveRuntimeTaskStatus("incomplete"), "incomplete");
+  assert.equal(resolveRuntimeTaskStatus("blocked"), "blocked");
 });

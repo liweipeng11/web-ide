@@ -1,10 +1,11 @@
 import type { AgentRequestClassification } from "../aiClient.js";
+import type { AgentRuntimeStatus, TaskSessionStatus } from "../types.js";
 import { getTaskWorkflowSteps } from "./workflowDefinitions.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./types.js";
 
 const bugfixPatterns = [/修复|故障|缺陷|回归|报错|错误|异常|失败|崩溃|不生效|无法|不能|bug|fix|error|failed|failure|exception|crash|regression/i];
 const refactorPatterns = [/重构|整理结构|拆分模块|解耦|抽象|代码清理|不改变行为|refactor|restructure|decouple|cleanup/i];
-const featurePatterns = [/新增|添加|实现|支持|接入|开发|功能|feature|implement|add|introduce|support/i];
+const featurePatterns = [/新增|添加|创建|修改|编辑|实现|支持|接入|开发|功能|feature|implement|add|create|modify|edit|update|introduce|support/i];
 const explicitReadOnlyPatterns = [
   /只(?:分析|检查|排查|说明|解释|给出方案)|仅(?:分析|检查|排查|说明|解释)|不要(?:修改|改动|编辑)|无需(?:修改|改动)|先(?:分析|检查|排查)(?:即可|就行)$|(?:分析|检查|排查|说明|解释)(?![^\n]{0,20}(?:修改|改动|编辑|修复|实现)).{0,20}(?:即可|就行)/i,
   /\b(?:analysis only|read[- ]only|do not (?:edit|modify|change)|without (?:editing|modifying|changing))\b/i
@@ -82,9 +83,17 @@ export function createTaskWorkflow(userGoal: string, classification?: AgentReque
   };
 }
 
-export function resolvePlanModeTaskStatus(workflowType: TaskWorkflowType | undefined, runtimeStatus: "completed" | "awaiting_approval" | "step_limit_reached" | "no_progress") {
+export function resolveRuntimeTaskStatus(runtimeStatus: AgentRuntimeStatus): TaskSessionStatus {
+  if (runtimeStatus === "completed") return "success";
+  if (runtimeStatus === "awaiting_approval") return "awaiting_approval";
+  if (runtimeStatus === "incomplete") return "incomplete";
+  if (runtimeStatus === "blocked") return "blocked";
+  return "failed";
+}
+
+export function resolvePlanModeTaskStatus(workflowType: TaskWorkflowType | undefined, runtimeStatus: AgentRuntimeStatus): TaskSessionStatus {
   if (runtimeStatus === "awaiting_approval") return "awaiting_approval" as const;
-  if (runtimeStatus !== "completed") return "failed" as const;
+  if (runtimeStatus !== "completed") return resolveRuntimeTaskStatus(runtimeStatus);
 
   // 编辑型工作流在 Plan 模式只完成了方案设计，保留 paused 状态等待用户切换到 Act 继续。
   return workflowType && workflowType !== "analysis-only" ? "paused" as const : "success" as const;

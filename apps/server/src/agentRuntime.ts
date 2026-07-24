@@ -8,6 +8,11 @@ import {
   type AgentBudgetPhase
 } from "./agentBudgetPolicy.js";
 import { getAgentModeConfig, normalizeAgentMode, type AgentMode } from "./agentModes.js";
+import {
+  createCompletionRecoveryMessage,
+  evaluateAgentCompletion,
+  type CompletionEvidence
+} from "./agentCompletionPolicy.js";
 import { evaluateAgentToolApproval } from "./agentPermissions.js";
 import type { AgentToolRegistry } from "./agentToolRegistry.js";
 import type { AgentCompletionResponse, AgentContext, AgentProgressSnapshot, AgentToolCall } from "./agentToolTypes.js";
@@ -15,10 +20,11 @@ import { createAgentToolRuntime, executeAgentToolCall } from "./agentTools.js";
 import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import type { AgentMessage as PersistedAgentMessage, AgentStep, PendingAgentToolCall } from "./types.js";
+import type { AgentMessage as PersistedAgentMessage, AgentRuntimeStatus, AgentStep, PendingAgentToolCall, TaskPlanItem } from "./types.js";
 import {
   buildTaskWorkflowProgressPrompt,
   buildTaskWorkflowRuntimePrompt,
+  classifyTaskWorkflow,
   evaluateTaskWorkflowToolDecision,
   evaluateWorkflowEditGate,
   resolveWorkflowEditIntent,
@@ -37,7 +43,7 @@ import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
 
 export type AgentRuntimeResult = {
-  status: "completed" | "awaiting_approval" | "step_limit_reached" | "no_progress";
+  status: AgentRuntimeStatus;
   runId: string;
   content: string;
   messages: ModelMessage[];
@@ -58,6 +64,7 @@ export type AgentRuntimeOptions = {
   forceFinalRemainingSteps?: number;
   runId?: string;
   generatedPatchIds?: string[];
+  appliedFilePaths?: string[];
   taskSessionId?: string | null;
   mode?: AgentMode;
   workflow?: TaskWorkflowSnapshot;
@@ -81,7 +88,7 @@ export type AgentRuntimeOptions = {
 };
 
 async function loadRuntimeContextState(taskSessionId: string | null | undefined) {
-  if (!taskSessionId) return { planStatus: [] as string[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
+  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
   try {
     const session = await getTaskSessionContextState(taskSessionId);
     return {
@@ -89,13 +96,14 @@ async function loadRuntimeContextState(taskSessionId: string | null | undefined)
         ...(session.planItems ?? []).map((item) => `${item.status}: ${item.title}${item.note ? `（${item.note}）` : ""}`),
         `approval: ${session.planApproval?.status ?? "not_required"}`
       ],
+      planItems: session.planItems ?? [],
       filesModified: [...session.filesChanged],
       unresolvedQuestions: (session.planItems ?? []).filter((item) => item.status === "blocked").map((item) => item.note || item.title),
       contextSummary: session.contextSummary ?? null
     };
   } catch {
     // 无持久化任务的单元调用继续使用 Runtime 内存状态。
-    return { planStatus: [] as string[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
+    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
   }
 }
 
@@ -223,6 +231,42 @@ function toModelToolMessage(message: Awaited<ReturnType<typeof executeAgentToolC
 
 function countGeneratedPatchFiles(patchIds: string[]) {
   return patchIds.reduce((count, patchId) => count + (getPendingPatch(patchId)?.files.length ?? 0), 0);
+}
+
+const completionRelevantWorkflowSteps = new Set([
+  "implement",
+  "validate",
+  "minimal-fix",
+  "add-regression-test",
+  "regression-validation",
+  "refactor",
+  "tests",
+  "regression"
+]);
+
+async function collectCompletionEvidence(input: {
+  taskSessionId?: string | null;
+  workflowType: TaskWorkflowSnapshot["type"];
+  mutationExpected: boolean;
+  generatedPatchIds: string[];
+  directAppliedFiles: ReadonlySet<string>;
+  agentContext: AgentContext;
+}): Promise<CompletionEvidence> {
+  const taskState = await loadRuntimeContextState(input.taskSessionId);
+  const relevantPlanItems = taskState.planItems.filter((item) =>
+    item.workflowStepId ? completionRelevantWorkflowSteps.has(item.workflowStepId) : true
+  );
+
+  return {
+    workflowType: input.workflowType,
+    mutationExpected: input.mutationExpected,
+    generatedPatchCount: new Set(input.generatedPatchIds).size,
+    // 会话中的 filesChanged 是跨多轮累积历史，不能作为本轮完成证据，否则后续零变更轮次会被误判成功。
+    changedFileCount: new Set(input.directAppliedFiles).size,
+    pendingPlanCount: relevantPlanItems.filter((item) => item.status === "pending" || item.status === "in_progress").length,
+    blockedPlanCount: relevantPlanItems.filter((item) => item.status === "blocked").length,
+    validationAttempted: Boolean(input.agentContext.commandsRun?.length)
+  };
 }
 
 async function createProgressSnapshot(
@@ -358,6 +402,84 @@ function analyzeToolResult(content: ModelMessage["content"]) {
   } catch {
     return { cached: false, empty: false, failed: false };
   }
+}
+
+function getAppliedFileEvidence(content: ModelMessage["content"]) {
+  if (typeof content !== "string") return { paths: [] as string[], mutationConfirmed: false };
+
+  try {
+    const root = JSON.parse(content) as unknown;
+    const candidates = [root];
+    if (root && typeof root === "object" && !Array.isArray(root)) {
+      const record = root as Record<string, unknown>;
+      candidates.push(record.value, record.result);
+    }
+
+    const files = new Set<string>();
+    let mutationConfirmed = false;
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+      const record = candidate as Record<string, unknown>;
+      if (record.changed !== true && record.applied !== true) continue;
+      mutationConfirmed = true;
+      if (typeof record.filePath === "string" && record.filePath.trim()) files.add(record.filePath.trim());
+      if (Array.isArray(record.files)) {
+        for (const file of record.files) {
+          if (typeof file === "string" && file.trim()) files.add(file.trim());
+        }
+      }
+    }
+    return { paths: [...files], mutationConfirmed };
+  } catch {
+    return { paths: [] as string[], mutationConfirmed: false };
+  }
+}
+
+function getAppliedPatchFilePaths(content: ModelMessage["content"]) {
+  if (typeof content !== "string") return [];
+
+  try {
+    const root = JSON.parse(content) as unknown;
+    const candidates = [root];
+    if (root && typeof root === "object" && !Array.isArray(root)) {
+      const record = root as Record<string, unknown>;
+      candidates.push(record.value, record.result);
+    }
+
+    const files = new Set<string>();
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+      const record = candidate as Record<string, unknown>;
+      // applyPatch 的成功结果必须同时携带 patchId 和文件列表，避免仅凭调用参数伪造落盘证据。
+      if (typeof record.patchId !== "string" || !Array.isArray(record.files)) continue;
+      for (const file of record.files) {
+        if (typeof file === "string" && file.trim()) {
+          files.add(file.trim());
+          continue;
+        }
+        if (!file || typeof file !== "object" || Array.isArray(file)) continue;
+        const fileRecord = file as Record<string, unknown>;
+        const filePath = typeof fileRecord.path === "string" ? fileRecord.path : fileRecord.filePath;
+        if (typeof filePath === "string" && filePath.trim()) files.add(filePath.trim());
+      }
+    }
+    return [...files];
+  } catch {
+    return [];
+  }
+}
+
+function getConfirmedAppliedFilePaths(toolName: string, content: ModelMessage["content"], argumentsRecord: Record<string, unknown>) {
+  if (toolName === "applyPatch") return getAppliedPatchFilePaths(content);
+
+  const evidence = getAppliedFileEvidence(content);
+  // 自定义修复工具只要明确返回 applied/changed 与文件路径，也属于可审计的落盘证据。
+  if (evidence.paths.length) return evidence.paths;
+  if (!["replaceInFile", "writeFile"].includes(toolName)) return [];
+  if (!evidence.mutationConfirmed) return [];
+
+  const filePath = String(argumentsRecord.filePath || "").trim();
+  return filePath ? [filePath] : [];
 }
 
 function buildNegativeEvidenceMessage(agentContext: AgentContext): ModelMessage | null {
@@ -557,6 +679,14 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     options.decision === "rejected"
       ? createRejectedToolMessage(options.pendingToolCall)
       : toModelToolMessage(await executeAgentToolCall(toAgentToolCall(createToolCallFromPending(options.pendingToolCall)), toolRuntime));
+  const pendingArguments = options.pendingToolCall.arguments
+    && typeof options.pendingToolCall.arguments === "object"
+    && !Array.isArray(options.pendingToolCall.arguments)
+    ? options.pendingToolCall.arguments as Record<string, unknown>
+    : {};
+  const appliedFilePaths = options.decision === "approved"
+    ? getConfirmedAppliedFilePaths(options.pendingToolCall.toolName, toolMessage.content, pendingArguments)
+    : [];
 
   messages.push(toolMessage);
   await persistAgentMessage(options.taskSessionId, toolMessage);
@@ -569,7 +699,8 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     projectMemoryPrompt,
     messages,
     agentContext,
-    generatedPatchIds
+    generatedPatchIds,
+    appliedFilePaths: [...new Set([...(options.appliedFilePaths || []), ...appliedFilePaths])]
   });
 }
 
@@ -634,6 +765,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let budgetWarningSent = false;
   let consecutiveNoProgressSteps = 0;
   let recoveryAttempts = 0;
+  let completionRecoveryAttempted = false;
+  const directAppliedFiles = new Set(options.appliedFilePaths || []);
+  const workflowType = options.workflow?.type ?? classifyTaskWorkflow(options.userRequest).type;
+  const mutationExpected = mode === "act" && workflowType !== "analysis-only";
   const emittedNegativeEvidence = new Set(
     (agentContext.negativeEvidence || []).filter((item) => item.exhaustive)
       .map((item) => `${item.kind}:${item.scope}:${item.query}`)
@@ -793,11 +928,51 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const assistantMessage: ModelMessage = { role: "assistant", content };
       messages.push(assistantMessage);
       await persistAgentMessage(options.taskSessionId, assistantMessage);
+      const evidence = await collectCompletionEvidence({
+        taskSessionId: options.taskSessionId,
+        workflowType,
+        mutationExpected,
+        generatedPatchIds,
+        directAppliedFiles,
+        agentContext
+      });
+      const completionDecision = evaluateAgentCompletion({
+        evidence,
+        finalContent: content,
+        recoveryAttempted: completionRecoveryAttempted,
+        editingToolsAvailable: registry.definitions.some((definition) =>
+          ["proposePatch", "replaceInFile", "writeFile"].includes(definition.name)
+        )
+      });
+
+      if (completionDecision.shouldRecover && step + 1 < maxSteps) {
+        const recoveryMessage = createCompletionRecoveryMessage(completionDecision, evidence);
+        messages.push(recoveryMessage);
+        await persistAgentMessage(options.taskSessionId, recoveryMessage);
+        completionRecoveryAttempted = true;
+        metrics.recordStrategyRecovery();
+        options.onAgentStep?.(createAgentStep({
+          type: "strategy",
+          event: "completion_recovery",
+          message: completionDecision.reason,
+          currentStep: step + 1,
+          maxSteps,
+          facts: buildRecoveryFacts(agentContext, generatedPatchIds)
+        }));
+        logAi(runId, "runtime.completionRecovery", { step, status: completionDecision.status, evidence });
+        continue;
+      }
+
       options.onAgentStep?.(createAgentStep({ type: "message", content: content || "Agent runtime completed without text output." }));
-      logAi(runId, "runtime.done", { step, mode, contentLength: content.length });
-      await metrics.finish({ status: "completed", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+      logAi(runId, "runtime.done", { step, mode, contentLength: content.length, status: completionDecision.status, evidence });
+      await metrics.finish({
+        status: completionDecision.status,
+        stopReason: completionDecision.status,
+        failureCategory: "none",
+        patchFileCount: countGeneratedPatchFiles(generatedPatchIds)
+      });
       return {
-        status: "completed",
+        status: completionDecision.status,
         runId,
         content,
         messages,
@@ -975,6 +1150,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const progressBefore = await createProgressSnapshot(agentContext, generatedPatchIds, options.taskSessionId, readScopes);
         const result = toModelToolMessage(await executeAgentToolCall(toAgentToolCall(toolCall), toolRuntime));
         const resultMetrics = analyzeToolResult(result.content);
+        const appliedFilePaths = getConfirmedAppliedFilePaths(toolCall.name, result.content, toolCall.arguments);
+        if (!resultMetrics.failed) {
+          for (const filePath of appliedFilePaths) directAppliedFiles.add(filePath);
+        }
         const readScope = getSuccessfulReadScope(toolCall);
         if (!resultMetrics.cached && !resultMetrics.failed && readScope) readScopes.add(readScope);
         const progressAfter = await createProgressSnapshot(agentContext, generatedPatchIds, options.taskSessionId, readScopes);

@@ -60,7 +60,7 @@ function normalizeRecentChanges(value: unknown, now: number): ProjectMemoryRecen
 }
 
 function normalizePendingItems(value: unknown, now: number): ProjectMemoryPendingItem[] {
-  const validStatuses = new Set<ProjectMemoryPendingItem["status"]>(["running", "awaiting_approval", "awaiting_user", "paused", "success", "failed", "cancelled", "awaiting_replan"]);
+  const validStatuses = new Set<ProjectMemoryPendingItem["status"]>(["running", "awaiting_approval", "awaiting_user", "paused", "success", "incomplete", "blocked", "failed", "cancelled", "awaiting_replan"]);
   if (!Array.isArray(value)) return [];
   const items = value.flatMap((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];

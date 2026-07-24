@@ -29,6 +29,144 @@ function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runti
   };
 }
 
+test("编辑任务零交付物会恢复一次并返回 incomplete", async () => {
+  const steps: AgentStep[] = [];
+  let completionCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "新增用户服务",
+    mode: "act",
+    contextBudgetEnabled: false,
+    registry: createAgentToolRegistry([createRuntimeTestTool("writeFile", { success: true })]),
+    requestCompletion: async () => {
+      completionCount += 1;
+      return { choices: [{ message: { role: "assistant", content: "仅提供示例，没有修改文件。" } }] };
+    },
+    onAgentStep: (step) => steps.push(step),
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "incomplete");
+  assert.equal(completionCount, 2);
+  assert.equal(steps.some((step) => step.type === "strategy" && step.event === "completion_recovery"), true);
+});
+
+test("编辑任务直接写入后返回 completed", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("replaceInFile", { changed: true })]);
+  let completionCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "新增 src/userService.ts",
+    mode: "act",
+    contextBudgetEnabled: false,
+    registry,
+    requestCompletion: async () => {
+      completionCount += 1;
+      return completionCount === 1
+        ? {
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: "replace-user-service",
+                  type: "function",
+                  function: { name: "replaceInFile", arguments: JSON.stringify({ filePath: "src/userService.ts", search: "old", replace: "new" }) }
+                }]
+              }
+            }]
+          }
+        : { choices: [{ message: { role: "assistant", content: "文件已写入。" } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+});
+
+test("自定义修复工具的明确 applied 结果可作为完成证据", async () => {
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("repairCode", { applied: true, filePath: "src/userService.ts" })
+  ]);
+  let completionCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "修复 src/userService.ts",
+    mode: "act",
+    contextBudgetEnabled: false,
+    registry,
+    requestCompletion: async () => {
+      completionCount += 1;
+      return completionCount === 1
+        ? {
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: "repair-user-service",
+                  type: "function",
+                  function: { name: "repairCode", arguments: "{}" }
+                }]
+              }
+            }]
+          }
+        : { choices: [{ message: { role: "assistant", content: "修复已完成。" } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+});
+
+test("编辑工具明确未产生变化时不得作为完成证据", async () => {
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("replaceInFile", { filePath: "src/userService.ts", changed: false })
+  ]);
+  let completionCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "修改 src/userService.ts",
+    mode: "act",
+    maxSteps: 2,
+    contextBudgetEnabled: false,
+    registry,
+    requestCompletion: async () => {
+      completionCount += 1;
+      return completionCount === 1
+        ? {
+            choices: [{
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: "replace-no-change",
+                  type: "function",
+                  function: { name: "replaceInFile", arguments: JSON.stringify({ filePath: "src/userService.ts", search: "old", replace: "old" }) }
+                }]
+              }
+            }]
+          }
+        : { choices: [{ message: { role: "assistant", content: "修改已完成。" } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "incomplete");
+  assert.deepEqual(result.generatedPatchIds, []);
+});
+
+test("必须由用户选择的编辑任务返回 blocked", async () => {
+  const result = await runAgentRuntime({
+    userRequest: "新增数据库接入",
+    mode: "act",
+    contextBudgetEnabled: false,
+    registry: createAgentToolRegistry([createRuntimeTestTool("writeFile", { success: true })]),
+    requestCompletion: async () => ({
+      choices: [{ message: { role: "assistant", content: "需要您选择 MySQL 或 PostgreSQL 后才能继续。" } }]
+    }),
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "blocked");
+});
+
 test("agent runtime keeps calling model after tool results", async () => {
   const registry = createAgentToolRegistry([createRuntimeTestTool("readFile", { filePath: "src/a.ts", content: "hello" })]);
   const requests: Record<string, unknown>[] = [];
@@ -456,7 +594,7 @@ test("agent runtime dynamically narrows tools while keeping precise edit and ver
 
   const normalTools = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   const convergenceTools = ((requests[1].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "incomplete");
   assert.equal(normalTools.includes("searchCode"), true);
   assert.equal(convergenceTools.includes("searchFilesByName"), false);
   assert.equal(convergenceTools.includes("searchCode"), false);
@@ -550,7 +688,7 @@ test("agent runtime forces the final request without tools and prioritizes pendi
 
   const finalRequest = requests[1];
   const finalMessages = finalRequest.messages as Array<{ content?: string }>;
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "awaiting_approval");
   assert.equal(finalRequest.tool_choice, "none");
   assert.deepEqual(finalRequest.tools, []);
   assert.equal(finalMessages.some((message) => message.content?.includes("待审核补丁")), true);
@@ -994,7 +1132,7 @@ test("generating a patch resets the no-progress counter", async () => {
     }
   });
 
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "awaiting_approval");
   assert.deepEqual(result.generatedPatchIds, ["progress-patch"]);
 });
 
@@ -1377,6 +1515,36 @@ test("agent runtime restores Safe Editor context after approval", async () => {
   assert.deepEqual(restoredFilesRead, ["src/service.ts"]);
 });
 
+test("审批恢复后保留 applyPatch 的已落盘文件证据", async () => {
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("applyPatch", {
+      patchId: "patch-approved",
+      files: [{ path: "src/service.ts", status: "modify" }],
+      checkpointId: "checkpoint-approved"
+    })
+  ]);
+  const result = await resumeAgentRuntimeAfterApproval({
+    userRequest: "修改 src/service.ts",
+    mode: "act",
+    registry,
+    pendingToolCall: {
+      actionId: "apply_patch:approved",
+      toolCallId: "tool-apply-approved",
+      toolName: "applyPatch",
+      arguments: { patchId: "patch-approved" },
+      riskLevel: "medium",
+      status: "pending",
+      createdAt: Date.now()
+    },
+    decision: "approved",
+    contextBudgetEnabled: false,
+    requestCompletion: async () => ({ choices: [{ message: { role: "assistant", content: "补丁已应用。" } }] }),
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+});
+
 test("agent runtime emits a visible budget warning step before exhausting tool budget", async () => {
   const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
   const steps: AgentStep[] = [];
@@ -1448,7 +1616,7 @@ test("act mode exposes edit, patch, and command tools to the model", async () =>
   });
 
   const toolNames = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "incomplete");
   assert.equal(toolNames.includes("replaceInFile"), true);
   assert.equal(toolNames.includes("writeFile"), true);
   assert.equal(toolNames.includes("proposePatch"), true);
@@ -1527,7 +1695,7 @@ test("agent runtime budget warning keeps patch review as the preferred path", as
   });
 
   const warningMessages = requests.flatMap((request) => (request.messages as Array<{ content?: string }> | undefined) || []).filter((message) => message.content?.includes("预算收敛区间"));
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "incomplete");
   assert.equal(warningMessages.some((message) => message.content?.includes("proposePatch")), true);
   assert.equal(warningMessages.some((message) => message.content?.includes("禁止继续宽泛搜索")), true);
   assert.equal(warningMessages.some((message) => message.content?.includes("必要的编辑或验证工具")), true);
@@ -1573,7 +1741,7 @@ test("agent runtime repeated-tool warning asks the model to move to patch review
   });
 
   const warningMessages = requests.flatMap((request) => (request.messages as Array<{ content?: string }> | undefined) || []).filter((message) => message.content?.includes("repeated these tool calls"));
-  assert.equal(result.status, "completed");
+  assert.equal(result.status, "incomplete");
   assert.equal(warningMessages.some((message) => message.content?.includes("move to proposePatch")), true);
   assert.equal(warningMessages.some((message) => message.content?.includes("direct-edit fallback")), true);
 });

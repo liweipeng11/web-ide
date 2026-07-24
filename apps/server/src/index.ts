@@ -25,7 +25,7 @@ import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
 import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
-import { resolvePlanModeTaskStatus } from "./taskWorkflow/index.js";
+import { resolvePlanModeTaskStatus, resolveRuntimeTaskStatus } from "./taskWorkflow/index.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
@@ -751,12 +751,13 @@ app.post(
     await Promise.all(taskStepWrites);
     const resumedSession = await getTaskSession(taskSessionId);
     const runtimePatch = createPatchStreamResponse(runtimeResult.generatedPatchIds.at(-1), taskSessionId, runtimeResult.content || "已生成待审核补丁。", resumedSession?.steps || []);
-    const runtimeStatus = runtimePatch
-      ? await advanceTaskPlanProgress(taskSessionId, "patch_generated")
-      : await updateTaskSessionStatus(
-          taskSessionId,
-          runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : runtimeResult.status === "completed" ? "success" : "failed"
-        );
+    let runtimeStatus;
+    if (runtimePatch) {
+      await advanceTaskPlanProgress(taskSessionId, "patch_generated");
+      runtimeStatus = await updateTaskSessionStatus(taskSessionId, "awaiting_approval");
+    } else {
+      runtimeStatus = await updateTaskSessionStatus(taskSessionId, resolveRuntimeTaskStatus(runtimeResult.status));
+    }
     const chatId = sessionBeforeDecision.chatId?.trim() || `chat:${taskSessionId}`;
     const runtimeAnswer = buildDeferredRuntimeAnswer(runtimeResult, runtimePatch);
     const messages = runtimeAnswer
@@ -1044,9 +1045,13 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
       });
       const runtimePatch = createPatchStreamResponse(runtimeResult.generatedPatchIds.at(-1), taskSession.id, runtimeResult.content || "已生成待审核补丁。", agentSteps);
-      const runtimeProgressedTaskSession = runtimePatch
-        ? await advanceTaskPlanProgress(taskSession.id, "patch_generated")
-        : await updateTaskSessionStatus(taskSession.id, runtimeResult.status === "awaiting_approval" ? "awaiting_approval" : runtimeResult.status === "completed" ? "success" : "failed");
+      let runtimeProgressedTaskSession;
+      if (runtimePatch) {
+        await advanceTaskPlanProgress(taskSession.id, "patch_generated");
+        runtimeProgressedTaskSession = await updateTaskSessionStatus(taskSession.id, "awaiting_approval");
+      } else {
+        runtimeProgressedTaskSession = await updateTaskSessionStatus(taskSession.id, resolveRuntimeTaskStatus(runtimeResult.status));
+      }
       const runtimeAnswer = buildDeferredRuntimeAnswer(runtimeResult, runtimePatch) || "";
       if (runtimeAnswer) {
         sendEvent("delta", { id: turn.assistantMessage.id, delta: runtimeAnswer });

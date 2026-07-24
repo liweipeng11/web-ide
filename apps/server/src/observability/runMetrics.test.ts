@@ -67,6 +67,22 @@ test("失败分类区分超时、模型、工具、验证和取消", () => {
   assert.equal(classifyRunFailure({ name: "AbortError" }), "cancelled");
 });
 
+test("运行指标保留 incomplete 与 blocked 停止原因", async () => {
+  const incomplete = await new RunMetricsTracker(
+    { runId: "incomplete-run", taskSessionId: null, provider: "mock", model: "mock", mode: "act" },
+    async () => undefined,
+    false
+  ).finish({ status: "incomplete" });
+  const blocked = await new RunMetricsTracker(
+    { runId: "blocked-run", taskSessionId: null, provider: "mock", model: "mock", mode: "act" },
+    async () => undefined,
+    false
+  ).finish({ status: "blocked" });
+
+  assert.equal(incomplete.result.stopReason, "incomplete");
+  assert.equal(blocked.result.stopReason, "blocked");
+});
+
 test("Mock Agent 完成后生成一条完整运行指标", async () => {
   let captured: RunMetrics | undefined;
   const result = await runAgentRuntime({

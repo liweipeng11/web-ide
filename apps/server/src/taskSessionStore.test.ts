@@ -72,6 +72,22 @@ test("任务完成时把模型 Usage 和费用写入会话", async () => {
   } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
 });
 
+test("任务会话持久化 incomplete 与 blocked 终态", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("验证阶段 4 状态持久化");
+  try {
+    const incomplete = await updateTaskSessionStatus(session.id, "incomplete");
+    assert.equal(incomplete?.status, "incomplete");
+    assert.equal((await getTaskSession(session.id)).status, "incomplete");
+
+    const blockedSession = await createTaskSession("等待用户选择");
+    const blocked = await updateTaskSessionStatus(blockedSession.id, "blocked");
+    assert.equal(blocked?.status, "blocked");
+    assert.equal((await getTaskSession(blockedSession.id)).status, "blocked");
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("rejects empty task plan item titles", async () => {
   const { session } = await createIsolatedTaskSession();
 

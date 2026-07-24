@@ -97,6 +97,21 @@ function isTaskPlanItemStatus(value: unknown): value is TaskPlanItemStatus {
   return value === "pending" || value === "in_progress" || value === "completed" || value === "blocked";
 }
 
+function isTaskSessionStatus(value: unknown): value is TaskSession["status"] {
+  return [
+    "running",
+    "awaiting_approval",
+    "awaiting_user",
+    "paused",
+    "success",
+    "incomplete",
+    "blocked",
+    "failed",
+    "cancelled",
+    "awaiting_replan"
+  ].includes(String(value));
+}
+
 function normalizeTaskPlanItems(items: unknown): TaskPlanItem[] {
   if (!Array.isArray(items)) return [];
 
@@ -491,6 +506,8 @@ function normalizePendingToolCall(value: unknown): PendingAgentToolCall | null {
 function normalizeTaskSession(session: TaskSession): TaskSession {
   return {
     ...session,
+    // 未识别的历史状态回退为 failed，避免损坏记录被误显示为成功。
+    status: isTaskSessionStatus(session.status) ? session.status : "failed",
     agentMode: isAgentMode(session.agentMode) ? session.agentMode : "act",
     workflow: normalizeTaskWorkflow(session.workflow),
     // 旧任务记录没有 Agent 消息字段，读取时补齐，后续 runtime 可以直接追加和恢复。
@@ -1397,7 +1414,13 @@ export async function updateTaskSessionStatus(taskSessionId: string | null | und
     };
   });
 
-  if (updated.status === "success" || updated.status === "failed" || updated.status === "cancelled") {
+  if (
+    updated.status === "success"
+    || updated.status === "incomplete"
+    || updated.status === "blocked"
+    || updated.status === "failed"
+    || updated.status === "cancelled"
+  ) {
     const finalMetricStatus = updated.status === "success" ? "completed" : updated.status;
     const metrics = await getTaskMetricsSnapshot(taskSessionId);
     if (metrics) {

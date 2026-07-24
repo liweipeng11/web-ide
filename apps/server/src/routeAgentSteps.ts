@@ -17,6 +17,7 @@ export type AgentStepPayload =
         | "repeated_tool_blocked"
         | "negative_evidence"
         | "no_progress_recovery"
+        | "completion_recovery"
         | "budget_convergence"
         | "no_progress_stop"
         | "budget_stop";

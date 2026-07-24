@@ -451,8 +451,27 @@ export type TaskWorkflowSnapshot = {
   selectedAt: number;
 };
 
+// 与服务端 Runtime 保持同一组结束状态，审批恢复接口不得丢失未完成原因。
+export type AgentRuntimeStatus =
+  | "completed"
+  | "awaiting_approval"
+  | "incomplete"
+  | "blocked"
+  | "step_limit_reached"
+  | "no_progress";
+
 // 任务状态会被连续 Agent 的审批、暂停和重规划流程复用。
-export type TaskSessionStatus = "running" | "awaiting_approval" | "awaiting_user" | "paused" | "success" | "failed" | "cancelled" | "awaiting_replan";
+export type TaskSessionStatus =
+  | "running"
+  | "awaiting_approval"
+  | "awaiting_user"
+  | "paused"
+  | "success"
+  | "incomplete"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "awaiting_replan";
 
 export type ContextBudgetSnapshot = {
   modelContextWindowTokens: number;
@@ -815,7 +834,7 @@ export type DecideApprovalRequestResponse = {
   messages?: FileChatMessage[];
   patch?: GenerateEditResponse | null;
   runtime?: {
-    status: "completed" | "awaiting_approval" | "step_limit_reached";
+    status: AgentRuntimeStatus;
     content: string;
     pendingToolCall: unknown | null;
   };
