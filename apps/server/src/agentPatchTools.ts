@@ -4,9 +4,11 @@ import { buildPlannedFileGraph, checkPatchImports } from "./existenceChecker/ind
 import { deletePendingPatch } from "./patchStore.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
-import { buildSafeEditRecommendation } from "./safeEditor/index.js";
 import { config } from "./config.js";
 import { recordFeatureDecisionDifference } from "./featureFlags.js";
+import { parsePlannedChanges } from "./agentModificationPlanTools.js";
+import { buildSafeEditRecommendation, createStructuredModificationPlan, validateStructuredModificationPlan, type StructuredModificationPlan } from "./safeEditor/index.js";
+import { setTaskSessionModificationPlan } from "./taskSessionStore.js";
 
 function optionalString(args: Record<string, unknown>, name: string) {
   return typeof args[name] === "string" && args[name].trim() ? args[name].trim() : null;
@@ -20,6 +22,24 @@ function requiredString(args: Record<string, unknown>, name: string) {
   }
 
   return value;
+}
+
+/** 解析并校验 proposePatch 自带的计划；未显式传入时复用本轮已确认计划。 */
+export async function resolveProposedModificationPlan(
+  args: Record<string, unknown>,
+  currentPlan: StructuredModificationPlan | undefined,
+  workspaceRoot: string,
+  taskDescription: string
+) {
+  if (args.plannedChanges === undefined) {
+    if (!currentPlan) throw new Error("plannedChanges is required before proposePatch");
+    return validateStructuredModificationPlan(workspaceRoot, currentPlan);
+  }
+
+  return validateStructuredModificationPlan(workspaceRoot, createStructuredModificationPlan({
+    taskDescription,
+    files: parsePlannedChanges(args.plannedChanges)
+  }));
 }
 
 /** Agent 层复用补丁后文件图进行最终复核，避免再次按纯磁盘状态误判新文件。 */
@@ -63,6 +83,22 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
           type: "string",
           enum: ["create", "modify", "delete"],
           description: "Optional declared edit type used by the workflow gate. The generated patch is still validated independently."
+        },
+        plannedChanges: {
+          type: "array",
+          minItems: 1,
+          description: "Complete file-level plan declared before candidate patch generation.",
+          items: {
+            type: "object",
+            properties: {
+              filePath: { type: "string", description: "Workspace-relative target path." },
+              changeKind: { type: "string", enum: ["create", "modify", "delete", "rename", "signature"] },
+              symbolName: { type: "string", description: "Optional affected symbol." },
+              reason: { type: "string", description: "Non-empty reason this change is required." }
+            },
+            required: ["filePath", "changeKind", "reason"],
+            additionalProperties: false
+          }
         }
       },
       additionalProperties: false
@@ -70,13 +106,28 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
     async execute(args, runtime) {
       const userRequest = optionalString(args, "userRequest") || runtime.agentContext.userGoal;
       const filePath = optionalString(args, "filePath");
-      const outerImpactAnalysis = runtime.agentContext.impactAnalyses?.at(-1);
-      const safeEditRecommendation = outerImpactAnalysis
-        ? buildSafeEditRecommendation({ impactAnalysis: outerImpactAnalysis, fallbackTargetFiles: filePath ? [filePath] : [], editableScopeFiles: runtime.agentContext.filesRead })
-        : undefined;
-      const patch = await createEditPatchResponse(filePath, userRequest, runtime.onAgentStep, runtime.taskSessionId || undefined, safeEditRecommendation);
       const workspaceRoot = getWorkspaceRoot();
       if (!workspaceRoot) throw new Error("No workspace selected");
+      const modificationPlan = await resolveProposedModificationPlan(
+        args,
+        runtime.agentContext.modificationPlan,
+        workspaceRoot,
+        userRequest
+      );
+      runtime.agentContext.modificationPlan = modificationPlan;
+      await setTaskSessionModificationPlan(runtime.taskSessionId, modificationPlan);
+      const outerImpactAnalysis = runtime.agentContext.impactAnalyses?.at(-1);
+      const safeEditRecommendation = outerImpactAnalysis
+        ? buildSafeEditRecommendation({ impactAnalysis: outerImpactAnalysis, modificationPlan, fallbackTargetFiles: filePath ? [filePath] : [], editableScopeFiles: runtime.agentContext.filesRead })
+        : buildSafeEditRecommendation({ modificationPlan, editableScopeFiles: runtime.agentContext.filesRead });
+      const patch = await createEditPatchResponse(
+        filePath,
+        userRequest,
+        runtime.onAgentStep,
+        runtime.taskSessionId || undefined,
+        safeEditRecommendation,
+        modificationPlan
+      );
       const importValidation = await validateAgentGeneratedPatchImports(workspaceRoot, patch.files);
       if (importValidation.unresolved.length) {
         deletePendingPatch(patch.patchId);

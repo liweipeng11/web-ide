@@ -155,6 +155,7 @@ function snapshotAgentContext(agentContext: AgentContext): AgentContext {
     unresolvedExistenceChecks: agentContext.unresolvedExistenceChecks ? [...agentContext.unresolvedExistenceChecks] : undefined,
     referenceChecks: cloneReferenceChecks(agentContext.referenceChecks),
     impactAnalyses: agentContext.impactAnalyses ? structuredClone(agentContext.impactAnalyses) : undefined,
+    modificationPlan: agentContext.modificationPlan ? structuredClone(agentContext.modificationPlan) : undefined,
     commandsRun: agentContext.commandsRun ? agentContext.commandsRun.map((command) => ({ ...command })) : undefined,
     externalSources: agentContext.externalSources ? agentContext.externalSources.map((source) => ({ ...source })) : undefined
   };
@@ -171,6 +172,28 @@ function getPatternFinderBlockReason(toolName: string, agentContext: AgentContex
   const candidates = agentContext.patternCandidateFiles || [];
   if (candidates.length && !candidates.some((filePath) => agentContext.filesRead.includes(filePath))) {
     return "findSimilarPatterns returned candidate files. Read at least one candidate with readFile before editing.";
+  }
+
+  return null;
+}
+
+export function getModificationPlanBlockReason(toolName: string, toolArguments: Record<string, unknown>, agentContext: AgentContext) {
+  const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile"]);
+  if (!editingTools.has(toolName)) return null;
+
+  // proposePatch 可在同一次调用中声明 plannedChanges；具体路径和磁盘状态由工具执行前校验。
+  if (toolName === "proposePatch" && Array.isArray(toolArguments.plannedChanges) && toolArguments.plannedChanges.length) return null;
+
+  const plan = agentContext.modificationPlan;
+  if (!plan?.files.length) {
+    return "Before editing, declare every file path, change kind, and reason with proposePatch.plannedChanges or planFileChanges.";
+  }
+
+  const requestedPath = typeof toolArguments.filePath === "string"
+    ? toolArguments.filePath.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase()
+    : "";
+  if (requestedPath && !plan.files.some((file) => file.filePath.toLowerCase() === requestedPath)) {
+    return `The edit target ${toolArguments.filePath} is not included in the current structured modification plan. Update planFileChanges first.`;
   }
 
   return null;
@@ -1187,6 +1210,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       // 旧调用方可能未创建工作流快照，继续使用原有通用门禁保持兼容。
       const patternFinderBlockReason = options.workflow ? null : getPatternFinderBlockReason(toolCall.name, agentContext, registry);
       const existenceCheckBlockReason = options.workflow ? null : getExistenceCheckBlockReason(toolCall.name, toolCall.arguments, agentContext, registry);
+      // 精简评测或历史嵌入方未注册计划工具时维持兼容；标准 Runtime 始终注册该能力。
+      const modificationPlanBlockReason = registry.get("planFileChanges")
+        ? getModificationPlanBlockReason(toolCall.name, toolCall.arguments, agentContext)
+        : null;
 
       if (workflowBlockReason) {
         metrics.recordToolFailure();
@@ -1217,6 +1244,17 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: existenceCheckBlockReason });
         options.onAgentStep?.(createAgentStep({ type: "error", message: existenceCheckBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, existenceCheckBlockReason);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        continue;
+      }
+      if (modificationPlanBlockReason) {
+        metrics.recordToolFailure();
+        metrics.recordToolResult({ signature, noProgress: true });
+        consecutiveNoProgressSteps += 1;
+        logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: modificationPlanBlockReason });
+        options.onAgentStep?.(createAgentStep({ type: "error", message: modificationPlanBlockReason }));
+        const blockedMessage = createBlockedToolMessage(toolCall, modificationPlanBlockReason);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
         continue;

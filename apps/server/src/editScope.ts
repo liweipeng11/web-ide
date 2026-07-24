@@ -1,11 +1,13 @@
 import path from "node:path";
 import type { EditScope, FilePatch } from "./types.js";
+import { validatePatchSubsetOfPlan, type PlannedChange } from "./safeEditor/index.js";
 
 export type BuildEditScopeOptions = {
   selectedFilePath?: string | null;
   filesRead?: string[];
   retryCandidateFiles?: string[];
   allowNewFiles?: boolean;
+  plannedChanges?: PlannedChange[];
 };
 
 export type EditScopeValidationResult =
@@ -58,7 +60,9 @@ function isSameOrChildDirectory(candidateDirectory: string, allowedDirectory: st
 }
 
 export function buildEditScope(options: BuildEditScopeOptions): EditScope {
+  const plannedChanges = options.plannedChanges?.map((change) => ({ ...change }));
   const allowedExistingFiles = uniqueNormalizedPaths([
+    ...(plannedChanges?.filter((change) => change.changeKind !== "create").map((change) => change.filePath) || []),
     options.selectedFilePath,
     ...(options.filesRead || []),
     ...(options.retryCandidateFiles || [])
@@ -66,8 +70,12 @@ export function buildEditScope(options: BuildEditScopeOptions): EditScope {
 
   return {
     allowedExistingFiles,
-    allowNewFiles: options.allowNewFiles ?? true,
-    createdFileDirectories: uniqueNormalizedPaths(allowedExistingFiles.map(getDirectory))
+    allowNewFiles: plannedChanges ? plannedChanges.some((change) => change.changeKind === "create") : options.allowNewFiles ?? true,
+    createdFileDirectories: uniqueNormalizedPaths([
+      ...allowedExistingFiles.map(getDirectory),
+      ...(plannedChanges?.filter((change) => change.changeKind === "create").map((change) => getDirectory(change.filePath)) || [])
+    ]),
+    ...(plannedChanges ? { plannedChanges } : {})
   };
 }
 
@@ -94,6 +102,22 @@ export function isNewFileAllowed(filePath: string, scope: EditScope) {
 export function validatePatchesAgainstEditScope(patches: FilePatch[] | null, scope: EditScope): EditScopeValidationResult {
   if (!patches) {
     return { ok: true, files: [] };
+  }
+
+  if (scope.plannedChanges) {
+    const planValidation = validatePatchSubsetOfPlan(
+      patches.map((patch) => ({ filePath: patch.filePath, status: patch.status })),
+      scope.plannedChanges
+    );
+    if (!planValidation.ok) {
+      return {
+        ok: false,
+        files: patches,
+        blockedFiles: planValidation.blockedFiles,
+        allowedExistingFiles: scope.allowedExistingFiles
+      };
+    }
+    return { ok: true, files: patches };
   }
 
   const blockedFiles = patches

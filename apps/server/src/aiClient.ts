@@ -13,7 +13,7 @@ import { discoverProjectCommands } from "./commandDiscovery.js";
 import { formatCommandFailureForPrompt, getLastFailedCommandResultForChat } from "./commandResults.js";
 import { searchWorkspaceCode } from "./codeSearch.js";
 import { buildEditScope } from "./editScope.js";
-import { buildSafeEditRecommendation } from "./safeEditor/index.js";
+import { buildSafeEditRecommendation, type StructuredModificationPlan } from "./safeEditor/index.js";
 import { readWorkspaceFile } from "./fileTools.js";
 import { inspectCurrentProject } from "./projectInspector.js";
 import { discoverProjectRules } from "./projectRules.js";
@@ -802,7 +802,8 @@ function attachEditScope(result: AiEditResult, agentContext: AgentContext, selec
     selectedFilePath,
     filesRead: agentContext.filesRead,
     retryCandidateFiles,
-    allowNewFiles: true
+    allowNewFiles: true,
+    plannedChanges: agentContext.modificationPlan?.files
   });
 
   return {
@@ -811,6 +812,7 @@ function attachEditScope(result: AiEditResult, agentContext: AgentContext, selec
       ...editScope,
       safeEditRecommendation: buildSafeEditRecommendation({
         impactAnalysis: agentContext.impactAnalyses?.at(-1),
+        modificationPlan: agentContext.modificationPlan,
         fallbackTargetFiles: selectedFilePath ? [selectedFilePath] : [],
         editableScopeFiles: editScope.allowedExistingFiles
       })
@@ -1288,7 +1290,14 @@ async function normalizeAiEditResultWithRepair(rawContent: string, filePath?: st
   }
 }
 
-async function generateAiEditWithTools(filePath: string | null, content: string, userRequest: string, onAgentStep?: (step: AgentStep) => void, pathRetryContext?: EditPathRetryContext): Promise<AiEditResult> {
+async function generateAiEditWithTools(
+  filePath: string | null,
+  content: string,
+  userRequest: string,
+  onAgentStep?: (step: AgentStep) => void,
+  pathRetryContext?: EditPathRetryContext,
+  initialModificationPlan?: StructuredModificationPlan
+): Promise<AiEditResult> {
   const runId = createAiRunId("edit");
   const startedAt = Date.now();
   const contextPaths = filePath ? [filePath] : [];
@@ -1304,8 +1313,10 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
     filesRead: [],
     searchQueries: [],
     searchResultFiles: [],
-    relevantFiles: filePath ? [filePath] : []
+    relevantFiles: filePath ? [filePath] : [],
+    modificationPlan: initialModificationPlan ? structuredClone(initialModificationPlan) : undefined
   };
+  const lockedModificationPlan = initialModificationPlan ? structuredClone(initialModificationPlan) : undefined;
   logAi(runId, "start", { userGoal: userRequest, selectedFile: filePath, selectedFileChars: content.length, pathRetryContext });
   const toolMessages: ChatMessage[] = [
     { role: "system", content: [AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, projectMemoryPrompt].filter(Boolean).join("\n\n") },
@@ -1421,6 +1432,19 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
       const shouldContinueEditLoop = intermediateStatus || contextRequestSummary;
       const canRecoverNullPatch = result.patches === null && (result.status !== "blocked" || contextRequestSummary);
 
+      if (result.patches?.length && !agentContext.modificationPlan) {
+        logAi(runId, "edit.modificationPlan.required", { files: result.patches.map((patch) => patch.filePath) });
+        toolMessages.push({
+          role: "user",
+          content: JSON.stringify({
+            candidateFiles: result.patches.map((patch) => ({ filePath: patch.filePath, changeKind: patch.status })),
+            instruction:
+              "Before the server can create a pending patch, call planFileChanges for the complete candidate file set. Include each file's workspace-relative path, create/modify kind, responsibility, and reason. Then return the patch again without expanding the plan from the patch result."
+          })
+        });
+        continue;
+      }
+
       if (canRecoverNullPatch && nullPatchRecoveryAttempts < MAX_NULL_PATCH_RECOVERY_ATTEMPTS) {
         nullPatchRecoveryAttempts += 1;
         const planSearchKeywords = shouldContinueEditLoop ? result.nextSearchKeywords?.length ? result.nextSearchKeywords : derivePlanSearchKeywords(userRequest, result.summary) : [];
@@ -1474,6 +1498,8 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
 
     logAi(runId, "completion.toolCalls", message.tool_calls.map((toolCall) => toolCall.function.name));
     const results = await Promise.all(message.tool_calls.map((toolCall) => executeAgentToolCall(toolCall, toolRuntime)));
+    // 外层 proposePatch 传入的计划是权威安全边界，内层模型不能在生成过程中扩大它。
+    if (lockedModificationPlan) agentContext.modificationPlan = structuredClone(lockedModificationPlan);
     toolMessages.push(...results);
 
     if (agentContext.searchResultFiles.length && !agentContext.filesRead.length) {
@@ -1523,11 +1549,21 @@ async function generateAiEditWithTools(filePath: string | null, content: string,
     runId,
     [...agentContext.filesRead, ...agentContext.searchResultFiles, ...(pathRetryContext?.validFilePaths || [])]
   );
+  if (result.patches?.length && !agentContext.modificationPlan) {
+    throw new HttpError(428, "A structured modification plan is required before patch generation. Call planFileChanges and retry.");
+  }
   logAi(runId, "done.afterLimit", { elapsedMs: Date.now() - startedAt, patches: result.patches?.map((file) => file.filePath) || null, summary: result.summary });
   return attachEditScope(result, agentContext, filePath, pathRetryContext);
 }
 
-export async function generateAiEdit(filePath: string | null, content: string, userRequest: string, onAgentStep?: (step: AgentStep) => void, pathRetryContext?: EditPathRetryContext): Promise<AiEditResult> {
+export async function generateAiEdit(
+  filePath: string | null,
+  content: string,
+  userRequest: string,
+  onAgentStep?: (step: AgentStep) => void,
+  pathRetryContext?: EditPathRetryContext,
+  initialModificationPlan?: StructuredModificationPlan
+): Promise<AiEditResult> {
   const runId = createAiRunId("edit-simple");
   const startedAt = Date.now();
   if (!config.aiApiKey) {
@@ -1535,11 +1571,11 @@ export async function generateAiEdit(filePath: string | null, content: string, u
   }
 
   if (onAgentStep) {
-    return generateAiEditWithTools(filePath, content, userRequest, onAgentStep, pathRetryContext);
+    return generateAiEditWithTools(filePath, content, userRequest, onAgentStep, pathRetryContext, initialModificationPlan);
   }
 
   if (!filePath) {
-    return generateAiEditWithTools(null, content, userRequest, undefined, pathRetryContext);
+    return generateAiEditWithTools(null, content, userRequest, undefined, pathRetryContext, initialModificationPlan);
   }
 
   const [availableCommands, recentFailedCommand, projectFacts, projectRules, projectMemoryPrompt] = await Promise.all([
@@ -1591,6 +1627,14 @@ export async function generateAiEdit(filePath: string | null, content: string, u
     editScope: {
       ...editScope,
       safeEditRecommendation: buildSafeEditRecommendation({
+        modificationPlan: filePath
+          ? {
+              id: `selected-file-plan-${Date.now().toString(36)}`,
+              taskDescription: userRequest,
+              files: [{ filePath, changeKind: "modify", responsibility: "用户选中的编辑目标", reason: "显式选中文件用于本次修改" }],
+              createdAt: Date.now()
+            }
+          : undefined,
         fallbackTargetFiles: filePath ? [filePath] : [],
         editableScopeFiles: editScope.allowedExistingFiles
       })

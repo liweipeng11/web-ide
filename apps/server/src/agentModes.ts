@@ -26,12 +26,15 @@ const actToolDefinitions: AgentToolDefinition[] = [
   ...commandAgentToolDefinitions
 ];
 
+// 文件计划会更新 Agent 上下文和任务会话，因此 Plan 模式不应暴露该工具。
+const planToolDefinitions = readonlyAgentToolDefinitions.filter((definition) => definition.name !== "planFileChanges");
+
 const modeConfigs: Record<AgentMode, AgentModeConfig> = {
   plan: {
     mode: "plan",
     label: "Plan",
     systemPrompt: AI_AGENT_PLAN_SYSTEM_PROMPT,
-    registry: createAgentToolRegistry(readonlyAgentToolDefinitions),
+    registry: createAgentToolRegistry(planToolDefinitions),
     canModifyWorkspace: false
   },
   act: {

@@ -12,6 +12,32 @@ export type SafeEditEvidence = {
   diagnostics: string[];
 };
 
+export type PlannedChangeKind = "create" | "modify" | "delete" | "rename" | "signature";
+
+export type PlannedChange = {
+  filePath: string;
+  changeKind: PlannedChangeKind;
+  symbolName?: string;
+  reason: string;
+};
+
+export type StructuredModificationPlanFile = PlannedChange & {
+  /** 可选职责说明用于 Agent 审计，不作为阶段 2 的必填安全字段。 */
+  responsibility?: string;
+};
+
+export type StructuredModificationPlan = {
+  id: string;
+  taskDescription: string;
+  files: StructuredModificationPlanFile[];
+  createdAt: number;
+};
+
+export type CreateStructuredModificationPlanInput = Omit<StructuredModificationPlan, "id" | "createdAt"> & {
+  id?: string;
+  createdAt?: number;
+};
+
 // Safe Editor 只建议修改边界，不把“受影响文件”误当成“必须修改文件”。
 export type SafeEditRecommendation = {
   requiredFiles: string[];
@@ -60,6 +86,7 @@ export type SafeEditReport = {
 
 export type BuildSafeEditRecommendationInput = {
   impactAnalysis?: ImpactAnalysisResult | null;
+  modificationPlan?: StructuredModificationPlan | null;
   fallbackTargetFiles?: string[];
   editableScopeFiles?: string[];
   evidence?: SafeEditEvidence;

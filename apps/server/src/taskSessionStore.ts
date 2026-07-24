@@ -11,6 +11,7 @@ import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from 
 import { getTaskMetricsSnapshot, scheduleTaskMetricsFinalization } from "./observability/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { deleteStoredContextArtifacts } from "./contextBudget/artifactStore.js";
+import { normalizeStructuredModificationPlan, type StructuredModificationPlan } from "./safeEditor/index.js";
 
 function taskSessionDirectory() {
   return projectRuntimeDirectory("task-sessions");
@@ -533,6 +534,7 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     pendingToolCall: normalizePendingToolCall(session.pendingToolCall),
     planItems: normalizeTaskPlanItems(session.planItems),
     planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
+    modificationPlan: normalizeStructuredModificationPlan(session.modificationPlan) || undefined,
     patchDiagnostics: normalizePatchDiagnostics(session.patchDiagnostics),
     contextSelectionSnapshots: normalizeContextSelectionSnapshots(session.contextSelectionSnapshots),
     contextBudgetSnapshot: session.contextBudgetSnapshot && typeof session.contextBudgetSnapshot === "object" ? session.contextBudgetSnapshot : undefined,
@@ -647,6 +649,7 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     planItems: [],
     planRevisions: [],
     planApproval: { required: false, status: "not_required" },
+    modificationPlan: undefined,
     checkpointIds: [],
     patchDiagnostics: [],
     contextSelectionSnapshots: [],
@@ -1268,6 +1271,17 @@ export async function addTaskSessionFilesRead(taskSessionId: string | null | und
   return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
     ...session,
     filesRead: unique([...session.filesRead, ...files]),
+    updatedAt: Date.now()
+  }));
+}
+
+/** 保存当前文件级计划；新计划覆盖旧计划，确保后续补丁只读取最新边界。 */
+export async function setTaskSessionModificationPlan(taskSessionId: string | null | undefined, plan: StructuredModificationPlan) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    modificationPlan: structuredClone(plan),
     updatedAt: Date.now()
   }));
 }

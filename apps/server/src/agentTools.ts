@@ -6,6 +6,7 @@ import { checkExistence, type ExistenceCheckTarget } from "./existenceChecker/in
 import { analyzeImpact, type ImpactChangeKind, type ImpactChangeTarget } from "./impactAnalyzer/index.js";
 import { buildSymbolGraph, querySymbolGraph, type SymbolGraphQuery, type SymbolQueryKind } from "./symbolGraph/index.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
+import { modificationPlanAgentToolDefinitions } from "./agentModificationPlanTools.js";
 import { createAgentStep, createApprovalRequestStep } from "./routeAgentSteps.js";
 import type { AgentStep } from "./types.js";
 import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage, AgentToolRuntime, NegativeEvidence, SearchToolResult } from "./agentToolTypes.js";
@@ -146,6 +147,7 @@ function getSearchOptions(args: Record<string, unknown>) {
 }
 
 export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
+  ...modificationPlanAgentToolDefinitions,
   {
     name: "recoverContextArtifact",
     description: "Recover a bounded chunk of an earlier tool result using its tool-call reference. Use offset/nextOffset to continue without resending the entire artifact.",

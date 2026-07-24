@@ -351,6 +351,7 @@ export type AgentContextSnapshot = {
   existenceCheckPerformed?: boolean;
   unresolvedExistenceChecks?: string[];
   impactAnalyses?: import("./impactAnalyzer/index.js").ImpactAnalysisResult[];
+  modificationPlan?: import("./safeEditor/index.js").StructuredModificationPlan;
   commandsRun?: Array<{ command: string; status: "success" | "failed" | "running" | "cancelled"; exitCode: number | null }>;
   externalSources?: import("./externalContext/types.js").ExternalContextSource[];
 };
@@ -453,6 +454,8 @@ export type TaskSession = {
   planItems?: TaskPlanItem[];
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
+  // 与步骤 Todo 分离保存文件级计划，避免展示计划被误当作安全范围证据。
+  modificationPlan?: import("./safeEditor/index.js").StructuredModificationPlan;
   checkpointIds: string[];
   // 任务历史里的真实变更视图：预览仍看 pending patch，历史回放优先看 checkpoint。
   diffView?: TaskSessionDiffView;
@@ -639,6 +642,8 @@ export type EditScope = {
   allowedExistingFiles: string[];
   allowNewFiles: boolean;
   createdFileDirectories: string[];
+  /** 存在时采用严格计划模式：候选路径和变更状态都必须匹配补丁前计划。 */
+  plannedChanges?: import("./safeEditor/types.js").PlannedChange[];
   safeEditRecommendation?: import("./safeEditor/types.js").SafeEditRecommendation;
 };
 

@@ -423,7 +423,8 @@ export async function createEditPatchResponse(
   userRequest: string,
   onAgentStep?: (step: AgentStep) => void,
   taskSessionId?: string,
-  safeEditRecommendationOverride?: import("./safeEditor/index.js").SafeEditRecommendation
+  safeEditRecommendationOverride?: import("./safeEditor/index.js").SafeEditRecommendation,
+  modificationPlanOverride?: import("./safeEditor/index.js").StructuredModificationPlan
 ) {
   const workspaceRoot = getWorkspaceRoot();
   if (!workspaceRoot) throw new HttpError(400, "No workspace selected");
@@ -471,7 +472,7 @@ export async function createEditPatchResponse(
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     logRoute(runId, "ai.generate.start", { attempt, retryContext });
-    aiResult = await generateAiEdit(selectedFilePath, oldContent, userRequest, onAgentStep, retryContext);
+    aiResult = await generateAiEdit(selectedFilePath, oldContent, userRequest, onAgentStep, retryContext, modificationPlanOverride);
     logRoute(runId, "ai.generate.done", { attempt, summary: aiResult.summary, patches: aiResult.patches?.map((file) => file.filePath) || null });
     assertNoDeletePatches(aiResult);
     validatedPaths = await validateEditResultPaths(aiResult, selectedFilePath);

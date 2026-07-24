@@ -25,8 +25,13 @@ function requiresConsumerUpdate(changeKind: ImpactChangeKind | undefined) {
 export function buildSafeEditRecommendation(input: BuildSafeEditRecommendationInput): SafeEditRecommendation {
   const analysis = input.impactAnalysis;
   const resolvedChanges = analysis?.changes.filter((change) => change.status === "resolved") || [];
+  const plannedFiles = input.modificationPlan?.files.map((file) => file.filePath) || [];
   // fallback 只在缺少可靠分析目标时使用，避免把界面当前选中文件误判为业务变更目标。
-  const requiredFiles = uniquePaths(analysis ? resolvedChanges.map((change) => change.filePath) : input.fallbackTargetFiles || []);
+  const requiredFiles = uniquePaths([
+    ...(analysis ? resolvedChanges.map((change) => change.filePath) : []),
+    ...plannedFiles,
+    ...(!analysis && !plannedFiles.length ? input.fallbackTargetFiles || [] : [])
+  ]);
   const disruptiveTargets = new Set(resolvedChanges.filter((change) => requiresConsumerUpdate(change.changeKind)).map((change) => change.filePath.toLowerCase()));
   const conditionalFiles = uniquePaths((analysis?.impactedFiles || [])
     .filter((file) => file.depth === 1 && file.reasons.some((reason) => disruptiveTargets.has(reason.targetFile.toLowerCase())))
@@ -37,12 +42,18 @@ export function buildSafeEditRecommendation(input: BuildSafeEditRecommendationIn
   const requiredSet = new Set(requiredFiles.map((filePath) => filePath.toLowerCase()));
   const validationFiles = uniquePaths([...(analysis?.impactedFiles.map((file) => file.filePath) || []), ...(analysis?.relatedTests || [])])
     .filter((filePath) => !requiredSet.has(filePath.toLowerCase()) && !conditionalSet.has(filePath.toLowerCase()));
-  const legacyEvidenceSource = analysis ? "impact_analysis" : requiredFiles.length ? "explicit_target" : "none";
-  const derivedSources: SafeEditEvidenceSource[] = legacyEvidenceSource === "none" ? [] : [legacyEvidenceSource];
+  const legacyEvidenceSource = analysis ? "impact_analysis" : input.modificationPlan ? "explicit_target" : requiredFiles.length ? "explicit_target" : "none";
+  const derivedSources: SafeEditEvidenceSource[] = [
+    ...(analysis ? ["impact_analysis" as const] : []),
+    ...(input.modificationPlan ? ["agent_plan" as const] : []),
+    ...(!analysis && !input.modificationPlan && requiredFiles.length ? ["explicit_target" as const] : [])
+  ];
   const evidenceSources = [...new Set([...(input.evidence?.sources || []), ...derivedSources])];
   const evidenceComplete = analysis
     ? analysis.complete && (input.evidence?.complete ?? true)
-    : input.evidence
+    : input.modificationPlan
+      ? true
+      : input.evidence
       ? input.evidence.complete
       : requiredFiles.length > 0;
   const diagnostics = [...new Set([...(analysis?.diagnostics || []), ...(input.evidence?.diagnostics || [])])];

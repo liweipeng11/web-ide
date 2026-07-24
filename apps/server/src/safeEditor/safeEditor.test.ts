@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { ImpactAnalysisResult } from "../impactAnalyzer/index.js";
-import { buildSafeEditRecommendation, evaluateSafeEdit, resolveSafeEditEvidence } from "./index.js";
+import { buildSafeEditRecommendation, createStructuredModificationPlan, evaluateSafeEdit, resolveSafeEditEvidence } from "./index.js";
 
 function createImpactAnalysis(changeKind: "modify" | "signature" = "modify"): ImpactAnalysisResult {
   return {
@@ -142,6 +142,17 @@ test("组合证据去重并保留未来计划证据来源", () => {
     diagnostics: ["计划文件图已验证"]
   });
   assert.equal(recommendation.evidenceSource, "explicit_target");
+});
+
+test("影响分析与结构化计划组合时合并目标且保留两类证据", () => {
+  const modificationPlan = createStructuredModificationPlan({
+    taskDescription: "修改服务并同步控制器",
+    files: [{ filePath: "src/userController.ts", changeKind: "modify", responsibility: "适配调用", reason: "同步服务接口变化" }]
+  });
+  const recommendation = buildSafeEditRecommendation({ impactAnalysis: createImpactAnalysis(), modificationPlan });
+
+  assert.deepEqual(recommendation.requiredFiles, ["src/userService.ts", "src/userController.ts"]);
+  assert.deepEqual(recommendation.evidence.sources, ["impact_analysis", "agent_plan"]);
 });
 
 test("历史报告缺少组合证据字段时仍可反序列化并推导证据", () => {
