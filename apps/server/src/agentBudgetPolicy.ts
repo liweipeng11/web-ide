@@ -12,15 +12,22 @@ export const DEFAULT_AGENT_BUDGET_POLICY: AgentBudgetPolicy = {
   forceFinalRemainingSteps: 1
 };
 
-const CONVERGENCE_BLOCKED_TOOL_NAMES = new Set([
-  "searchFilesByName",
-  "searchCode",
-  "searchCodeRegex",
-  "searchWeb",
-  "searchOfficialDocs",
-  "fetchApiDocs",
-  "browseWebPage",
-  "automateBrowser"
+const CONVERGENCE_ALLOWED_TOOL_NAMES = new Set([
+  // 精确读取和上下文恢复仍可用于补齐最后一段必要上下文。
+  "readFile",
+  "readFileChunk",
+  "readFileRange",
+  "recoverContextArtifact",
+  // 编辑门禁所需的精确证据不能在收敛阶段被误删，否则任务会永久无法生成补丁。
+  "findSimilarPatterns",
+  "checkExistence",
+  "analyzeImpact",
+  // 收敛阶段优先保留交付物和必要验证能力。
+  "proposePatch",
+  "replaceInFile",
+  "writeFile",
+  "applyPatch",
+  "runCommand"
 ]);
 
 function readPositiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number) {
@@ -94,7 +101,7 @@ export function getAgentBudgetPhase(
 
 export function isToolAvailableInBudgetPhase(toolName: string, phase: AgentBudgetPhase) {
   if (phase === "force_final") return false;
-  return phase === "normal" || !CONVERGENCE_BLOCKED_TOOL_NAMES.has(toolName);
+  return phase === "normal" || CONVERGENCE_ALLOWED_TOOL_NAMES.has(toolName);
 }
 
 export function filterToolSchemasForBudgetPhase<T extends { function: { name: string } }>(

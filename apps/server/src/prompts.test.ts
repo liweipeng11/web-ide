@@ -58,3 +58,20 @@ test("command prompts require cwd for a named subproject", () => {
   assertIncludes(AI_FILE_CHAT_SYSTEM_PROMPT, "cwd is required");
   assertIncludes(AI_FILE_CHAT_SYSTEM_PROMPT, "workspace-relative directory");
 });
+
+test("Act Prompt 将完整未命中转换为创建动作并校验补丁后引用", () => {
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "Treat exhaustive target_absent evidence");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "stop searching for the same target");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "Do not require a file created by the current patch to exist before that patch");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "post-patch virtual file graph");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "do not replace an achievable edit with a manual tutorial");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "check whether a patch or file change exists");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "only when Runtime reports a real authorization block");
+});
+
+test("多文件编辑 Prompt 允许安全的新路径且不放松已有引用校验", () => {
+  assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "A file created by the current patch is allowed to be absent before the patch");
+  assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "validate patch-internal references against the post-patch virtual file graph");
+  assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "A newly created filePath may be absent before the patch");
+  assertIncludes(AI_MULTI_FILE_EDIT_SYSTEM_PROMPT, "external dependencies and references that must already exist");
+});

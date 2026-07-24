@@ -1,4 +1,10 @@
 import crypto from "node:crypto";
+import {
+  getCreateIntentSearchBlockReason,
+  getSearchScope,
+  normalizeSearchTarget,
+  promoteCreateIntentFacts
+} from "./agentCreationPolicy.js";
 import { appendAgentMessage, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import {
   filterToolSchemasForBudgetPhase,
@@ -115,6 +121,7 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
     searchResultFiles: [],
     relevantFiles: [],
     negativeEvidence: [],
+    createIntents: [],
     patternSearchPerformed: false,
     patternCandidateFiles: [],
     existenceCheckPerformed: false,
@@ -138,6 +145,7 @@ function snapshotAgentContext(agentContext: AgentContext): AgentContext {
     searchResultFiles: [...agentContext.searchResultFiles],
     relevantFiles: [...agentContext.relevantFiles],
     negativeEvidence: agentContext.negativeEvidence ? agentContext.negativeEvidence.map((evidence) => ({ ...evidence })) : undefined,
+    createIntents: agentContext.createIntents ? agentContext.createIntents.map((intent) => ({ ...intent })) : undefined,
     patternCandidateFiles: agentContext.patternCandidateFiles ? [...agentContext.patternCandidateFiles] : undefined,
     unresolvedExistenceChecks: agentContext.unresolvedExistenceChecks ? [...agentContext.unresolvedExistenceChecks] : undefined,
     referenceChecks: cloneReferenceChecks(agentContext.referenceChecks),
@@ -317,6 +325,9 @@ function buildRecoveryFacts(agentContext: AgentContext, generatedPatchIds: strin
   for (const evidence of (agentContext.negativeEvidence || []).filter((item) => item.exhaustive).slice(0, 6)) {
     facts.push(`已完整检查 ${evidence.scope}，未发现“${evidence.query}”`);
   }
+  for (const intent of (agentContext.createIntents || []).slice(0, 6)) {
+    facts.push(`目标“${intent.target}”不存在，已确认需要在 ${intent.scope} 创建`);
+  }
   if (generatedPatchIds.length) facts.push(`已生成 ${new Set(generatedPatchIds).size} 个待审核补丁`);
   if (agentContext.commandsRun?.length) facts.push(`已运行 ${agentContext.commandsRun.length} 条命令`);
   return facts.length ? facts : ["此前的工具调用没有形成可复用的新事实"];
@@ -491,9 +502,32 @@ function buildNegativeEvidenceMessage(agentContext: AgentContext): ModelMessage 
     return `- 已完整检查 ${item.scope}，未发现${targetLabel}“${item.query}”（来源：${item.sourceTool}）。`;
   });
 
+  const createIntentKeys = new Set(
+    (agentContext.createIntents || []).map((intent) => `${intent.scope}:${normalizeSearchTarget(intent.target)}`)
+  );
+  const creationFacts = evidence
+    .filter((item) => createIntentKeys.has(`${item.scope}:${normalizeSearchTarget(item.query)}`))
+    .map((item) => `- 目标“${item.query}”不存在，已确认需要创建；停止继续搜索同名或同职责目标，下一步构建文件计划并调用 proposePatch 或 writeFile(createIfMissing=true)。`);
+
   return {
     role: "user",
-    content: `以下是本轮已经确认的负面证据：\n${facts.join("\n")}\n请复用这些事实，判断是否需要创建目标实现或调整方案，不要重复搜索相同范围。`
+    content: [
+      `以下是本轮已经确认的负面证据：\n${facts.join("\n")}`,
+      creationFacts.length ? `创建策略事实：\n${creationFacts.join("\n")}` : "",
+      "请复用这些事实，判断是否需要创建目标实现或调整方案，不要重复搜索相同范围。"
+    ].filter(Boolean).join("\n")
+  };
+}
+
+function createCreateIntentSearchBlockedMessage(toolCall: ModelToolCall, reason: string): ModelMessage {
+  return {
+    role: "tool",
+    toolCallId: toolCall.id,
+    content: JSON.stringify({
+      error: "create_intent_search_blocked",
+      toolName: toolCall.name,
+      instruction: reason
+    })
   };
 }
 
@@ -769,6 +803,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const directAppliedFiles = new Set(options.appliedFilePaths || []);
   const workflowType = options.workflow?.type ?? classifyTaskWorkflow(options.userRequest).type;
   const mutationExpected = mode === "act" && workflowType !== "analysis-only";
+  const workspaceMutationAuthorized = options.workflow?.authorization?.workspaceMutation ?? mutationExpected;
+  promoteCreateIntentFacts(agentContext, { mode, workflowType, workspaceMutationAuthorized });
   const emittedNegativeEvidence = new Set(
     (agentContext.negativeEvidence || []).filter((item) => item.exhaustive)
       .map((item) => `${item.kind}:${item.scope}:${item.query}`)
@@ -1050,6 +1086,30 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         logAi(runId, "runtime.budgetToolBlocked", { step, remainingSteps, budgetPhase, toolName: toolCall.name });
         continue;
       }
+      const createIntentSearchBlockReason = getCreateIntentSearchBlockReason(toolCall, agentContext);
+      if (createIntentSearchBlockReason) {
+        metrics.recordToolResult({ signature, noProgress: true });
+        consecutiveNoProgressSteps += 1;
+        const blockedMessage = createCreateIntentSearchBlockedMessage(toolCall, createIntentSearchBlockReason);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        options.onAgentStep?.(createAgentStep({
+          type: "strategy",
+          event: "create_intent_search_blocked",
+          message: createIntentSearchBlockReason,
+          toolName: toolCall.name,
+          currentStep: step + 1,
+          maxSteps,
+          facts: buildRecoveryFacts(agentContext, generatedPatchIds)
+        }));
+        logAi(runId, "runtime.createIntentSearchBlocked", {
+          step,
+          toolName: toolCall.name,
+          query: toolCall.arguments.query || toolCall.arguments.regex,
+          scope: getSearchScope(toolCall)
+        });
+        continue;
+      }
       const workflowBlockReason = getWorkflowToolBlockReason(toolCall.name, toolCall.arguments, agentContext, currentAvailableToolNames, options.workflow);
       // 旧调用方可能未创建工作流快照，继续使用原有通用门禁保持兼容。
       const patternFinderBlockReason = options.workflow ? null : getPatternFinderBlockReason(toolCall.name, agentContext, registry);
@@ -1156,6 +1216,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         }
         const readScope = getSuccessfulReadScope(toolCall);
         if (!resultMetrics.cached && !resultMetrics.failed && readScope) readScopes.add(readScope);
+        const newCreateIntents = promoteCreateIntentFacts(agentContext, {
+          mode,
+          workflowType,
+          workspaceMutationAuthorized
+        });
         const progressAfter = await createProgressSnapshot(agentContext, generatedPatchIds, options.taskSessionId, readScopes);
         // 结果是否为空只用于诊断；新增负面证据等状态变化仍然属于有效进展。
         const progressed = hasAgentProgress(progressBefore, progressAfter);
@@ -1177,10 +1242,16 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           return true;
         });
         if (newEvidence.length) {
-          const facts = newEvidence.map((item) => `已完整检查 ${item.scope}，未发现“${item.query}”`);
+          const createdTargets = new Set(newCreateIntents.map((item) => `${item.scope}:${normalizeSearchTarget(item.target)}`));
+          const facts = newEvidence.map((item) => {
+            const isCreateIntent = createdTargets.has(`${item.scope}:${normalizeSearchTarget(item.query)}`);
+            return isCreateIntent
+              ? `目标“${item.query}”不存在，已确认需要在 ${item.scope} 创建；停止继续搜索同名目标`
+              : `已完整检查 ${item.scope}，未发现“${item.query}”`;
+          });
           options.onAgentStep?.(createAgentStep({
             type: "strategy",
-            event: "negative_evidence",
+            event: newCreateIntents.length ? "create_intent" : "negative_evidence",
             message: facts.join("；"),
             toolName: toolCall.name,
             currentStep: step + 1,

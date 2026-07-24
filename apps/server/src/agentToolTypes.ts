@@ -27,6 +27,14 @@ export type NegativeEvidence = {
   createdAt: number;
 };
 
+export type CreateIntentFact = {
+  target: string;
+  scope: string;
+  sourceTool: string;
+  reason: "exhaustive_target_absent";
+  createdAt: number;
+};
+
 /**
  * Agent 每次工具调用前后的可比较状态。
  * 这里只保存计数，不包含文件内容或命令输出，避免快照扩大运行时上下文。
@@ -50,6 +58,8 @@ export type AgentContext = {
   relevantFiles: string[];
   /** 完整搜索得到的未命中事实；Runtime 会把它作为后续决策依据，避免重复搜索。 */
   negativeEvidence?: NegativeEvidence[];
+  /** 编辑型任务中由完整路径未命中推导出的创建事实，用于停止无效搜索并推进文件计划。 */
+  createIntents?: CreateIntentFact[];
   /** 记录本轮是否已经执行过相似实现检索，供编辑门禁判断。 */
   patternSearchPerformed?: boolean;
   /** 最近一次检索得到的候选文件，存在候选时至少应阅读一个。 */

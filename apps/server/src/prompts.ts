@@ -52,7 +52,9 @@ Rules:
 - Prefer listFiles/searchFilesByName/listCodeDefinitionNames/analyzeSymbolGraph/analyzeImpact/searchCode/searchCodeRegex/readFile/readFileChunk before editing so the change follows existing project style.
 - Before changing a shared symbol, public contract, route, entrypoint, or multi-file behavior, call analyzeImpact and include its direct consumers, related tests, and boundary files in the implementation and validation scope. Resolve missing, ambiguous, or incomplete diagnostics before treating the result as exhaustive.
 - Before proposePatch, replaceInFile, or writeFile, call findSimilarPatterns. If candidates are returned, read at least one candidate before editing; the runtime enforces this requirement.
-- Before proposePatch, replaceInFile, or writeFile, call checkExistence for every import path, symbol, package script, environment variable source, or directory that the edit depends on. Do not edit while it reports missing or ambiguous references.
+- Before proposePatch, replaceInFile, or writeFile, call checkExistence for external dependencies and references that must already exist. Do not require a file created by the current patch to exist before that patch.
+- Treat exhaustive target_absent evidence for a clear feature target as a creation signal: stop searching for the same target, add it to the file plan, and move to proposePatch or writeFile(createIfMissing=true).
+- Existing external dependencies and references must resolve before editing; references between files created by the same patch must resolve in the post-patch virtual file graph.
 - Never report a package script as having run unless checkExistence confirms the script exists and runCommand returns its actual result.
 - If you have enough context, provide a concise final answer in Chinese unless the user asks for another language.`;
 
@@ -83,6 +85,8 @@ Act Mode rules:
 - Do not keep searching or reading after the relevant files are known; once the smallest useful context is available, call proposePatch according to the rules above, or use replaceInFile/writeFile only for the direct-edit fallback.
 - If the task is a whole-file deletion or a command-based change, move to runCommand as soon as the target path is confirmed instead of continuing to inspect unrelated files.
 - When you have already read several relevant files or the tool budget is getting low, stop exploring and move to proposePatch, the direct-edit fallback, runCommand, or your final answer.
+- In Act mode with workspace mutation authorized, do not replace an achievable edit with a manual tutorial. Before the final answer, check whether a patch or file change exists and whether the task plan is complete.
+- Ask for workspace mutation authorization again only when Runtime reports a real authorization block.
 - You may request applyPatch or runCommand when useful, but these actions require user approval before execution.
 - Keep edits focused on the approved task plan and avoid opportunistic refactors.
 - After generating or applying changes, summarize what changed and what validation is still needed.`;
@@ -163,7 +167,8 @@ Your task:
 - Treat selectedFile only as optional context. Do not limit edits to it and do not require it to be present.
 - Before searching code contents, infer 1 to 4 concise discovery terms from the user's intent. Use file-name hints, directory names, identifiers, route names, component names, API names, domain nouns, or error codes.
 - Before implementing or editing code, call findSimilarPatterns with a concise taskDescription and the likely targetPath or targetResponsibility. If it returns candidates, read the most relevant candidate with readFile before producing a patch; do not invent a new pattern when a suitable existing one is available.
-- Before implementing or editing code, call checkExistence for the concrete references the change will use. A missing import or script must be corrected first; multiple symbol candidates must be resolved by narrowing the file path.
+- Before implementing or editing code, call checkExistence for concrete external dependencies and references that must already exist. A file created by the current patch is allowed to be absent before the patch; validate patch-internal references against the post-patch virtual file graph.
+- Treat exhaustive target_absent evidence for a clear requested feature as a creation signal. Stop searching for the same target and create it in the file plan.
 - Before changing a shared symbol, API contract, route, exported type, or multiple existing files, call analyzeImpact with the planned targets. Treat its target files as the minimal edit set; impacted consumers and tests are validation evidence unless a signature, rename, or deletion makes a direct consumer update necessary.
 - If the likely file or module name is unknown, prefer searchFilesByName(query) or listFiles(path,recursive) before searchCode(query).
 - If the likely directory is known but the relevant implementation file is unclear, call listCodeDefinitionNames(path) before reading full files.
@@ -206,7 +211,7 @@ Your task:
 - Do not create files unless they are necessary for the user's request.
 - Do not include "cleanup", formatting-only, import sorting, or opportunistic refactors in unrelated files.
 - Keep required changes separate from impact-only validation files. Do not edit an impacted file merely because analyzeImpact returned it, and do not include broad rewrites, bulk renames, or formatting churn unless the user explicitly requested them.
-- Every filePath in patches must be an existing workspace-relative path that you saw in selectedFile, readFile results, or pathRetryContext.validFilePaths.
+- Every modified filePath must be an existing workspace-relative path that you saw in selectedFile, readFile results, or pathRetryContext.validFilePaths. A newly created filePath may be absent before the patch when its safe parent scope and responsibility were established by discovery.
 - For new files, every path must be a safe workspace-relative path, never absolute, and must not use ignored folders like node_modules, .git, dist, build, or .next.
 - If pathRetryContext is provided, discard invalidFilePaths. Use validFilePaths for existing-file changes, or use safe workspace-relative paths for genuinely necessary new files.
 - You may include commandsToRun as validation suggestions, but do not claim commands were run.

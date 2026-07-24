@@ -16,6 +16,8 @@ export type AgentStepPayload =
         | "repeated_tool_warning"
         | "repeated_tool_blocked"
         | "negative_evidence"
+        | "create_intent"
+        | "create_intent_search_blocked"
         | "no_progress_recovery"
         | "completion_recovery"
         | "budget_convergence"

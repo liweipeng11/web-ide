@@ -251,6 +251,111 @@ test("agent runtime injects confirmed negative evidence into subsequent model re
   assert.match(evidencePrompt?.content || "", /不要重复搜索相同范围/);
 });
 
+test("feature 任务将完整路径未命中提升为创建意图并阻止同职责重复搜索", async () => {
+  let fileSearchExecutions = 0;
+  let codeSearchExecutions = 0;
+  let patchExecutions = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("searchFilesByName", {
+      matches: [], query: "router", searchedPath: "src", exhaustive: true, cached: false, conclusion: "target_absent"
+    }, (runtime) => {
+      fileSearchExecutions += 1;
+      runtime.agentContext.negativeEvidence = [{
+        kind: "path_absent",
+        query: "router",
+        scope: "src",
+        sourceTool: "searchFilesByName",
+        exhaustive: true,
+        createdAt: 1
+      }];
+    }),
+    createRuntimeTestTool("searchCode", [], () => { codeSearchExecutions += 1; }),
+    createRuntimeTestTool("proposePatch", { patchId: "patch-router" }, () => { patchExecutions += 1; })
+  ]);
+  const requests: Record<string, unknown>[] = [];
+  let completionCount = 0;
+  const steps: AgentStep[] = [];
+
+  const result = await runAgentRuntime({
+    userRequest: "新增 Vue 路由配置",
+    mode: "act",
+    contextBudgetEnabled: false,
+    registry,
+    onAgentStep: (step) => steps.push(step),
+    requestCompletion: async (body) => {
+      requests.push(body);
+      completionCount += 1;
+      if (completionCount === 1) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [{
+          id: "find-router",
+          type: "function",
+          function: { name: "searchFilesByName", arguments: JSON.stringify({ query: "router", path: "src" }) }
+        }] } }] };
+      }
+      if (completionCount === 2) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [{
+          id: "repeat-router-responsibility",
+          type: "function",
+          function: { name: "searchCode", arguments: JSON.stringify({ query: "VueRouter", path: "src" }) }
+        }] } }] };
+      }
+      if (completionCount === 3) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [{
+          id: "create-router-patch",
+          type: "function",
+          function: { name: "proposePatch", arguments: JSON.stringify({ files: ["src/router/index.js", "src/main.js"] }) }
+        }] } }] };
+      }
+      return { choices: [{ message: { role: "assistant", content: "路由补丁已生成。" } }] };
+    }
+  });
+
+  const secondMessages = requests[1].messages as Array<{ content?: string }>;
+  assert.equal(fileSearchExecutions, 1);
+  assert.equal(codeSearchExecutions, 0);
+  assert.equal(patchExecutions, 1);
+  assert.equal(result.agentContext.createIntents?.[0]?.target, "router");
+  assert.equal(secondMessages.some((message) => message.content?.includes("已确认需要创建")), true);
+  assert.match(result.messages.find((message) => message.role === "tool" && message.toolCallId === "repeat-router-responsibility")?.content || "", /create_intent_search_blocked/);
+  assert.equal(steps.some((step) => step.type === "strategy" && step.event === "create_intent"), true);
+  assert.equal(steps.some((step) => step.type === "strategy" && step.event === "create_intent_search_blocked"), true);
+});
+
+test("只读任务不会把完整未命中提升为创建意图", async () => {
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchFilesByName", {
+    matches: [], query: "router", searchedPath: "src", exhaustive: true, cached: false, conclusion: "target_absent"
+  }, (runtime) => {
+    runtime.agentContext.negativeEvidence = [{
+      kind: "path_absent",
+      query: "router",
+      scope: "src",
+      sourceTool: "searchFilesByName",
+      exhaustive: true,
+      createdAt: 1
+    }];
+  })]);
+  let completionCount = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "只分析当前路由结构",
+    mode: "plan",
+    contextBudgetEnabled: false,
+    registry,
+    requestCompletion: async () => {
+      completionCount += 1;
+      return completionCount === 1
+        ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [{
+            id: "readonly-router",
+            type: "function",
+            function: { name: "searchFilesByName", arguments: JSON.stringify({ query: "router", path: "src" }) }
+          }] } }] }
+        : { choices: [{ message: { role: "assistant", content: "未发现独立路由文件。" } }] };
+    }
+  });
+
+  assert.equal(result.agentContext.createIntents?.length ?? 0, 0);
+});
+
 test("context budget v2 compresses the model view while preserving the full runtime history", async () => {
   const registry = createAgentToolRegistry([]);
   const messages = [
