@@ -5,6 +5,8 @@ import { deletePendingPatch } from "./patchStore.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { buildSafeEditRecommendation } from "./safeEditor/index.js";
+import { config } from "./config.js";
+import { recordFeatureDecisionDifference } from "./featureFlags.js";
 
 function optionalString(args: Record<string, unknown>, name: string) {
   return typeof args[name] === "string" && args[name].trim() ? args[name].trim() : null;
@@ -27,9 +29,18 @@ export async function validateAgentGeneratedPatchImports(
 ) {
   const plannedFileGraph = await buildPlannedFileGraph(
     workspaceRoot,
-    files.map((file) => ({ filePath: file.path, changeKind: file.status, content: file.newContent }))
+      files.map((file) => ({ filePath: file.path, changeKind: file.status, content: file.newContent }))
   );
-  return checkPatchImports(workspaceRoot, files, plannedFileGraph);
+  const [legacyValidation, plannedValidation] = await Promise.all([
+    checkPatchImports(workspaceRoot, files),
+    checkPatchImports(workspaceRoot, files, plannedFileGraph)
+  ]);
+  recordFeatureDecisionDifference({
+    feature: "plannedFileResolution",
+    legacyDecision: { unresolvedCount: legacyValidation.unresolved.length },
+    nextDecision: { unresolvedCount: plannedValidation.unresolved.length }
+  });
+  return config.featureFlags.plannedFileResolution ? plannedValidation : legacyValidation;
 }
 
 export const patchAgentToolDefinitions: AgentToolDefinition[] = [

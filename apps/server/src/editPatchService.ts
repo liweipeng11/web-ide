@@ -14,6 +14,8 @@ import { appendTaskSessionPatchEvent, getTaskSession, recordTaskSessionContextSe
 import type { AiEditResult, FileTreeNode, PatchFileChange, PatchFilterRecord, PatchGenerationDiagnostics } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { isValidationCommand, selectDefaultValidationCommand } from "./validationCommand.js";
+import { config } from "./config.js";
+import { recordFeatureDecisionDifference } from "./featureFlags.js";
 
 const routeLogPreviewChars = 500;
 
@@ -211,7 +213,20 @@ export async function validateFinalPatchImports(
   files: Parameters<typeof checkPatchImports>[1],
   plannedFileGraph?: PlannedFileGraph
 ) {
-  const validation = await checkPatchImports(workspaceRoot, files, plannedFileGraph);
+  const legacyValidation = await checkPatchImports(workspaceRoot, files);
+  const plannedValidation = plannedFileGraph
+    ? await checkPatchImports(workspaceRoot, files, plannedFileGraph)
+    : legacyValidation;
+  if (plannedFileGraph) {
+    recordFeatureDecisionDifference({
+      feature: "plannedFileResolution",
+      legacyDecision: { unresolvedCount: legacyValidation.unresolved.length },
+      nextDecision: { unresolvedCount: plannedValidation.unresolved.length }
+    });
+  }
+  const validation = config.featureFlags.plannedFileResolution
+    ? plannedValidation
+    : legacyValidation;
   if (validation.unresolved.length) {
     const details = validation.unresolved
       .map(({ filePath, check }) => `${filePath}: ${check.target.value} (${check.resolution.status})`)

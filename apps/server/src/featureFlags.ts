@@ -4,6 +4,8 @@ export type FeatureFlags = {
   lsp: boolean;
   inlineEdit: boolean;
   commandExecutionV2: boolean;
+  plannedFileResolution: boolean;
+  semanticCompletionCheck: boolean;
 };
 
 export type FeatureImplementations = Record<keyof FeatureFlags, boolean>;
@@ -15,7 +17,9 @@ const featureFlagEnvironmentNames: Record<keyof FeatureFlags, string> = {
   modelProviderGateway: "MODEL_PROVIDER_GATEWAY_ENABLED",
   lsp: "LSP_ENABLED",
   inlineEdit: "INLINE_EDIT_ENABLED",
-  commandExecutionV2: "COMMAND_EXECUTION_V2_ENABLED"
+  commandExecutionV2: "COMMAND_EXECUTION_V2_ENABLED",
+  plannedFileResolution: "AGENT_PLANNED_FILE_RESOLUTION",
+  semanticCompletionCheck: "AGENT_SEMANTIC_COMPLETION_CHECK"
 };
 
 export const defaultFeatureFlags: FeatureFlags = {
@@ -23,8 +27,32 @@ export const defaultFeatureFlags: FeatureFlags = {
   modelProviderGateway: true,
   lsp: true,
   inlineEdit: true,
-  commandExecutionV2: true
+  commandExecutionV2: true,
+  plannedFileResolution: true,
+  semanticCompletionCheck: true
 };
+
+export type FeatureDecisionDifference = {
+  feature: "plannedFileResolution" | "semanticCompletionCheck";
+  legacyDecision: unknown;
+  nextDecision: unknown;
+};
+
+/**
+ * 灰度期间只记录脱敏后的新旧决策，不记录源码、Prompt 或文件内容。
+ * 调用方仍由 Feature Flag 决定实际采用哪条路径。
+ */
+export function recordFeatureDecisionDifference(
+  difference: FeatureDecisionDifference,
+  logger: (message: string) => void = console.info
+) {
+  if (JSON.stringify(difference.legacyDecision) === JSON.stringify(difference.nextDecision)) {
+    return false;
+  }
+
+  logger(`[agent-feature-shadow] ${JSON.stringify(difference)}`);
+  return true;
+}
 
 function parseBoolean(value: string | undefined, defaultValue: boolean) {
   if (!value?.trim()) return defaultValue;
@@ -86,5 +114,7 @@ export const implementedFeatures: FeatureImplementations = {
   modelProviderGateway: true,
   lsp: true,
   inlineEdit: true,
-  commandExecutionV2: true
+  commandExecutionV2: true,
+  plannedFileResolution: true,
+  semanticCompletionCheck: true
 };

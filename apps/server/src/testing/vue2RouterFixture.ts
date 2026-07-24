@@ -32,6 +32,10 @@ export async function createVue2RouterFixture(): Promise<Vue2RouterFixture> {
       `${JSON.stringify({
         name: "clr-vue-app",
         private: true,
+        type: "module",
+        scripts: {
+          build: "node --check src/main.js && node --check src/router/index.js"
+        },
         dependencies: {
           vue: "^2.7.16",
           "vue-router": "^3.6.5"

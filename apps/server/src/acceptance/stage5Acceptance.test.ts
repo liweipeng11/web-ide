@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { runEvaluationSuite } from "../evaluation/index.js";
+import { defaultFeatureFlags } from "../featureFlags.js";
 import { runStage5Acceptance, stage5MinimumCompletionRate } from "./stage5Acceptance.js";
 
 test("阶段 5 验收覆盖默认启用、显式回退和十类集成场景", async () => {
@@ -8,10 +9,11 @@ test("阶段 5 验收覆盖默认启用、显式回退和十类集成场景", as
 
   assert.equal(report.stage, 5);
   assert.equal(report.threshold, 90);
-  assert.equal(report.checks.filter((item) => item.category === "default_activation").length, 5);
-  assert.equal(report.checks.filter((item) => item.category === "rollback").length, 5);
+  const featureCount = Object.keys(defaultFeatureFlags).length;
+  assert.equal(report.checks.filter((item) => item.category === "default_activation").length, featureCount);
+  assert.equal(report.checks.filter((item) => item.category === "rollback").length, featureCount);
   assert.equal(report.checks.filter((item) => item.category === "integration_scenario").length, 10);
-  assert.equal(report.summary.total, 20);
+  assert.equal(report.summary.total, featureCount * 2 + 10);
   assert.equal(report.summary.failed, 0);
   assert.equal(report.summary.completionRate, 100);
   assert.equal(report.accepted, true);

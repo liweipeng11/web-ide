@@ -3,18 +3,18 @@ import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
 import { createCapabilityRouter } from "./capabilityRoutes.js";
-import { createServerCapabilities, defaultFeatureFlags, readFeatureFlags, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
+import { createServerCapabilities, defaultFeatureFlags, readFeatureFlags, recordFeatureDecisionDifference, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
 
 test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {
   assert.deepEqual(readFeatureFlags({}), defaultFeatureFlags);
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true" }), { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true });
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0" }), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false });
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true", AGENT_PLANNED_FILE_RESOLUTION: "true", AGENT_SEMANTIC_COMPLETION_CHECK: "true" }), { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true });
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0", AGENT_PLANNED_FILE_RESOLUTION: "false", AGENT_SEMANTIC_COMPLETION_CHECK: "off" }), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false });
   assert.deepEqual(readFeatureFlags({ LSP_ENABLED: "invalid-value" }), defaultFeatureFlags);
 });
 
 test("Capability API 返回脱敏能力快照", async () => {
   const app = express();
-  app.use("/api", createCapabilityRouter({ flags: { contextBudgetV2: true, modelProviderGateway: true, lsp: false, inlineEdit: false, commandExecutionV2: true }, implementations: { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false }, aiConfigured: true, defaultModel: "mock-model" }));
+  app.use("/api", createCapabilityRouter({ flags: { contextBudgetV2: true, modelProviderGateway: true, lsp: false, inlineEdit: false, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true }, implementations: { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false }, aiConfigured: true, defaultModel: "mock-model" }));
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
@@ -40,10 +40,10 @@ test("Feature Flag 仅在实现可用时切换新路径，否则保持旧路径"
 });
 
 test("各项 Feature Flag 分别裁决 legacy 和 next 路径", () => {
-  const names = ["contextBudgetV2", "modelProviderGateway", "lsp", "inlineEdit", "commandExecutionV2"] as const;
-  const allAvailable = { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true };
+  const names = ["contextBudgetV2", "modelProviderGateway", "lsp", "inlineEdit", "commandExecutionV2", "plannedFileResolution", "semanticCompletionCheck"] as const;
+  const allAvailable = { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true };
   for (const name of names) {
-    const disabled = { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false } satisfies FeatureFlags;
+    const disabled = { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false } satisfies FeatureFlags;
     assert.equal(resolveFeaturePath(name, disabled, allAvailable), "legacy");
 
     const enabled = { ...disabled, [name]: true };
@@ -52,4 +52,21 @@ test("各项 Feature Flag 分别裁决 legacy 和 next 路径", () => {
     assert.deepEqual(capabilities.features[name], { enabled: true, available: true, active: true, path: "next" });
     assert.equal(names.filter((item) => item !== name).every((item) => capabilities.features[item].path === "legacy"), true);
   }
+});
+
+test("灰度差异仅记录脱敏后的新旧决策变化", () => {
+  const logs: string[] = [];
+  assert.equal(recordFeatureDecisionDifference({
+    feature: "plannedFileResolution",
+    legacyDecision: { unresolvedCount: 1 },
+    nextDecision: { unresolvedCount: 0 }
+  }, (message) => logs.push(message)), true);
+  assert.equal(recordFeatureDecisionDifference({
+    feature: "semanticCompletionCheck",
+    legacyDecision: { status: "completed" },
+    nextDecision: { status: "completed" }
+  }, (message) => logs.push(message)), false);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /plannedFileResolution/);
+  assert.doesNotMatch(logs[0], /source|prompt|content/i);
 });

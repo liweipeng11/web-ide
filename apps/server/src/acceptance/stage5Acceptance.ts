@@ -32,7 +32,9 @@ const featureLabels: Record<keyof FeatureFlags, string> = {
   modelProviderGateway: "Model Provider Gateway",
   lsp: "Language Service / LSP",
   inlineEdit: "Inline Edit",
-  commandExecutionV2: "Command Execution V2"
+  commandExecutionV2: "Command Execution V2",
+  plannedFileResolution: "Agent Planned File Resolution",
+  semanticCompletionCheck: "Agent Semantic Completion Check"
 };
 
 const disabledEnvironment: NodeJS.ProcessEnv = {
@@ -40,7 +42,9 @@ const disabledEnvironment: NodeJS.ProcessEnv = {
   MODEL_PROVIDER_GATEWAY_ENABLED: "0",
   LSP_ENABLED: "0",
   INLINE_EDIT_ENABLED: "0",
-  COMMAND_EXECUTION_V2_ENABLED: "0"
+  COMMAND_EXECUTION_V2_ENABLED: "0",
+  AGENT_PLANNED_FILE_RESOLUTION: "0",
+  AGENT_SEMANTIC_COMPLETION_CHECK: "0"
 };
 
 /**

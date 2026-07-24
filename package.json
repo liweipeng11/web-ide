@@ -14,6 +14,7 @@
     "verify:agent-new-file-stage4": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage4.ps1",
     "verify:agent-new-file-stage5": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage5.ps1",
     "verify:agent-new-file-stage6": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage6.ps1",
+    "verify:agent-new-file-stage7": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage7.ps1",
     "verify:stage6": "powershell -ExecutionPolicy Bypass -File scripts/check-project-memory-stage6.ps1",
     "verify:stage7": "pnpm --dir apps/server test:stage7 && pnpm --dir apps/server typecheck && pnpm --dir apps/web typecheck && pnpm --dir apps/web build && pnpm test"
   },

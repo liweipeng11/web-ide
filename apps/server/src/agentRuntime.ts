@@ -45,7 +45,7 @@ import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "
 import { getPendingPatch } from "./patchStore.js";
 import { ConservativeTokenEstimator, prepareContextBudget } from "./contextBudget/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
-import { implementedFeatures } from "./featureFlags.js";
+import { implementedFeatures, recordFeatureDecisionDifference } from "./featureFlags.js";
 import { getTaskSessionContextState, recordTaskSessionContextBudget } from "./taskSessionStore.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
@@ -1014,7 +1014,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         directAppliedFiles,
         agentContext
       });
-      const completionDecision = evaluateAgentCompletion({
+      const semanticCompletionDecision = evaluateAgentCompletion({
         evidence,
         finalContent: content,
         recoveryAttempted: completionRecoveryAttempted,
@@ -1022,6 +1022,17 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           ["proposePatch", "replaceInFile", "writeFile"].includes(definition.name)
         )
       });
+      const legacyCompletionDecision = evidence.generatedPatchCount > 0
+        ? { status: "awaiting_approval" as const, reason: "已生成待审核补丁。", shouldRecover: false }
+        : { status: "completed" as const, reason: "模型已返回最终文本。", shouldRecover: false };
+      recordFeatureDecisionDifference({
+        feature: "semanticCompletionCheck",
+        legacyDecision: { status: legacyCompletionDecision.status },
+        nextDecision: { status: semanticCompletionDecision.status }
+      });
+      const completionDecision = config.featureFlags.semanticCompletionCheck
+        ? semanticCompletionDecision
+        : legacyCompletionDecision;
 
       if (completionDecision.shouldRecover && step + 1 < maxSteps) {
         const recoveryMessage = createCompletionRecoveryMessage(completionDecision, evidence);
