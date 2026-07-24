@@ -8,6 +8,7 @@ import type {
   TaskWorkflowType
 } from "./types.js";
 import { evaluateWorkflowEditGate, resolveWorkflowEditIntent } from "./editGate.js";
+import { decideImpactPreflight } from "../safeEditor/impactPreflight.js";
 
 const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile", "deleteFile", "applyPatch"]);
 const sideEffectTools = new Set([...editingTools, "runCommand", "automateBrowser"]);
@@ -94,6 +95,9 @@ export function resolveTaskWorkflowDecisionPolicy(workflow: TaskWorkflowSnapshot
  */
 export function collectTaskWorkflowEvidence(agentContext: AgentContext): TaskWorkflowEvidenceState {
   const candidates = agentContext.patternCandidateFiles || [];
+  const preflight = agentContext.modificationPlan
+    ? decideImpactPreflight(agentContext.modificationPlan, agentContext.impactAnalyses)
+    : null;
   return {
     workspaceRead: agentContext.filesRead.length > 0,
     patternSearch: agentContext.patternSearchPerformed === true,
@@ -103,9 +107,20 @@ export function collectTaskWorkflowEvidence(agentContext: AgentContext): TaskWor
     // 结构化状态由编辑门禁按目标过滤；只有历史上下文才继续使用全局字符串结论。
     referencesResolved: agentContext.existenceCheckPerformed === true
       && (agentContext.referenceChecks !== undefined || !(agentContext.unresolvedExistenceChecks?.length)),
-    impactAnalysis: Boolean(agentContext.impactAnalyses?.length),
+    // 有结构化计划时只接受覆盖当前目标且未过期的分析，避免无关旧结果误放行。
+    impactAnalysis: preflight?.required
+      ? preflight.strategy === "reuse"
+      : Boolean(agentContext.impactAnalyses?.length),
     commandAttempt: Boolean(agentContext.commandsRun?.length)
   };
+}
+
+function resolveRequiredEvidence(policy: TaskWorkflowDecisionPolicy, agentContext: AgentContext) {
+  if (!agentContext.modificationPlan) return policy.requiredBeforeEdit;
+  const preflight = decideImpactPreflight(agentContext.modificationPlan, agentContext.impactAnalyses);
+  return preflight.required
+    ? [...new Set([...policy.requiredBeforeEdit, "impact_analysis" as const])]
+    : policy.requiredBeforeEdit;
 }
 
 function hasEvidence(evidence: TaskWorkflowEvidence, state: TaskWorkflowEvidenceState, availableTools: ReadonlySet<string>) {
@@ -198,20 +213,27 @@ export function evaluateTaskWorkflowToolDecision(input: {
   }
 
   const state = collectTaskWorkflowEvidence(agentContext);
-  const missingEvidence = policy.requiredBeforeEdit.filter((evidence) => !hasEvidence(evidence, state, availableTools));
-  const recommendedTools = recommendEvidenceTools(missingEvidence, availableTools);
+  const requiredEvidence = resolveRequiredEvidence(policy, agentContext);
+  const missingEvidence = requiredEvidence.filter((evidence) => !hasEvidence(evidence, state, availableTools));
+  // proposePatch 会在生成候选补丁前自动执行动态预检，不能在工具入口前形成 analyzeImpact 死锁。
+  const autoPreflight = toolName === "proposePatch"
+    && Boolean(agentContext.modificationPlan)
+    && missingEvidence.length === 1
+    && missingEvidence[0] === "impact_analysis";
+  const blockingMissingEvidence = autoPreflight ? [] : missingEvidence;
+  const recommendedTools = recommendEvidenceTools(blockingMissingEvidence, availableTools);
   const editIntent = resolveWorkflowEditIntent(toolName, toolArguments);
-  const editBlock = missingEvidence.length === 0 && editIntent
+  const editBlock = blockingMissingEvidence.length === 0 && editIntent
     ? evaluateWorkflowEditGate({ intent: editIntent, agentContext, availableTools })
     : null;
 
   return {
-    allowed: missingEvidence.length === 0 && !editBlock,
-    reason: missingEvidence.length ? formatBlockReason(workflow, missingEvidence) : editBlock?.reason || null,
-    missingEvidence,
-    recommendedTools: missingEvidence.length ? recommendedTools : editBlock?.recommendedTools || [],
+    allowed: blockingMissingEvidence.length === 0 && !editBlock,
+    reason: blockingMissingEvidence.length ? formatBlockReason(workflow, blockingMissingEvidence) : editBlock?.reason || null,
+    missingEvidence: blockingMissingEvidence,
+    recommendedTools: blockingMissingEvidence.length ? recommendedTools : editBlock?.recommendedTools || [],
     blockingReferences: editBlock?.blockingReferences || [],
-    recoverable: missingEvidence.length ? recommendedTools.length > 0 : editBlock?.recoverable ?? true
+    recoverable: blockingMissingEvidence.length ? recommendedTools.length > 0 : editBlock?.recoverable ?? true
   };
 }
 
@@ -225,14 +247,15 @@ export function buildTaskWorkflowProgressPrompt(
 ) {
   const policy = resolveTaskWorkflowDecisionPolicy(workflow);
   const state = collectTaskWorkflowEvidence(agentContext);
-  const missing = policy.requiredBeforeEdit.filter((evidence) => !hasEvidence(evidence, state, availableTools));
+  const requiredEvidence = resolveRequiredEvidence(policy, agentContext);
+  const missing = requiredEvidence.filter((evidence) => !hasEvidence(evidence, state, availableTools));
   const recommended = recommendEvidenceTools(missing, availableTools);
 
   return [
     "Workflow decision state (runtime facts; do not claim missing evidence):",
     `- workflow: ${workflow.type}`,
     `- workspace mutation allowed: ${policy.mutationAllowed}`,
-    `- evidence satisfied: ${policy.requiredBeforeEdit.filter((evidence) => !missing.includes(evidence)).join(", ") || "none"}`,
+    `- evidence satisfied: ${requiredEvidence.filter((evidence) => !missing.includes(evidence)).join(", ") || "none"}`,
     `- evidence missing before edit: ${missing.join(", ") || "none"}`,
     `- recommended next tools: ${recommended.join(", ") || "none"}`,
     "- Decision order: obey user scope and safety constraints; satisfy missing workflow evidence; then choose the lowest-cost useful tool; stop discovery once evidence is sufficient."

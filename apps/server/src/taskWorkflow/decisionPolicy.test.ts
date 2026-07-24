@@ -349,3 +349,66 @@ test("modify 与 delete 使用独立前置条件", () => {
   assert.match(deleteWithoutImpact.reason || "", /impact analysis/);
   assert.deepEqual(deleteWithoutImpact.recommendedTools, ["analyzeImpact"]);
 });
+
+test("feature 工作流按结构化计划动态要求影响分析", () => {
+  const currentWorkflow = workflow("edit", "实现服务与入口联动");
+  const modificationPlan = {
+    id: "plan-dynamic-impact",
+    taskDescription: "实现服务与入口联动",
+    createdAt: Date.now(),
+    files: [
+      { filePath: "src/service.ts", changeKind: "modify" as const, reason: "更新实现" },
+      { filePath: "src/main.ts", changeKind: "modify" as const, reason: "注册服务" }
+    ]
+  };
+  const directEditWithoutAnalysis = evaluateTaskWorkflowToolDecision({
+    workflow: currentWorkflow,
+    toolName: "replaceInFile",
+    toolArguments: { filePath: "src/service.ts" },
+    agentContext: readyFeatureContext({ filesRead: ["src/main.js", "src/service.ts"], modificationPlan }),
+    availableTools: allTools
+  });
+  const autoPreflightProposal = evaluateTaskWorkflowToolDecision({
+    workflow: currentWorkflow,
+    toolName: "proposePatch",
+    agentContext: readyFeatureContext({ modificationPlan }),
+    availableTools: allTools
+  });
+  const matchingAnalysis = {
+    analyzedAt: Date.now(),
+    changes: modificationPlan.files.map((file) => ({ ...file, status: "resolved" as const, definitions: [] })),
+    impactedFiles: [], relatedTests: [], boundaryFiles: [], risk: { level: "low" as const, score: 0, factors: [] },
+    diagnostics: [], complete: true, truncated: false, indexedFileCount: 2, indexedSymbolCount: 0,
+    unresolvedReferenceCount: 0, indexedUnresolvedReferenceCount: 0
+  };
+  const withAnalysis = evaluateTaskWorkflowToolDecision({
+    workflow: currentWorkflow,
+    toolName: "proposePatch",
+    agentContext: readyFeatureContext({ modificationPlan, impactAnalyses: [matchingAnalysis] }),
+    availableTools: allTools
+  });
+
+  assert.equal(directEditWithoutAnalysis.allowed, false);
+  assert.deepEqual(directEditWithoutAnalysis.missingEvidence, ["impact_analysis"]);
+  assert.deepEqual(directEditWithoutAnalysis.recommendedTools, ["analyzeImpact"]);
+  assert.equal(autoPreflightProposal.allowed, true);
+  assert.deepEqual(autoPreflightProposal.missingEvidence, []);
+  assert.equal(withAnalysis.allowed, true);
+});
+
+test("普通单文件 feature 修改和纯创建计划不会被过度阻塞", () => {
+  const currentWorkflow = workflow("edit", "调整局部组件并新增内部文件");
+  for (const files of [
+    [{ filePath: "src/components/Panel.tsx", changeKind: "modify" as const, reason: "调整局部布局" }],
+    [{ filePath: "src/internal/helper.ts", changeKind: "create" as const, reason: "新增内部辅助实现" }]
+  ]) {
+    const decision = evaluateTaskWorkflowToolDecision({
+      workflow: currentWorkflow,
+      toolName: "proposePatch",
+      agentContext: readyFeatureContext({ modificationPlan: { id: "local", taskDescription: "局部修改", createdAt: Date.now(), files } }),
+      availableTools: allTools
+    });
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.missingEvidence.includes("impact_analysis"), false);
+  }
+});

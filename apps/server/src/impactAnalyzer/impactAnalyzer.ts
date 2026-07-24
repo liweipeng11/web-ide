@@ -58,6 +58,7 @@ export async function analyzeImpact(workspaceRoot: string, targets: ImpactChange
   const boundaryFiles = impactedFiles.filter((file) => file.categories.some((category) => ["route", "entrypoint", "configuration", "type_contract"].includes(category))).map((file) => file.filePath);
   const risk = assessImpactRisk(changes, impactedFiles, diagnostics);
   return {
+    analyzedAt: Date.now(),
     changes,
     impactedFiles,
     relatedTests,

@@ -3,7 +3,7 @@ import { createContextCache, listCodeDefinitionNames, listWorkspaceFiles, readWo
 import { inspectCurrentProject } from "./projectInspector.js";
 import { findSimilarPatterns } from "./patternFinder/index.js";
 import { checkExistence, type ExistenceCheckTarget } from "./existenceChecker/index.js";
-import { analyzeImpact, type ImpactChangeKind, type ImpactChangeTarget } from "./impactAnalyzer/index.js";
+import { analyzeImpact, type ImpactAnalysisOptions, type ImpactAnalysisResult, type ImpactChangeKind, type ImpactChangeTarget } from "./impactAnalyzer/index.js";
 import { buildSymbolGraph, querySymbolGraph, type SymbolGraphQuery, type SymbolQueryKind } from "./symbolGraph/index.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { modificationPlanAgentToolDefinitions } from "./agentModificationPlanTools.js";
@@ -28,6 +28,29 @@ const MAX_FILE_SEARCH_RESULTS = 2000;
 
 function uniquePush(values: string[], value: string) {
   if (value && !values.includes(value)) values.push(value);
+}
+
+/**
+ * 统一执行并记录影响分析，供 Agent 工具与动态预检复用，避免两条链路产生不同的证据状态。
+ */
+export async function executeImpactAnalysis(
+  workspaceRoot: string,
+  changes: ImpactChangeTarget[],
+  agentContext?: AgentContext,
+  options: ImpactAnalysisOptions = {}
+): Promise<ImpactAnalysisResult> {
+  const result = await analyzeImpact(workspaceRoot, changes, options);
+  if (!agentContext) return result;
+
+  uniquePush(agentContext.searchQueries, `impact:${changes.map((change) => `${change.filePath}${change.symbolName ? `#${change.symbolName}` : ""}`).join(",")}`);
+  agentContext.impactAnalyses ||= [];
+  agentContext.impactAnalyses.push(result);
+  for (const change of result.changes) uniquePush(agentContext.relevantFiles, change.filePath);
+  for (const impacted of result.impactedFiles) {
+    uniquePush(agentContext.searchResultFiles, impacted.filePath);
+    uniquePush(agentContext.relevantFiles, impacted.filePath);
+  }
+  return result;
 }
 
 function normalizeSearchScope(pathValue: string, filePattern = "") {
@@ -218,19 +241,10 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       const workspaceRoot = getWorkspaceRoot();
       if (!workspaceRoot) throw new Error("No workspace selected");
 
-      uniquePush(runtime.agentContext.searchQueries, `impact:${changes.map((change) => `${change.filePath}${change.symbolName ? `#${change.symbolName}` : ""}`).join(",")}`);
-      const result = await analyzeImpact(workspaceRoot, changes, {
+      return executeImpactAnalysis(workspaceRoot, changes, runtime.agentContext, {
         maxDepth: optionalPositiveInteger(args, "maxDepth", 4),
         maxFiles: optionalPositiveInteger(args, "maxFiles", 300)
       });
-      runtime.agentContext.impactAnalyses ||= [];
-      runtime.agentContext.impactAnalyses.push(result);
-      for (const change of result.changes) uniquePush(runtime.agentContext.relevantFiles, change.filePath);
-      for (const impacted of result.impactedFiles) {
-        uniquePush(runtime.agentContext.searchResultFiles, impacted.filePath);
-        uniquePush(runtime.agentContext.relevantFiles, impacted.filePath);
-      }
-      return result;
     },
     summarize(result, cached) {
       const value = result && typeof result === "object" ? result as Record<string, unknown> : {};

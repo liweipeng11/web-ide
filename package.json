@@ -18,6 +18,7 @@
     "verify:safe-editor-stage0": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage0.ps1",
     "verify:safe-editor-stage1": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage1.ps1",
     "verify:safe-editor-stage2": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage2.ps1",
+    "verify:safe-editor-stage3": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage3.ps1",
     "verify:stage6": "powershell -ExecutionPolicy Bypass -File scripts/check-project-memory-stage6.ps1",
     "verify:stage7": "pnpm --dir apps/server test:stage7 && pnpm --dir apps/server typecheck && pnpm --dir apps/web typecheck && pnpm --dir apps/web build && pnpm test"
   },

@@ -7,8 +7,9 @@ import { getWorkspaceRoot } from "./workspaceStore.js";
 import { config } from "./config.js";
 import { recordFeatureDecisionDifference } from "./featureFlags.js";
 import { parsePlannedChanges } from "./agentModificationPlanTools.js";
-import { buildSafeEditRecommendation, createStructuredModificationPlan, validateStructuredModificationPlan, type StructuredModificationPlan } from "./safeEditor/index.js";
+import { buildSafeEditRecommendation, createStructuredModificationPlan, executeImpactPreflight, validateStructuredModificationPlan, type StructuredModificationPlan } from "./safeEditor/index.js";
 import { setTaskSessionModificationPlan } from "./taskSessionStore.js";
+import { executeImpactAnalysis } from "./agentTools.js";
 
 function optionalString(args: Record<string, unknown>, name: string) {
   return typeof args[name] === "string" && args[name].trim() ? args[name].trim() : null;
@@ -116,10 +117,20 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
       );
       runtime.agentContext.modificationPlan = modificationPlan;
       await setTaskSessionModificationPlan(runtime.taskSessionId, modificationPlan);
-      const outerImpactAnalysis = runtime.agentContext.impactAnalyses?.at(-1);
-      const safeEditRecommendation = outerImpactAnalysis
-        ? buildSafeEditRecommendation({ impactAnalysis: outerImpactAnalysis, modificationPlan, fallbackTargetFiles: filePath ? [filePath] : [], editableScopeFiles: runtime.agentContext.filesRead })
-        : buildSafeEditRecommendation({ modificationPlan, editableScopeFiles: runtime.agentContext.filesRead });
+      // 在生成候选补丁前自动补齐必要的影响证据；create 目标由计划文件图证明，不进入静态索引。
+      const preflight = await executeImpactPreflight({
+        workspaceRoot,
+        plan: modificationPlan,
+        previousAnalyses: runtime.agentContext.impactAnalyses,
+        executeAnalysis: (root, targets, options) => executeImpactAnalysis(root, targets, runtime.agentContext, options)
+      });
+      const safeEditRecommendation = buildSafeEditRecommendation({
+        ...(preflight.analysis ? { impactAnalysis: preflight.analysis } : {}),
+        modificationPlan,
+        fallbackTargetFiles: filePath ? [filePath] : [],
+        editableScopeFiles: runtime.agentContext.filesRead,
+        evidence: preflight.evidence
+      });
       const patch = await createEditPatchResponse(
         filePath,
         userRequest,

@@ -47,6 +47,8 @@ export type ImpactRisk = {
 };
 
 export type ImpactAnalysisResult = {
+  /** 分析完成时间，用于动态预检判断已有证据是否仍在有效期内。 */
+  analyzedAt?: number;
   changes: ImpactTargetResolution[];
   impactedFiles: ImpactedFile[];
   relatedTests: string[];
