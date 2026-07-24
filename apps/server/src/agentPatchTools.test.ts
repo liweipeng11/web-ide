@@ -109,7 +109,11 @@ test("applyPatch tool requires explicit acknowledgement for Safe Editor high-ris
     await setWorkspaceRoot(workspaceRoot, { persist: false });
     await fs.writeFile(path.join(workspaceRoot, "target.ts"), "export const value = 1;\n", "utf8");
     const change: PatchFileChange = { path: "target.ts", filePath: "target.ts", status: "modify", oldContent: "export const value = 1;\n", newContent: "export const value = 2;\n", summary: "Update value", diffHtml: "" };
-    const safeEditReport = evaluateSafeEdit({ taskDescription: "更新数值", recommendation: buildSafeEditRecommendation({}), candidates: [change] });
+    const safeEditReport = evaluateSafeEdit({
+      taskDescription: "更新预期文件",
+      recommendation: buildSafeEditRecommendation({ fallbackTargetFiles: ["expected.ts"] }),
+      candidates: [change]
+    });
     const patch = createPendingPatch([change], undefined, undefined, {
       rawPatchCount: 1, normalizedFilePaths: ["target.ts"], preDedupeCount: 1, postDedupeCount: 1, finalPatchCount: 1,
       filteredCount: 0, noEffectCount: 0, records: [], safeEditReport, generatedAt: Date.now()
@@ -117,6 +121,8 @@ test("applyPatch tool requires explicit acknowledgement for Safe Editor high-ris
     const tool = patchAgentToolDefinitions.find((definition) => definition.name === "applyPatch");
 
     assert.ok(tool);
+    assert.equal(safeEditReport.status, "high_risk");
+    assert.ok(safeEditReport.risks.some((risk) => risk.kind === "scope_expansion"));
     await assert.rejects(() => tool.execute({ patchId: patch.patchId }, createToolRuntime()), /explicit confirmation/i);
     assert.ok(getPendingPatch(patch.patchId));
     await tool.execute(

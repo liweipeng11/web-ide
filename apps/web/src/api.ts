@@ -104,7 +104,15 @@ export type PatchGenerationDiagnostics = {
   generatedAt: number;
 };
 
-export type SafeEditFileRole = "required" | "supporting" | "validation_only" | "expansion";
+export type SafeEditStatus = "clean" | "warning" | "needs_analysis" | "high_risk";
+export type SafeEditFileRole = "required" | "supporting" | "validation_only" | "unverified" | "expansion";
+export type SafeEditEvidenceSource = "explicit_target" | "agent_plan" | "impact_analysis" | "planned_file_graph";
+
+export type SafeEditEvidence = {
+  sources: SafeEditEvidenceSource[];
+  complete: boolean;
+  diagnostics: string[];
+};
 
 export type SafeEditRisk = {
   kind: "scope_expansion" | "missing_impact_analysis" | "incomplete_impact_analysis" | "opportunistic_refactor" | "formatting_only" | "broad_rewrite" | "bulk_rename";
@@ -114,7 +122,7 @@ export type SafeEditRisk = {
 };
 
 export type SafeEditReport = {
-  status: "clean" | "warning" | "high_risk";
+  status: SafeEditStatus;
   recommendation: {
     requiredFiles: string[];
     conditionalFiles: string[];
@@ -122,6 +130,8 @@ export type SafeEditReport = {
     editableScopeFiles: string[];
     impactAnalysisComplete: boolean | null;
     evidenceSource: "impact_analysis" | "explicit_target" | "none";
+    /** 历史报告可能只有 evidenceSource，界面读取时需兼容字段缺失。 */
+    evidence?: SafeEditEvidence;
     diagnostics: string[];
   };
   files: Array<{

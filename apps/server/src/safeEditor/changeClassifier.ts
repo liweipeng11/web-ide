@@ -1,4 +1,5 @@
 import { diffLines } from "diff";
+import { resolveSafeEditEvidence } from "./evidence.js";
 import type { SafeEditCandidate, SafeEditFileAssessment, SafeEditRecommendation, SafeEditRisk } from "./types.js";
 
 const REFACTOR_PATTERN = /(?:\brefactor(?:ing)?\b|\bcleanup\b|\bclean up\b|重构|清理|整理)/i;
@@ -60,11 +61,15 @@ function normalizeWhitespace(value: string) {
 
 function classifyRole(candidate: SafeEditCandidate, recommendation: SafeEditRecommendation, taskDescription: string) {
   const filePath = normalizePath(candidate.filePath);
+  const evidence = resolveSafeEditEvidence(recommendation);
+  const hasReliableScope = evidence.sources.length > 0 && evidence.complete;
   const requiredFiles = new Set(recommendation.requiredFiles.map(normalizePath));
   const conditionalFiles = new Set(recommendation.conditionalFiles.map(normalizePath));
   const validationFiles = new Set(recommendation.validationFiles.map(normalizePath));
   if (requiredFiles.has(filePath)) return { role: "required" as const, reason: "属于影响分析中的明确变更目标" };
   if (conditionalFiles.has(filePath)) return { role: "supporting" as const, reason: "属于破坏性变更的直接消费者，可能需要配套调整" };
+  // 证据缺失或不完整时不能断言候选文件已经超出范围。
+  if (!hasReliableScope) return { role: "unverified" as const, reason: "当前证据不足，尚不能确认该文件是否属于最小修改集合" };
   if (validationFiles.has(filePath) && TEST_REQUEST_PATTERN.test(taskDescription) && TEST_FILE_PATTERN.test(filePath)) {
     return { role: "supporting" as const, reason: "用户明确要求测试改动，该测试文件属于配套修改" };
   }
@@ -76,15 +81,16 @@ function classifyRole(candidate: SafeEditCandidate, recommendation: SafeEditReco
 /** 对单个候选 diff 进行启发式分类；这里只标记风险，不替代人工 diff 审阅。 */
 export function classifySafeEditCandidate(candidate: SafeEditCandidate, recommendation: SafeEditRecommendation, taskDescription: string): SafeEditFileAssessment {
   const classification = classifyRole(candidate, recommendation, taskDescription);
+  const evidence = resolveSafeEditEvidence(recommendation);
   const { addedLines, removedLines, addedText, removedText } = getLineChanges(candidate.oldContent, candidate.newContent);
   const risks: SafeEditRisk[] = [];
   const summary = candidate.summary || "";
 
-  if (recommendation.evidenceSource === "none") {
+  if (!evidence.sources.length) {
     risks.push({ kind: "missing_impact_analysis", level: "high", filePath: candidate.filePath, message: "本轮没有明确目标或影响分析证据，无法证明该文件属于最小修改集合。" });
   }
-  if (recommendation.impactAnalysisComplete === false) {
-    const detail = recommendation.diagnostics.length ? `：${recommendation.diagnostics.join("；")}` : "";
+  if (evidence.sources.length && !evidence.complete) {
+    const detail = evidence.diagnostics.length ? `：${evidence.diagnostics.join("；")}` : "";
     risks.push({ kind: "incomplete_impact_analysis", level: "high", filePath: candidate.filePath, message: `影响分析不完整，不能确认最小修改范围${detail}` });
   }
 

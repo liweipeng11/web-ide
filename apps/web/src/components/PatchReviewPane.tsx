@@ -51,7 +51,7 @@ function getFilteredSummary(patch: GenerateEditResponse) {
 }
 
 function getSafeEditRoleLabel(role: SafeEditFileRole) {
-  return { required: "必要改动", supporting: "配套改动", validation_only: "仅建议验证", expansion: "扩散改动" }[role];
+  return { required: "必要改动", supporting: "配套改动", validation_only: "仅建议验证", unverified: "范围待分析", expansion: "扩散改动" }[role];
 }
 
 export default function PatchReviewPane({ patch, loading, autoFix, onApply, onReject, onRunCommand, onRegenerateFile }: Props) {

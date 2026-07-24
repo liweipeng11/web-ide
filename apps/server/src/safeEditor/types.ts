@@ -1,7 +1,16 @@
 import type { ImpactAnalysisResult } from "../impactAnalyzer/index.js";
 
-export type SafeEditFileRole = "required" | "supporting" | "validation_only" | "expansion";
+export type SafeEditStatus = "clean" | "warning" | "needs_analysis" | "high_risk";
+export type SafeEditFileRole = "required" | "supporting" | "validation_only" | "unverified" | "expansion";
 export type SafeEditRiskKind = "scope_expansion" | "missing_impact_analysis" | "incomplete_impact_analysis" | "opportunistic_refactor" | "formatting_only" | "broad_rewrite" | "bulk_rename";
+export type SafeEditEvidenceSource = "explicit_target" | "agent_plan" | "impact_analysis" | "planned_file_graph";
+export type LegacySafeEditEvidenceSource = "impact_analysis" | "explicit_target" | "none";
+
+export type SafeEditEvidence = {
+  sources: SafeEditEvidenceSource[];
+  complete: boolean;
+  diagnostics: string[];
+};
 
 // Safe Editor 只建议修改边界，不把“受影响文件”误当成“必须修改文件”。
 export type SafeEditRecommendation = {
@@ -10,7 +19,9 @@ export type SafeEditRecommendation = {
   validationFiles: string[];
   editableScopeFiles: string[];
   impactAnalysisComplete: boolean | null;
-  evidenceSource: "impact_analysis" | "explicit_target" | "none";
+  /** 保留旧字段以兼容已持久化的报告，新逻辑统一读取 evidence。 */
+  evidenceSource: LegacySafeEditEvidenceSource;
+  evidence: SafeEditEvidence;
   diagnostics: string[];
 };
 
@@ -39,7 +50,7 @@ export type SafeEditFileAssessment = {
 };
 
 export type SafeEditReport = {
-  status: "clean" | "warning" | "high_risk";
+  status: SafeEditStatus;
   recommendation: SafeEditRecommendation;
   files: SafeEditFileAssessment[];
   necessaryFiles: string[];
@@ -51,6 +62,7 @@ export type BuildSafeEditRecommendationInput = {
   impactAnalysis?: ImpactAnalysisResult | null;
   fallbackTargetFiles?: string[];
   editableScopeFiles?: string[];
+  evidence?: SafeEditEvidence;
 };
 
 export type EvaluateSafeEditInput = {

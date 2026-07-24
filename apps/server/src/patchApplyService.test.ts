@@ -5,9 +5,49 @@ import path from "node:path";
 import test from "node:test";
 import { applyPendingPatch } from "./patchApplyService.js";
 import { clearPendingPatches, createPendingPatch } from "./patchStore.js";
+import { buildSafeEditRecommendation, evaluateSafeEdit } from "./safeEditor/index.js";
 import { createTaskSession, getTaskSession, setTaskPlanItems } from "./taskSessionStore.js";
 import type { PatchFileChange } from "./types.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
+
+test("needs_analysis 补丁不能通过普通高风险确认直接应用", async () => {
+  const change: PatchFileChange = {
+    path: "target.ts",
+    filePath: "target.ts",
+    status: "modify",
+    oldContent: "export const value = 1;\n",
+    newContent: "export const value = 2;\n",
+    summary: "更新常量",
+    diffHtml: ""
+  };
+  const safeEditReport = evaluateSafeEdit({
+    taskDescription: "更新常量",
+    recommendation: buildSafeEditRecommendation({}),
+    candidates: [change]
+  });
+  const patch = createPendingPatch([change], undefined, undefined, {
+    rawPatchCount: 1,
+    normalizedFilePaths: ["target.ts"],
+    preDedupeCount: 1,
+    postDedupeCount: 1,
+    finalPatchCount: 1,
+    filteredCount: 0,
+    noEffectCount: 0,
+    records: [],
+    safeEditReport,
+    generatedAt: Date.now()
+  });
+
+  try {
+    assert.equal(safeEditReport.status, "needs_analysis");
+    await assert.rejects(
+      () => applyPendingPatch({ patchId: patch.patchId, acknowledgeSafeEditRisk: true }),
+      /requires impact analysis/i
+    );
+  } finally {
+    clearPendingPatches();
+  }
+});
 
 test("applying a patch without declared commands keeps the task pending validation", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-patch-validation-"));

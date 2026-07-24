@@ -33,6 +33,11 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
   }
 
   const targetPathSet = new Set(targetFiles.map((file) => normalizePatchPath(file.path)));
+  const safeEditReport = patch.diagnostics?.safeEditReport;
+  // 缺少或不完整的范围证据必须先补分析，不能复用普通高风险确认绕过。
+  if (safeEditReport?.status === "needs_analysis") {
+    throw new HttpError(409, "Safe Editor requires impact analysis before this patch can be applied.");
+  }
   const highRisks = patch.diagnostics?.safeEditReport?.risks.filter(
     (risk) => risk.level === "high" && targetPathSet.has(normalizePatchPath(risk.filePath))
   ) || [];
