@@ -3,15 +3,20 @@ import { DiffEditor } from "@monaco-editor/react";
 import type { GenerateEditResponse, PatchFileChange, SafeEditFileRole } from "../api";
 import type { AutoFixState } from "../appState";
 import Icon from "./Icon";
+import SafeEditApprovalDialog from "./SafeEditApprovalDialog";
+import { createSafeEditViewModel } from "./safeEditViewModel";
 
 type Props = {
   patch: GenerateEditResponse;
   loading: boolean;
   autoFix: AutoFixState | null;
-  onApply: (filePath?: string) => void;
+  onApply: (filePath?: string, acknowledgeSafeEditRisk?: boolean) => void;
   onReject: (filePath?: string) => void;
   onRunCommand: (command: string) => void;
   onRegenerateFile: (file: PatchFileChange) => void;
+  onRegeneratePatch: () => void;
+  onAnalyzeImpact: () => void;
+  onRejectExpansionFiles: (filePaths: string[]) => void;
 };
 
 function getLanguage(path: string) {
@@ -54,12 +59,16 @@ function getSafeEditRoleLabel(role: SafeEditFileRole) {
   return { required: "必要改动", supporting: "配套改动", validation_only: "仅建议验证", unverified: "范围待分析", expansion: "扩散改动" }[role];
 }
 
-export default function PatchReviewPane({ patch, loading, autoFix, onApply, onReject, onRunCommand, onRegenerateFile }: Props) {
+export default function PatchReviewPane({ patch, loading, autoFix, onApply, onReject, onRunCommand, onRegenerateFile, onRegeneratePatch, onAnalyzeImpact, onRejectExpansionFiles }: Props) {
   const [selectedPath, setSelectedPath] = useState(() => patch.files[0]?.path || "");
+  const [showImpactSummary, setShowImpactSummary] = useState(false);
+  const [approvalPath, setApprovalPath] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
     // 新补丁到达时默认展示第一个文件，避免保留上一次补丁中的旧选择。
     setSelectedPath(patch.files[0]?.path || "");
+    setShowImpactSummary(false);
+    setApprovalPath(undefined);
   }, [patch.patchId, patch.files]);
 
   const selectedFile = useMemo(() => patch.files.find((file) => file.path === selectedPath) || patch.files[0], [patch.files, selectedPath]);
@@ -68,6 +77,26 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
   const filteredSummary = getFilteredSummary(patch);
   const safeEditReport = patch.diagnostics?.safeEditReport;
   const selectedAssessment = safeEditReport?.files.find((file) => file.filePath === selectedFile?.path);
+  const safeEditModel = useMemo(() => safeEditReport ? createSafeEditViewModel(safeEditReport) : null, [safeEditReport]);
+  const selectedSafeEditModel = useMemo(
+    () => safeEditReport && selectedFile ? createSafeEditViewModel(safeEditReport, [selectedFile.path]) : null,
+    [safeEditReport, selectedFile]
+  );
+  const approvalModel = useMemo(
+    () => safeEditReport ? createSafeEditViewModel(safeEditReport, approvalPath === null ? patch.files.map((file) => file.path) : approvalPath ? [approvalPath] : []) : null,
+    [approvalPath, patch.files, safeEditReport]
+  );
+
+  function requestApply(filePath?: string) {
+    const targetModel = filePath ? selectedSafeEditModel : safeEditModel;
+    // 服务端对待分析补丁采用整体门禁，单文件入口也不能绕过。
+    if (safeEditModel?.status === "needs_analysis" || targetModel?.status === "needs_analysis") return;
+    if (targetModel?.requiresApproval) {
+      setApprovalPath(filePath ?? null);
+      return;
+    }
+    onApply(filePath, false);
+  }
 
   return (
     <section className="diff-review-pane" aria-label="Diff review in editor">
@@ -90,7 +119,7 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
           <small>{displaySummary}</small>
         </div>
         <div className="diff-actions">
-          <button type="button" className="icon-button" disabled={loading} title="Apply all" aria-label="Apply all" onClick={() => onApply()}>
+          <button type="button" className="icon-button" disabled={loading || safeEditModel?.status === "needs_analysis"} title={safeEditModel?.status === "needs_analysis" ? "需要先补充影响分析" : "Apply all"} aria-label="Apply all" onClick={() => requestApply()}>
             <Icon name="apply" />
           </button>
           <button type="button" className="icon-button" disabled={loading} title="Reject all" aria-label="Reject all" onClick={() => onReject()}>
@@ -111,13 +140,36 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
 
       {filteredSummary ? <div className="diff-diagnostics">{filteredSummary}</div> : null}
 
-      {safeEditReport && safeEditReport.status !== "clean" ? (
-        <section className={`diff-safe-edit ${safeEditReport.status}`}>
-          <strong>Safe Editor：{safeEditReport.status === "high_risk" ? "检测到高风险扩散" : "存在需要确认的改动"}</strong>
-          <span>
-            证据来源：{safeEditReport.recommendation.evidenceSource === "impact_analysis" ? "影响分析" : safeEditReport.recommendation.evidenceSource === "explicit_target" ? "明确目标文件" : "缺少影响分析"}
-          </span>
-          {safeEditReport.risks.length ? <ul>{safeEditReport.risks.map((risk, index) => <li key={`${risk.filePath}:${risk.kind}:${index}`}><code>{risk.filePath}</code> {risk.message}</li>)}</ul> : null}
+      {safeEditModel ? (
+        <section className={`diff-safe-edit ${safeEditModel.status}`} aria-live="polite">
+          <div className="diff-safe-edit-heading">
+            <div><span>Safe Editor</span><strong>{safeEditModel.title}</strong></div>
+            <span className={`safe-edit-status ${safeEditModel.status}`}>{safeEditModel.status}</span>
+          </div>
+          <p>{safeEditModel.description}</p>
+          <span>证据来源：{safeEditModel.evidenceLabels.join("、") || "尚未提供"}</span>
+          {safeEditModel.files.some((file) => file.risks.length) ? (
+            <ul className="safe-edit-file-risks">
+              {safeEditModel.files.filter((file) => file.risks.length).map((file) => (
+                <li key={file.filePath}>
+                  <code>{file.filePath}</code>
+                  <span>{file.risks.map((risk) => risk.message).join("；")}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="safe-edit-recovery-actions">
+            {safeEditModel.status === "needs_analysis" ? <button type="button" disabled={loading} onClick={onAnalyzeImpact}>补充影响分析</button> : null}
+            <button type="button" disabled={loading} onClick={onRegeneratePatch}>重新生成整个补丁</button>
+            {safeEditModel.expansionFiles.length ? <button type="button" disabled={loading} onClick={() => onRejectExpansionFiles(safeEditModel.expansionFiles)}>拒绝计划外文件</button> : null}
+            <button type="button" aria-expanded={showImpactSummary} onClick={() => setShowImpactSummary((visible) => !visible)}>查看影响分析摘要</button>
+          </div>
+          {showImpactSummary ? (
+            <div className="safe-edit-impact-summary">
+              <strong>范围证据{safeEditModel.evidenceComplete ? "完整" : "尚不完整"}</strong>
+              {safeEditModel.diagnostics.length ? <ul>{safeEditModel.diagnostics.map((diagnostic) => <li key={diagnostic}>{diagnostic}</li>)}</ul> : <span>暂无额外诊断。</span>}
+            </div>
+          ) : null}
         </section>
       ) : null}
 
@@ -133,9 +185,11 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
               <button type="button" disabled={loading} onClick={() => onRegenerateFile(selectedFile)}>
                 重新生成此文件
               </button>
-              <button type="button" disabled={loading} onClick={() => onApply(selectedFile.path)}>
-                Accept
-              </button>
+              {safeEditModel?.status === "needs_analysis" ? <span className="safe-edit-apply-blocked">待补充分析</span> : (
+                <button type="button" disabled={loading} onClick={() => requestApply(selectedFile.path)}>
+                  Accept
+                </button>
+              )}
               <button type="button" disabled={loading} onClick={() => onReject(selectedFile.path)}>
                 Reject
               </button>
@@ -183,6 +237,20 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
             </div>
           ))}
         </section>
+      ) : null}
+
+      {approvalModel ? (
+        <SafeEditApprovalDialog
+          open={approvalPath !== undefined}
+          loading={loading}
+          model={approvalModel}
+          onCancel={() => setApprovalPath(undefined)}
+          onConfirm={() => {
+            const targetPath = approvalPath ?? undefined;
+            setApprovalPath(undefined);
+            onApply(targetPath, true);
+          }}
+        />
       ) : null}
     </section>
   );

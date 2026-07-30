@@ -14,10 +14,14 @@ function filterSafeEditReport(report: SafeEditReport | undefined, filePaths: str
   const remaining = new Set(filePaths.map((filePath) => filePath.toLowerCase()));
   const files = report.files.filter((file) => remaining.has(file.filePath.toLowerCase()));
   const risks = report.risks.filter((risk) => remaining.has(risk.filePath.toLowerCase()));
+  const hasEvidenceGap = risks.some((risk) => risk.kind === "missing_impact_analysis" || risk.kind === "incomplete_impact_analysis");
+  const hasConfirmedHighRisk = risks.some(
+    (risk) => risk.level === "high" && risk.kind !== "missing_impact_analysis" && risk.kind !== "incomplete_impact_analysis"
+  );
 
   return {
     ...report,
-    status: risks.some((risk) => risk.level === "high") ? "high_risk" as const : risks.length ? "warning" as const : "clean" as const,
+    status: hasConfirmedHighRisk ? "high_risk" as const : hasEvidenceGap ? "needs_analysis" as const : risks.length ? "warning" as const : "clean" as const,
     files,
     risks,
     necessaryFiles: report.necessaryFiles.filter((filePath) => remaining.has(filePath.toLowerCase())),
@@ -31,7 +35,8 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
 
   async function handleApply(
     filePath: string | undefined,
-    onValidateAndFix: (command?: string | null, options?: { changedFiles?: string[]; failureCategories?: VerificationIssueCategory[] }) => Promise<unknown>
+    onValidateAndFix: (command?: string | null, options?: { changedFiles?: string[]; failureCategories?: VerificationIssueCategory[] }) => Promise<unknown>,
+    acknowledgeSafeEditRisk = false
   ) {
     if (!state.patch) return;
 
@@ -40,14 +45,6 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
     const targetFiles = filePath ? patchToApply.files.filter((file) => file.path === filePath) : patchToApply.files;
 
     if (!targetFiles.length) return;
-
-    const targetPaths = new Set(targetFiles.map((file) => file.path.toLowerCase()));
-    const highRisks = patchToApply.diagnostics?.safeEditReport?.risks.filter((risk) => risk.level === "high" && targetPaths.has(risk.filePath.toLowerCase())) || [];
-    const acknowledgeSafeEditRisk = highRisks.length
-      ? window.confirm(`Safe Editor 检测到高风险改动：\n\n${highRisks.map((risk) => `- ${risk.filePath}：${risk.message}`).join("\n")}\n\n确认仍要应用这些改动？`)
-      : false;
-
-    if (highRisks.length && !acknowledgeSafeEditRisk) return;
 
     setState((current) => ({ ...current, loading: true, error: null }));
 
@@ -205,10 +202,49 @@ export function usePatchActions({ state, setState, setFiles, refreshTaskSessions
     }
   }
 
+  async function handleRejectExpansionFiles(filePaths: string[]) {
+    if (!state.patch || !filePaths.length) return;
+
+    const patchToReject = state.patch;
+    const rejectedPaths = new Set(filePaths.map((filePath) => filePath.toLowerCase()));
+    const targetFiles = patchToReject.files.filter((file) => rejectedPaths.has(file.path.toLowerCase()));
+    if (!targetFiles.length) return;
+
+    setState((current) => ({ ...current, loading: true, error: null }));
+    try {
+      // 服务端按文件维护 Pending Patch，这里顺序拒绝后再一次性刷新界面，避免中间态闪烁。
+      for (const file of targetFiles) {
+        await rejectPatch(patchToReject.patchId, file.path);
+      }
+      const remainingFiles = patchToReject.files.filter((file) => !rejectedPaths.has(file.path.toLowerCase()));
+      if (!remainingFiles.length) appliedFilesByPatch.current.delete(patchToReject.patchId);
+      void refreshTaskSessions(patchToReject.taskSessionId || state.currentTaskSessionId);
+      setState((current) => ({
+        ...current,
+        loading: false,
+        patch: remainingFiles.length
+          ? {
+              ...patchToReject,
+              files: remainingFiles,
+              diagnostics: patchToReject.diagnostics
+                ? { ...patchToReject.diagnostics, safeEditReport: filterSafeEditReport(patchToReject.diagnostics.safeEditReport, remainingFiles.map((file) => file.path)) }
+                : undefined,
+              oldContent: remainingFiles[0].oldContent,
+              newContent: remainingFiles[0].newContent,
+              diffHtml: remainingFiles.map((file) => '<div class="diff-file-header">' + (file.status === "delete" ? file.path + " (deleted file)" : file.status === "create" ? file.path + " (new file)" : file.path) + "</div>" + file.diffHtml).join("")
+            }
+          : null
+      }));
+    } catch (error) {
+      setState((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : "拒绝计划外文件失败" }));
+    }
+  }
+
   return {
     handleApply,
     rollbackCheckpointAndRefresh,
     handleRollbackLastCheckpoint,
-    handleReject
+    handleReject,
+    handleRejectExpansionFiles
   };
 }

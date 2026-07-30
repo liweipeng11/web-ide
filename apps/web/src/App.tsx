@@ -137,8 +137,8 @@ export default function App() {
     }));
   }
 
-  async function handleApplyPatch(filePath?: string) {
-    await patchActions.handleApply(filePath, commandCenter.handleValidateAndFix);
+  async function handleApplyPatch(filePath?: string, acknowledgeSafeEditRisk = false) {
+    await patchActions.handleApply(filePath, commandCenter.handleValidateAndFix, acknowledgeSafeEditRisk);
   }
 
   async function handleFixDiagnostic(diagnostic: UnifiedDiagnostic, codeActionTitle?: string) {
@@ -176,6 +176,34 @@ export default function App() {
     ].join("\n\n");
     setState((current) => ({ ...current, patch: null, error: null, chatContextPaths: [...new Set([...current.chatContextPaths, file.path])] }));
     await chatSession.handleSendChatMessage(prompt, undefined, undefined, { contextPaths: [file.path], agentMode: "act" });
+  }
+
+  async function handleAnalyzePatchImpact() {
+    if (!state.patch) return;
+    const patch = state.patch;
+    const contextPaths = patch.files.map((file) => file.path);
+    const prompt = [
+      "当前待审核补丁缺少完整的修改范围证据。",
+      `候选文件：${contextPaths.join("、")}`,
+      "请先执行影响分析，核对结构化修改计划、引用关系和相关验证，再基于完整证据重新生成整个可审核补丁。",
+      "不要绕过 Safe Editor，也不要直接应用任何修改。"
+    ].join("\n\n");
+    setState((current) => ({ ...current, patch: null, error: null, chatContextPaths: [...new Set([...current.chatContextPaths, ...contextPaths])] }));
+    await chatSession.handleSendChatMessage(prompt, undefined, undefined, { contextPaths, agentMode: "act" });
+  }
+
+  async function handleRegenerateWholePatch() {
+    if (!state.patch) return;
+    const patch = state.patch;
+    const contextPaths = patch.files.map((file) => file.path);
+    const prompt = [
+      "请重新生成当前整个待审核补丁。",
+      `原补丁摘要：${patch.finalSummary || patch.summary}`,
+      `原候选文件：${contextPaths.join("、")}`,
+      "保留原任务目标，重新确认最小必要修改范围；先补齐所需证据，再返回完整的可审核 Patch。"
+    ].join("\n\n");
+    setState((current) => ({ ...current, patch: null, error: null, chatContextPaths: [...new Set([...current.chatContextPaths, ...contextPaths])] }));
+    await chatSession.handleSendChatMessage(prompt, undefined, undefined, { contextPaths, agentMode: "act" });
   }
 
   async function handleApprovalDecision(step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") {
@@ -297,6 +325,9 @@ export default function App() {
       onDecideApproval={handleApprovalDecision}
       onUpgradeInlineEdit={handleUpgradeInlineEdit}
       onRegeneratePatchFile={handleRegeneratePatchFile}
+      onRegenerateWholePatch={handleRegenerateWholePatch}
+      onAnalyzePatchImpact={handleAnalyzePatchImpact}
+      onRejectExpansionFiles={patchActions.handleRejectExpansionFiles}
     />
   );
 }

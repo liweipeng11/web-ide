@@ -226,25 +226,129 @@
   padding: 9px 18px;
 }
 
-/* Safe Editor 风险提示与普通过滤信息分开展示，避免用户忽略高风险扩散。 */
+/* Safe Editor 的四种状态使用独立语义色，避免把“待分析”误读为真实范围扩散。 */
 .diff-safe-edit {
   display: grid;
-  gap: 6px;
-  padding: 10px 14px;
-  border-bottom: 1px solid #614f24;
-  background: #2d291d;
-  color: #e8d9a3;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+  flex: 0 0 auto;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.diff-safe-edit.warning {
+  border-color: #f0c36d;
+  background: #fff8e8;
+  color: #6f4700;
+}
+
+.diff-safe-edit.needs_analysis {
+  border-color: #87b9ed;
+  background: #eef7ff;
+  color: #174f82;
 }
 
 .diff-safe-edit.high_risk {
-  border-color: #7f3535;
-  background: #321f22;
-  color: #f2b8b8;
+  border-color: #e29a9a;
+  background: #fff1f1;
+  color: #862b2b;
 }
 
-.diff-safe-edit ul {
+.diff-safe-edit p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.diff-safe-edit-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.diff-safe-edit-heading > div {
+  display: flex;
+  gap: 8px;
+}
+
+.diff-safe-edit-heading > div > span {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.safe-edit-status {
+  background: #e2e8f0;
+  border-radius: 999px;
+  color: #475569;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  padding: 3px 8px;
+}
+
+.safe-edit-status.needs_analysis {
+  background: #d7ebff;
+  color: #175a96;
+}
+
+.safe-edit-status.high_risk {
+  background: #ffdede;
+  color: #9f2525;
+}
+
+.safe-edit-file-risks,
+.safe-edit-impact-summary ul {
   margin: 0;
   padding-left: 20px;
+}
+
+.safe-edit-file-risks li {
+  display: grid;
+  gap: 2px;
+  margin: 3px 0;
+}
+
+.safe-edit-file-risks code {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.safe-edit-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.safe-edit-recovery-actions button,
+.safe-edit-dialog button {
+  background: #ffffff;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.safe-edit-impact-summary {
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+
+.safe-edit-apply-blocked {
+  color: #175a96;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 4px;
 }
 
 .safe-edit-role {
@@ -258,6 +362,149 @@
 .safe-edit-role.expansion {
   background: #61383a;
   color: #ffd0d0;
+}
+
+.safe-edit-role.unverified {
+  background: #d7ebff;
+  color: #175a96;
+}
+
+.safe-edit-dialog-backdrop {
+  align-items: center;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 50;
+}
+
+.safe-edit-dialog {
+  background: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.35);
+  color: #1f2d3d;
+  display: flex;
+  flex-direction: column;
+  max-height: min(720px, calc(100vh - 48px));
+  max-width: 720px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.safe-edit-dialog header,
+.safe-edit-dialog footer {
+  padding: 18px 20px;
+}
+
+.safe-edit-dialog header {
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.safe-edit-dialog h2 {
+  font-size: 18px;
+  margin: 4px 0 6px;
+}
+
+.safe-edit-dialog p {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.safe-edit-dialog-kicker {
+  color: #a12c2c;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.safe-edit-dialog-body {
+  display: grid;
+  gap: 16px;
+  overflow: auto;
+  padding: 18px 20px;
+}
+
+.safe-edit-approval-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.safe-edit-approval-facts > div {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 90px 1fr;
+}
+
+.safe-edit-approval-facts dt {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.safe-edit-approval-facts dd {
+  font-size: 12px;
+  margin: 0;
+}
+
+.safe-edit-approval-files {
+  display: grid;
+  gap: 10px;
+}
+
+.safe-edit-approval-files article {
+  background: #fff7f7;
+  border: 1px solid #f0b9b9;
+  border-radius: 7px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.safe-edit-approval-files article > div {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.safe-edit-approval-files code {
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.safe-edit-approval-files ul {
+  font-size: 12px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.safe-edit-dialog footer {
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.safe-edit-dialog button {
+  border-color: #c8d1dc;
+  color: #334155;
+}
+
+.safe-edit-dialog button.danger {
+  background: #b42323;
+  border-color: #b42323;
+  color: #ffffff;
+}
+
+.safe-edit-dialog button:disabled,
+.safe-edit-recovery-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .diff-commands {
@@ -370,6 +617,10 @@
   .diff-modal {
     max-height: calc(100vh - 24px);
     max-width: calc(100vw - 24px);
+  }
+
+  .safe-edit-dialog-backdrop {
+    padding: 12px;
   }
 
   .diff-review-header,

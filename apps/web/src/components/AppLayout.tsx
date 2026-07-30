@@ -77,12 +77,15 @@ type Props = {
   onValidateAndFix: (command: string, options?: { changedFiles?: string[]; failureCategories?: VerificationIssueCategory[]; changeContext?: string }) => Promise<unknown>;
   onGenerate: () => Promise<void>;
   onFixDiagnostic: (diagnostic: UnifiedDiagnostic, codeActionTitle?: string) => Promise<void>;
-  onApplyPatch: (filePath?: string) => Promise<void>;
+  onApplyPatch: (filePath?: string, acknowledgeSafeEditRisk?: boolean) => Promise<void>;
   onRejectPatch: (filePath?: string) => Promise<void>;
   onRollbackCheckpoint: (checkpointId: string) => Promise<void>;
   onDecideApproval: (step: Extract<AgentStep, { type: "approval_request" }>, decision: "approved" | "rejected") => Promise<void>;
   onUpgradeInlineEdit: (request: InlineEditUpgradeRequest) => Promise<void>;
   onRegeneratePatchFile: (file: PatchFileChange) => Promise<void>;
+  onRegenerateWholePatch: () => Promise<void>;
+  onAnalyzePatchImpact: () => Promise<void>;
+  onRejectExpansionFiles: (filePaths: string[]) => Promise<void>;
 };
 
 export default function AppLayout({
@@ -143,7 +146,10 @@ export default function AppLayout({
   onRollbackCheckpoint,
   onDecideApproval,
   onUpgradeInlineEdit,
-  onRegeneratePatchFile
+  onRegeneratePatchFile,
+  onRegenerateWholePatch,
+  onAnalyzePatchImpact,
+  onRejectExpansionFiles
 }: Props) {
   // 优先展示当前正在运行的任务计划，历史任务详情仍在展开面板里维护。
   const activeTaskSession = state.taskSessions.find((session) => session.id === state.currentTaskSessionId) || state.selectedTaskSession || null;
@@ -271,7 +277,18 @@ export default function AppLayout({
           <div className={terminalOpen ? "editor-column terminal-open" : "editor-column"}>
             <Suspense fallback={<PanelLoading label="正在加载编辑器..." fill />}>
               {state.patch ? (
-                <PatchReviewPane patch={state.patch} loading={state.loading} autoFix={state.autoFix} onApply={onApplyPatch} onReject={onRejectPatch} onRunCommand={(command) => void onValidateAndFix(command)} onRegenerateFile={(file) => void onRegeneratePatchFile(file)} />
+                <PatchReviewPane
+                  patch={state.patch}
+                  loading={state.loading}
+                  autoFix={state.autoFix}
+                  onApply={onApplyPatch}
+                  onReject={onRejectPatch}
+                  onRunCommand={(command) => void onValidateAndFix(command)}
+                  onRegenerateFile={(file) => void onRegeneratePatchFile(file)}
+                  onRegeneratePatch={() => void onRegenerateWholePatch()}
+                  onAnalyzeImpact={() => void onAnalyzePatchImpact()}
+                  onRejectExpansionFiles={(filePaths) => void onRejectExpansionFiles(filePaths)}
+                />
               ) : (
                 <EditorPane
                 path={state.selectedPath}

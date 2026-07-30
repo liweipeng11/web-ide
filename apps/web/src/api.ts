@@ -107,6 +107,7 @@ export type PatchGenerationDiagnostics = {
 export type SafeEditStatus = "clean" | "warning" | "needs_analysis" | "high_risk";
 export type SafeEditFileRole = "required" | "supporting" | "validation_only" | "unverified" | "expansion";
 export type SafeEditEvidenceSource = "explicit_target" | "agent_plan" | "impact_analysis" | "planned_file_graph";
+export type SafeEditRiskKind = "scope_expansion" | "missing_impact_analysis" | "incomplete_impact_analysis" | "opportunistic_refactor" | "formatting_only" | "broad_rewrite" | "bulk_rename";
 
 export type SafeEditEvidence = {
   sources: SafeEditEvidenceSource[];
@@ -115,10 +116,19 @@ export type SafeEditEvidence = {
 };
 
 export type SafeEditRisk = {
-  kind: "scope_expansion" | "missing_impact_analysis" | "incomplete_impact_analysis" | "opportunistic_refactor" | "formatting_only" | "broad_rewrite" | "bulk_rename";
+  kind: SafeEditRiskKind;
   level: "low" | "medium" | "high";
   filePath: string;
   message: string;
+};
+
+export type SafeEditFileAssessment = {
+  filePath: string;
+  role: SafeEditFileRole;
+  reasons: string[];
+  addedLines: number;
+  removedLines: number;
+  risks: SafeEditRisk[];
 };
 
 export type SafeEditReport = {
@@ -134,14 +144,7 @@ export type SafeEditReport = {
     evidence?: SafeEditEvidence;
     diagnostics: string[];
   };
-  files: Array<{
-    filePath: string;
-    role: SafeEditFileRole;
-    reasons: string[];
-    addedLines: number;
-    removedLines: number;
-    risks: SafeEditRisk[];
-  }>;
+  files: SafeEditFileAssessment[];
   necessaryFiles: string[];
   expansionFiles: string[];
   risks: SafeEditRisk[];
