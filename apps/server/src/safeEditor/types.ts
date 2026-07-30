@@ -97,3 +97,12 @@ export type EvaluateSafeEditInput = {
   recommendation: SafeEditRecommendation;
   candidates: SafeEditCandidate[];
 };
+
+export type SafeEditTelemetry = {
+  needsAnalysisCount: number;
+  autoAnalysisAttemptCount: number;
+  autoAnalysisSuccessCount: number;
+  confirmedExpansionCount: number;
+  riskAcknowledgementCount: number;
+  falseExpansionRegressionCount: number;
+};

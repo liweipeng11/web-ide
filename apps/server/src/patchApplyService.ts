@@ -5,7 +5,7 @@ import { deletePendingPatch, getPendingPatch, normalizePatchPath, removePendingP
 import { createAgentStep } from "./routeAgentSteps.js";
 import { addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionPatchEvent } from "./taskSessionStore.js";
 import type { AgentStep, CheckpointSource } from "./types.js";
-import { recordTaskPatchMetrics } from "./observability/index.js";
+import { recordTaskPatchMetrics, recordTaskSafeEditorMetrics } from "./observability/index.js";
 
 export type ApplyPendingPatchOptions = {
   patchId: string;
@@ -44,6 +44,7 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
   if (highRisks.length && !options.acknowledgeSafeEditRisk) {
     throw new HttpError(409, `Safe Editor detected high-risk changes that require explicit confirmation: ${highRisks.map((risk) => `${risk.filePath}: ${risk.message}`).join("; ")}`);
   }
+  const riskAcknowledged = highRisks.length > 0 && options.acknowledgeSafeEditRisk === true;
 
   const deleteFiles = targetFiles.filter((file) => file.status === "delete");
 
@@ -134,6 +135,9 @@ export async function applyPendingPatch(options: ApplyPendingPatchOptions) {
   );
   await advanceTaskPlanProgress(patch.taskSessionId, "patch_applied");
   await recordTaskPatchMetrics(patch.taskSessionId, targetFiles.length);
+  if (riskAcknowledged) {
+    await recordTaskSafeEditorMetrics(patch.taskSessionId, { safeEditorRiskAcknowledgementCount: 1 });
+  }
 
   if (options.filePath) {
     const remainingPatch = removePendingPatchFile(patch.patchId, options.filePath);

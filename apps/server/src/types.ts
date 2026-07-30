@@ -589,6 +589,8 @@ export type PatchGenerationDiagnostics = {
   patchCompleteness?: import("./contextSelection/types.js").PatchCompletenessReport;
   // Safe Editor 报告用于在历史记录中区分必要改动和扩散改动。
   safeEditReport?: import("./safeEditor/types.js").SafeEditReport;
+  // 只保存脱敏计数，供运行指标和灰度判定使用。
+  safeEditTelemetry?: import("./safeEditor/types.js").SafeEditTelemetry;
   generatedAt: number;
 };
 

@@ -480,6 +480,27 @@ function analyzeToolResult(content: ModelMessage["content"]) {
   }
 }
 
+function getSafeEditorMetricDelta(content: ModelMessage["content"]) {
+  if (typeof content !== "string") return null;
+  try {
+    const value = JSON.parse(content) as Record<string, unknown>;
+    const telemetry = value?.safeEditTelemetry;
+    if (!telemetry || typeof telemetry !== "object" || Array.isArray(telemetry)) return null;
+    const metrics = telemetry as Record<string, unknown>;
+    const count = (key: string) => typeof metrics[key] === "number" ? Math.max(0, Math.floor(metrics[key] as number)) : 0;
+    return {
+      safeEditorNeedsAnalysisCount: count("needsAnalysisCount"),
+      safeEditorAutoAnalysisAttemptCount: count("autoAnalysisAttemptCount"),
+      safeEditorAutoAnalysisSuccessCount: count("autoAnalysisSuccessCount"),
+      safeEditorConfirmedExpansionCount: count("confirmedExpansionCount"),
+      safeEditorRiskAcknowledgementCount: count("riskAcknowledgementCount"),
+      safeEditorFalseExpansionRegressionCount: count("falseExpansionRegressionCount")
+    };
+  } catch {
+    return null;
+  }
+}
+
 function getAppliedFileEvidence(content: ModelMessage["content"]) {
   if (typeof content !== "string") return { paths: [] as string[], mutationConfirmed: false };
 
@@ -1321,6 +1342,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const progressBefore = await createProgressSnapshot(agentContext, generatedPatchIds, options.taskSessionId, readScopes);
         const result = toModelToolMessage(await executeAgentToolCall(toAgentToolCall(toolCall), toolRuntime));
         const resultMetrics = analyzeToolResult(result.content);
+        const safeEditorMetricDelta = getSafeEditorMetricDelta(result.content);
+        if (safeEditorMetricDelta) metrics.recordSafeEditorMetrics(safeEditorMetricDelta);
         const appliedFilePaths = getConfirmedAppliedFilePaths(toolCall.name, result.content, toolCall.arguments);
         if (!resultMetrics.failed) {
           for (const filePath of appliedFilePaths) directAppliedFiles.add(filePath);

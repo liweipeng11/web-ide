@@ -301,6 +301,7 @@ export function buildPatchGenerationDiagnostics(input: {
   contextSelection?: ContextSelectionSnapshot;
   patchCompleteness?: PatchCompletenessReport;
   safeEditReport?: PatchGenerationDiagnostics["safeEditReport"];
+  safeEditTelemetry?: PatchGenerationDiagnostics["safeEditTelemetry"];
 }): PatchGenerationDiagnostics {
   const noEffectCount = input.records.filter((record) => record.reason === "no_effect_change").length;
 
@@ -319,6 +320,7 @@ export function buildPatchGenerationDiagnostics(input: {
     contextSelection: input.contextSelection,
     patchCompleteness: input.patchCompleteness,
     safeEditReport: input.safeEditReport,
+    safeEditTelemetry: input.safeEditTelemetry,
     generatedAt: Date.now()
   };
 }
@@ -688,10 +690,22 @@ export async function createEditPatchResponse(
     recommendationOverride: safeEditRecommendationOverride,
     previousAnalyses: safeEditOptions.previousAnalyses,
     executeImpactAnalysis: safeEditOptions.executeImpactAnalysis,
+    evidenceV2Enabled: safeEditOptions.evidenceV2Enabled ?? config.featureFlags.safeEditEvidenceV2,
     current: patchSafeEditState
   });
   patchSafeEditState = recoveredSafeEdit.state;
   const safeEditReport = recoveredSafeEdit.report;
+  recordFeatureDecisionDifference({
+    feature: "safeEditEvidenceV2",
+    legacyDecision: {
+      status: recoveredSafeEdit.comparison.legacyStatus,
+      expansionCount: recoveredSafeEdit.comparison.legacyExpansionCount
+    },
+    nextDecision: {
+      status: recoveredSafeEdit.comparison.nextStatus,
+      expansionCount: recoveredSafeEdit.comparison.nextExpansionCount
+    }
+  });
   logRoute(runId, "safeEdit.final", {
     status: safeEditReport.status,
     analysisAttemptCount: patchSafeEditState.analysisAttemptCount,
@@ -708,7 +722,8 @@ export async function createEditPatchResponse(
     records: diagnosticsRecords,
     contextSelection,
     patchCompleteness,
-    safeEditReport
+    safeEditReport,
+    safeEditTelemetry: recoveredSafeEdit.telemetry
   });
   const patch = createPendingPatch(files, taskSessionId, commandsToRun, diagnosticsWithoutPatchId);
   const diagnostics = {

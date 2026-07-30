@@ -1,4 +1,4 @@
-export { buildSafeEditRecommendation, evaluateSafeEdit } from "./safeEditor.js";
+export { buildSafeEditRecommendation, evaluateLegacySafeEdit, evaluateSafeEdit, evaluateSafeEditRollout } from "./safeEditor.js";
 export { resolveSafeEditEvidence } from "./evidence.js";
 export {
   decideImpactPreflight,
@@ -17,6 +17,7 @@ export type {
   EditPatchSafeEditOptions,
   PatchSafeEditPreflightResult
 } from "./patchRecovery.js";
+export type { SafeEditTelemetry } from "./types.js";
 export {
   createStructuredModificationPlan,
   normalizeStructuredModificationPlan,

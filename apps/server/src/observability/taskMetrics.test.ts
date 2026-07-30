@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RunMetricsTracker } from "./runMetrics.js";
-import { clearTaskMetricsForTest, finalizeTaskMetrics, getTaskMetricsSnapshot, recordTaskPatchMetrics } from "./taskMetrics.js";
+import { clearTaskMetricsForTest, finalizeTaskMetrics, getTaskMetricsSnapshot, recordTaskPatchMetrics, recordTaskSafeEditorMetrics } from "./taskMetrics.js";
 
 test("按任务聚合审批前后模型片段、补丁和验证指标", async () => {
   const taskSessionId = "task-metrics-test";
@@ -41,6 +41,39 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   assert.equal(finalized?.result.failureCategory, "none");
   assert.deepEqual(persisted, finalized);
   assert.equal(await getTaskMetricsSnapshot(taskSessionId), null);
+  await clearTaskMetricsForTest({ key: taskSessionId });
+});
+
+test("按任务聚合六项 Safe Editor 灰度指标", async () => {
+  const taskSessionId = "task-safe-editor-metrics-test";
+  await clearTaskMetricsForTest({ key: taskSessionId });
+
+  const tracker = new RunMetricsTracker(
+    { runId: "safe-editor-run", taskSessionId, provider: "mock", model: "mock-v1", mode: "act" },
+    async () => {}
+  );
+  tracker.recordSafeEditorMetrics({
+    safeEditorNeedsAnalysisCount: 1,
+    safeEditorAutoAnalysisAttemptCount: 1,
+    safeEditorAutoAnalysisSuccessCount: 1,
+    safeEditorConfirmedExpansionCount: 2,
+    safeEditorFalseExpansionRegressionCount: 2
+  });
+  await tracker.finish({ status: "awaiting_approval" });
+
+  // 用户审批发生在模型运行结束后，必须继续合并到同一份任务指标。
+  await recordTaskSafeEditorMetrics(taskSessionId, { safeEditorRiskAcknowledgementCount: 1 });
+  const snapshot = await getTaskMetricsSnapshot(taskSessionId);
+
+  assert.ok(snapshot);
+  assert.equal(snapshot.safeEditorNeedsAnalysisCount, 1);
+  assert.equal(snapshot.safeEditorAutoAnalysisAttemptCount, 1);
+  assert.equal(snapshot.safeEditorAutoAnalysisSuccessCount, 1);
+  assert.equal(snapshot.safeEditorConfirmedExpansionCount, 2);
+  assert.equal(snapshot.safeEditorRiskAcknowledgementCount, 1);
+  assert.equal(snapshot.safeEditorFalseExpansionRegressionCount, 2);
+
+  await finalizeTaskMetrics(taskSessionId, "completed", async () => {});
   await clearTaskMetricsForTest({ key: taskSessionId });
 });
 

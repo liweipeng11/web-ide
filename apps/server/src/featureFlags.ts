@@ -6,6 +6,7 @@ export type FeatureFlags = {
   commandExecutionV2: boolean;
   plannedFileResolution: boolean;
   semanticCompletionCheck: boolean;
+  safeEditEvidenceV2: boolean;
 };
 
 export type FeatureImplementations = Record<keyof FeatureFlags, boolean>;
@@ -19,7 +20,8 @@ const featureFlagEnvironmentNames: Record<keyof FeatureFlags, string> = {
   inlineEdit: "INLINE_EDIT_ENABLED",
   commandExecutionV2: "COMMAND_EXECUTION_V2_ENABLED",
   plannedFileResolution: "AGENT_PLANNED_FILE_RESOLUTION",
-  semanticCompletionCheck: "AGENT_SEMANTIC_COMPLETION_CHECK"
+  semanticCompletionCheck: "AGENT_SEMANTIC_COMPLETION_CHECK",
+  safeEditEvidenceV2: "SAFE_EDIT_EVIDENCE_V2_ENABLED"
 };
 
 export const defaultFeatureFlags: FeatureFlags = {
@@ -29,11 +31,12 @@ export const defaultFeatureFlags: FeatureFlags = {
   inlineEdit: true,
   commandExecutionV2: true,
   plannedFileResolution: true,
-  semanticCompletionCheck: true
+  semanticCompletionCheck: true,
+  safeEditEvidenceV2: true
 };
 
 export type FeatureDecisionDifference = {
-  feature: "plannedFileResolution" | "semanticCompletionCheck";
+  feature: "plannedFileResolution" | "semanticCompletionCheck" | "safeEditEvidenceV2";
   legacyDecision: unknown;
   nextDecision: unknown;
 };
@@ -62,7 +65,7 @@ function parseBoolean(value: string | undefined, defaultValue: boolean) {
   return defaultValue;
 }
 
-// 阶段 5 默认启用已完成验收的能力，同时保留环境变量作为紧急回退开关。
+// 阶段 6 默认启用已完成验收的能力，同时保留环境变量作为紧急回退开关。
 export function readFeatureFlags(environment: NodeJS.ProcessEnv = process.env): FeatureFlags {
   return Object.fromEntries(
     (Object.entries(featureFlagEnvironmentNames) as Array<[keyof FeatureFlags, string]>).map(([key, name]) => [key, parseBoolean(environment[name], defaultFeatureFlags[key])])
@@ -116,5 +119,6 @@ export const implementedFeatures: FeatureImplementations = {
   inlineEdit: true,
   commandExecutionV2: true,
   plannedFileResolution: true,
-  semanticCompletionCheck: true
+  semanticCompletionCheck: true,
+  safeEditEvidenceV2: true
 };

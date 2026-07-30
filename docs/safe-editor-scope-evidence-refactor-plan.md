@@ -207,12 +207,45 @@ pnpm verify:safe-editor-stage5
 
 该入口覆盖前端状态展示模型、风险去重、恢复操作和审批契约，以及 Server/Web 类型检查和 Web 生产构建；浏览器手工回归同时覆盖待分析禁用、影响摘要、高风险审批、Escape 返回和窄屏布局。
 
-## 9. 后续阶段边界
+## 9. 阶段 6：端到端验收、灰度和收口
+
+### 9.1 端到端验收
+
+- 离线 Vue 2 夹具完整覆盖结构化双文件计划、自动影响分析、`planned_create` 虚拟文件图、Safe Editor 判定、Pending Patch 应用和项目构建。
+- `main.js` 与 `router/index.js` 在计划、虚拟文件图和影响分析证据完整时保持 `clean`，不再产生虚假 `scope_expansion`。
+- 同一证据下额外出现的 `components/Unrelated.vue` 仍单独产生 `high_risk + scope_expansion`。
+- 最终入口同时执行 Safe Editor 聚焦回归、Server 全量测试、Server/Web 类型检查、Web 生产构建和 Agent 新建文件阶段 0～7 验收。
+
+```powershell
+pnpm verify:safe-editor-stage6
+```
+
+### 9.2 灰度指标
+
+运行指标新增以下脱敏计数，并在同一任务的审批前后、验证运行之间累加：
+
+- `safeEditorNeedsAnalysisCount`
+- `safeEditorAutoAnalysisAttemptCount`
+- `safeEditorAutoAnalysisSuccessCount`
+- `safeEditorConfirmedExpansionCount`
+- `safeEditorRiskAcknowledgementCount`
+- `safeEditorFalseExpansionRegressionCount`
+
+指标只记录状态和数量，不记录源码、Prompt、Diff 正文或文件内容。灰度期重点确认真实扩散无漏检、自动分析成功率稳定，以及新逻辑消除的旧版误报数量符合预期。
+
+### 9.3 灰度与回滚
+
+- `safeEditEvidenceV2` 已完成内部验收并默认开启；服务能力接口会返回实际启用、可用和采用路径。
+- 运行时同时计算脱敏的新旧判定摘要，差异通过现有影子日志记录，实际结果始终由 Feature Flag 决定。
+- 紧急回滚时设置 `SAFE_EDIT_EVIDENCE_V2_ENABLED=0` 并重启 Server，即可恢复阶段 0 的旧判定；无需回滚数据库或用户补丁。
+- 回滚入口至少保留一个发布周期。确认无真实扩散漏检后可移除旧判定，但应继续保留六项指标用于趋势观测。
+
+## 10. 阶段边界
 
 - 阶段 2 至阶段 4 负责建立计划、动态预检和自动恢复，不应通过候选补丁反向扩大安全范围。
 - 阶段 5 负责把 `needs_analysis` 与真实 `high_risk` 在界面和审批动作上分离。
 - 阶段 6 必须同时验证 Vue Router 双文件正常通过，以及 `Unrelated.vue` 继续被拦截。
 
-## 10. 回滚
+## 11. 回滚
 
-阶段 0 不改变运行时行为。若验收入口本身造成环境兼容问题，可独立回滚根命令、PowerShell 脚本、基线测试和本文档，不影响生产链路。
+阶段 0 不改变运行时行为。若验收入口本身造成环境兼容问题，可独立回滚根命令、PowerShell 脚本、基线测试和本文档，不影响生产链路。阶段 6 的运行时判定优先使用 `SAFE_EDIT_EVIDENCE_V2_ENABLED=0` 安全回退，避免直接撤销指标或补丁链路代码。

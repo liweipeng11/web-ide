@@ -1,6 +1,6 @@
 import type { ImpactChangeKind } from "../impactAnalyzer/index.js";
 import { classifySafeEditCandidate } from "./changeClassifier.js";
-import type { BuildSafeEditRecommendationInput, EvaluateSafeEditInput, SafeEditEvidenceSource, SafeEditRecommendation, SafeEditReport } from "./types.js";
+import type { BuildSafeEditRecommendationInput, EvaluateSafeEditInput, SafeEditEvidenceSource, SafeEditFileAssessment, SafeEditRecommendation, SafeEditReport, SafeEditRisk } from "./types.js";
 
 function normalizePath(value: string) {
   return value.trim().replace(/\\/g, "/").replace(/^\.\//, "");
@@ -76,8 +76,7 @@ export function buildSafeEditRecommendation(input: BuildSafeEditRecommendationIn
 }
 
 /** 评估最终候选 diff，并把必要改动与扩散改动分开呈现。 */
-export function evaluateSafeEdit(input: EvaluateSafeEditInput): SafeEditReport {
-  const files = input.candidates.map((candidate) => classifySafeEditCandidate(candidate, input.recommendation, input.taskDescription));
+function createReport(recommendation: SafeEditRecommendation, files: SafeEditFileAssessment[]): SafeEditReport {
   const risks = files.flatMap((file) => file.risks);
   const hasEvidenceGap = risks.some((risk) => risk.kind === "missing_impact_analysis" || risk.kind === "incomplete_impact_analysis");
   const hasConfirmedHighRisk = risks.some(
@@ -85,10 +84,53 @@ export function evaluateSafeEdit(input: EvaluateSafeEditInput): SafeEditReport {
   );
   return {
     status: hasConfirmedHighRisk ? "high_risk" : hasEvidenceGap ? "needs_analysis" : risks.length ? "warning" : "clean",
-    recommendation: input.recommendation,
+    recommendation,
     files,
     necessaryFiles: files.filter((file) => file.role === "required" || file.role === "supporting").map((file) => file.filePath),
     expansionFiles: files.filter((file) => file.role === "validation_only" || file.role === "expansion").map((file) => file.filePath),
     risks
+  };
+}
+
+/** 评估最终候选 diff，并把必要改动与扩散改动分开呈现。 */
+export function evaluateSafeEdit(input: EvaluateSafeEditInput): SafeEditReport {
+  return createReport(
+    input.recommendation,
+    input.candidates.map((candidate) => classifySafeEditCandidate(candidate, input.recommendation, input.taskDescription))
+  );
+}
+
+/**
+ * 保留阶段 0 的旧判定作为一个发布周期内的紧急回滚路径。
+ * 旧逻辑会把“缺少证据”误当成已确认扩散，只用于灰度比较和显式回退。
+ */
+export function evaluateLegacySafeEdit(input: EvaluateSafeEditInput): SafeEditReport {
+  const next = evaluateSafeEdit(input);
+  if (input.recommendation.evidence.sources.length || input.recommendation.evidenceSource !== "none") return next;
+
+  const files = next.files.map((file): SafeEditFileAssessment => {
+    if (file.role !== "unverified") return file;
+    const retainedRisks = file.risks.filter((risk) => risk.kind !== "missing_impact_analysis" && risk.kind !== "incomplete_impact_analysis");
+    const expansionRisk: SafeEditRisk = {
+      kind: "scope_expansion",
+      level: "high",
+      filePath: file.filePath,
+      message: "旧版判定在缺少范围证据时将该文件视为范围扩散。"
+    };
+    return { ...file, role: "expansion", risks: [...retainedRisks, expansionRisk] };
+  });
+  return createReport(input.recommendation, files);
+}
+
+/** 同时计算新旧结果，实际采用路径由 Feature Flag 决定。 */
+export function evaluateSafeEditRollout(input: EvaluateSafeEditInput, evidenceV2Enabled: boolean) {
+  const nextReport = evaluateSafeEdit(input);
+  const legacyReport = evaluateLegacySafeEdit(input);
+  const nextExpansions = new Set(nextReport.expansionFiles.map((filePath) => filePath.toLowerCase()));
+  return {
+    report: evidenceV2Enabled ? nextReport : legacyReport,
+    nextReport,
+    legacyReport,
+    falseExpansionRegressionCount: legacyReport.expansionFiles.filter((filePath) => !nextExpansions.has(filePath.toLowerCase())).length
   };
 }

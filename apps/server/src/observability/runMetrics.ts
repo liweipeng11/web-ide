@@ -64,6 +64,12 @@ export type RunMetrics = {
   usage: ModelUsage;
   // 价格未知时保持 null，禁止用 0 伪装成免费。
   estimatedCostUsd: number | null;
+  safeEditorNeedsAnalysisCount: number;
+  safeEditorAutoAnalysisAttemptCount: number;
+  safeEditorAutoAnalysisSuccessCount: number;
+  safeEditorConfirmedExpansionCount: number;
+  safeEditorRiskAcknowledgementCount: number;
+  safeEditorFalseExpansionRegressionCount: number;
   tools: ToolRuntimeMetrics;
   context: { compressionCount: number; estimatedTokensBefore: number | null; estimatedTokensAfter: number | null; estimator: "conservative" | "unavailable" };
   result: {
@@ -77,6 +83,14 @@ export type RunMetrics = {
 };
 
 export type RunMetricsRecorder = (metrics: RunMetrics) => Promise<void>;
+export type SafeEditorMetricDelta = Partial<Pick<RunMetrics,
+  | "safeEditorNeedsAnalysisCount"
+  | "safeEditorAutoAnalysisAttemptCount"
+  | "safeEditorAutoAnalysisSuccessCount"
+  | "safeEditorConfirmedExpansionCount"
+  | "safeEditorRiskAcknowledgementCount"
+  | "safeEditorFalseExpansionRegressionCount"
+>>;
 
 const metricsWriteQueues = new Map<string, Promise<void>>();
 
@@ -146,6 +160,14 @@ export class RunMetricsTracker {
   private firstTokenLatencySource: RunMetrics["firstTokenLatencySource"] = "unavailable";
   private context: RunMetrics["context"] = { compressionCount: 0, estimatedTokensBefore: null, estimatedTokensAfter: null, estimator: "unavailable" };
   private price: ModelPrice | undefined;
+  private safeEditorMetrics: Required<SafeEditorMetricDelta> = {
+    safeEditorNeedsAnalysisCount: 0,
+    safeEditorAutoAnalysisAttemptCount: 0,
+    safeEditorAutoAnalysisSuccessCount: 0,
+    safeEditorConfirmedExpansionCount: 0,
+    safeEditorRiskAcknowledgementCount: 0,
+    safeEditorFalseExpansionRegressionCount: 0
+  };
 
   constructor(
     private readonly identity: Pick<RunMetrics, "runId" | "taskSessionId" | "provider" | "model" | "mode"> & Partial<Pick<RunMetrics, "scope">>,
@@ -162,6 +184,16 @@ export class RunMetricsTracker {
 
   setPrice(price?: ModelPrice) {
     this.price = price;
+  }
+
+  /** 累加脱敏后的 Safe Editor 事件计数，忽略负数和非有限值。 */
+  recordSafeEditorMetrics(delta: SafeEditorMetricDelta) {
+    for (const key of Object.keys(this.safeEditorMetrics) as Array<keyof SafeEditorMetricDelta>) {
+      const value = delta[key];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        this.safeEditorMetrics[key] += Math.floor(value);
+      }
+    }
   }
 
   private estimateCostUsd() {
@@ -279,6 +311,7 @@ export class RunMetricsTracker {
       firstTokenLatencySource: this.firstTokenLatencySource,
       usage: { ...this.usage },
       estimatedCostUsd: this.estimateCostUsd(),
+      ...this.safeEditorMetrics,
       tools: {
         calls: this.toolCalls,
         repeatedCalls: this.repeatedToolCalls,

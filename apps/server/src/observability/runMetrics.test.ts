@@ -22,6 +22,14 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
     tracker.recordToolCall({ toolName: "searchCode", signature, step: 2, repeated: true });
     tracker.recordToolResult({ signature, cached: true, empty: true });
     tracker.recordToolFailure();
+    tracker.recordSafeEditorMetrics({
+      safeEditorNeedsAnalysisCount: 1,
+      safeEditorAutoAnalysisAttemptCount: 1,
+      safeEditorAutoAnalysisSuccessCount: 1,
+      safeEditorConfirmedExpansionCount: 1,
+      safeEditorRiskAcknowledgementCount: 1,
+      safeEditorFalseExpansionRegressionCount: 2
+    });
     const metrics = await tracker.finish({ status: "completed", patchFileCount: 2, validationCommandCount: 1, validationStatus: "passed" });
     const log = await fs.readFile(filePath, "utf8");
 
@@ -52,6 +60,12 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
     assert.equal(metrics.result.stopReason, "completed");
     assert.equal(metrics.firstTokenLatencyMs, 25);
     assert.equal(metrics.firstTokenLatencySource, "provider");
+    assert.equal(metrics.safeEditorNeedsAnalysisCount, 1);
+    assert.equal(metrics.safeEditorAutoAnalysisAttemptCount, 1);
+    assert.equal(metrics.safeEditorAutoAnalysisSuccessCount, 1);
+    assert.equal(metrics.safeEditorConfirmedExpansionCount, 1);
+    assert.equal(metrics.safeEditorRiskAcknowledgementCount, 1);
+    assert.equal(metrics.safeEditorFalseExpansionRegressionCount, 2);
     assert.equal(log.includes("Authorization"), false);
     assert.equal(log.includes("API_KEY"), false);
   } finally {
@@ -78,6 +92,12 @@ test("并发指标写入保持 UTF-8 JSONL 行完整", async () => {
       firstTokenLatencySource: "unavailable",
       usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cachedInputTokens: 0 },
       estimatedCostUsd: null,
+      safeEditorNeedsAnalysisCount: 0,
+      safeEditorAutoAnalysisAttemptCount: 0,
+      safeEditorAutoAnalysisSuccessCount: 0,
+      safeEditorConfirmedExpansionCount: 0,
+      safeEditorRiskAcknowledgementCount: 0,
+      safeEditorFalseExpansionRegressionCount: 0,
       tools: {
         calls: 0,
         repeatedCalls: 0,

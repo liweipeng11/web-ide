@@ -149,6 +149,7 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
         safeEdit: patch.diagnostics?.safeEditReport
           ? { status: patch.diagnostics.safeEditReport.status, risks: patch.diagnostics.safeEditReport.risks, expansionFiles: patch.diagnostics.safeEditReport.expansionFiles }
           : null,
+        safeEditTelemetry: patch.diagnostics?.safeEditTelemetry || null,
         commandsToRun: patch.commandsToRun || []
       };
     },
@@ -162,7 +163,8 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
         summary: value.summary,
         fileCount: files.length,
         files,
-        safeEdit: value.safeEdit
+        safeEdit: value.safeEdit,
+        safeEditTelemetry: value.safeEditTelemetry
       };
     }
   },

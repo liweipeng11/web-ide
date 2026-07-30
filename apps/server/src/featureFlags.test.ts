@@ -4,17 +4,18 @@ import express from "express";
 import http from "node:http";
 import { createCapabilityRouter } from "./capabilityRoutes.js";
 import { createServerCapabilities, defaultFeatureFlags, readFeatureFlags, recordFeatureDecisionDifference, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
+import { buildSafeEditRecommendation, evaluateSafeEditRollout } from "./safeEditor/index.js";
 
 test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {
   assert.deepEqual(readFeatureFlags({}), defaultFeatureFlags);
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true", AGENT_PLANNED_FILE_RESOLUTION: "true", AGENT_SEMANTIC_COMPLETION_CHECK: "true" }), { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true });
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0", AGENT_PLANNED_FILE_RESOLUTION: "false", AGENT_SEMANTIC_COMPLETION_CHECK: "off" }), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false });
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true", AGENT_PLANNED_FILE_RESOLUTION: "true", AGENT_SEMANTIC_COMPLETION_CHECK: "true", SAFE_EDIT_EVIDENCE_V2_ENABLED: "true" }), { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true, safeEditEvidenceV2: true });
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0", AGENT_PLANNED_FILE_RESOLUTION: "false", AGENT_SEMANTIC_COMPLETION_CHECK: "off", SAFE_EDIT_EVIDENCE_V2_ENABLED: "false" }), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false, safeEditEvidenceV2: false });
   assert.deepEqual(readFeatureFlags({ LSP_ENABLED: "invalid-value" }), defaultFeatureFlags);
 });
 
 test("Capability API 返回脱敏能力快照", async () => {
   const app = express();
-  app.use("/api", createCapabilityRouter({ flags: { contextBudgetV2: true, modelProviderGateway: true, lsp: false, inlineEdit: false, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true }, implementations: { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false }, aiConfigured: true, defaultModel: "mock-model" }));
+  app.use("/api", createCapabilityRouter({ flags: { contextBudgetV2: true, modelProviderGateway: true, lsp: false, inlineEdit: false, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true, safeEditEvidenceV2: true }, implementations: { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false, safeEditEvidenceV2: false }, aiConfigured: true, defaultModel: "mock-model" }));
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
@@ -40,10 +41,10 @@ test("Feature Flag 仅在实现可用时切换新路径，否则保持旧路径"
 });
 
 test("各项 Feature Flag 分别裁决 legacy 和 next 路径", () => {
-  const names = ["contextBudgetV2", "modelProviderGateway", "lsp", "inlineEdit", "commandExecutionV2", "plannedFileResolution", "semanticCompletionCheck"] as const;
-  const allAvailable = { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true };
+  const names = ["contextBudgetV2", "modelProviderGateway", "lsp", "inlineEdit", "commandExecutionV2", "plannedFileResolution", "semanticCompletionCheck", "safeEditEvidenceV2"] as const;
+  const allAvailable = { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true, safeEditEvidenceV2: true };
   for (const name of names) {
-    const disabled = { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false } satisfies FeatureFlags;
+    const disabled = { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false, safeEditEvidenceV2: false } satisfies FeatureFlags;
     assert.equal(resolveFeaturePath(name, disabled, allAvailable), "legacy");
 
     const enabled = { ...disabled, [name]: true };
@@ -69,4 +70,27 @@ test("灰度差异仅记录脱敏后的新旧决策变化", () => {
   assert.equal(logs.length, 1);
   assert.match(logs[0], /plannedFileResolution/);
   assert.doesNotMatch(logs[0], /source|prompt|content/i);
+});
+
+test("Safe Edit Evidence V2 默认启用且可通过环境变量立即回滚", () => {
+  assert.equal(readFeatureFlags({}).safeEditEvidenceV2, true);
+  assert.equal(readFeatureFlags({ SAFE_EDIT_EVIDENCE_V2_ENABLED: "0" }).safeEditEvidenceV2, false);
+  assert.equal(readFeatureFlags({ SAFE_EDIT_EVIDENCE_V2_ENABLED: "1" }).safeEditEvidenceV2, true);
+});
+
+test("Safe Edit Evidence V2 灰度开关可在新旧判定间切换", () => {
+  const input = {
+    taskDescription: "接入 Vue Router",
+    recommendation: buildSafeEditRecommendation({}),
+    candidates: [
+      { filePath: "src/main.js", status: "modify" as const, oldContent: "old", newContent: "new" },
+      { filePath: "src/router/index.js", status: "create" as const, oldContent: "", newContent: "router" }
+    ]
+  };
+  const enabled = evaluateSafeEditRollout(input, true);
+  const rolledBack = evaluateSafeEditRollout(input, false);
+
+  assert.equal(enabled.report.status, "needs_analysis");
+  assert.equal(rolledBack.report.status, "high_risk");
+  assert.equal(enabled.falseExpansionRegressionCount, 2);
 });

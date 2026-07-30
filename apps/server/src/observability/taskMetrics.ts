@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { appStatePath } from "../statePaths.js";
-import { appendRunMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder } from "./runMetrics.js";
+import { appendRunMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta } from "./runMetrics.js";
 
 const taskMetrics = new Map<string, RunMetrics>();
 const taskMetricQueues = new Map<string, Promise<unknown>>();
@@ -29,6 +29,12 @@ function normalizeMetricFields(metrics: RunMetrics) {
   metrics.tools.consecutiveNoProgressSteps ??= 0;
   metrics.tools.maxConsecutiveNoProgressSteps ??= 0;
   metrics.tools.mostRepeatedCall ??= null;
+  metrics.safeEditorNeedsAnalysisCount ??= 0;
+  metrics.safeEditorAutoAnalysisAttemptCount ??= 0;
+  metrics.safeEditorAutoAnalysisSuccessCount ??= 0;
+  metrics.safeEditorConfirmedExpansionCount ??= 0;
+  metrics.safeEditorRiskAcknowledgementCount ??= 0;
+  metrics.safeEditorFalseExpansionRegressionCount ??= 0;
   metrics.result.stopReason ??= metrics.result.status === "completed"
     ? "completed"
     : metrics.result.status === "awaiting_approval"
@@ -145,6 +151,12 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
         // 费用跨多次模型调用累加时统一保留 12 位小数，避免浮点尾差泄漏到 API。
         : Math.round((current.estimatedCostUsd + metrics.estimatedCostUsd) * 1_000_000_000_000) / 1_000_000_000_000;
     }
+    current.safeEditorNeedsAnalysisCount += metrics.safeEditorNeedsAnalysisCount;
+    current.safeEditorAutoAnalysisAttemptCount += metrics.safeEditorAutoAnalysisAttemptCount;
+    current.safeEditorAutoAnalysisSuccessCount += metrics.safeEditorAutoAnalysisSuccessCount;
+    current.safeEditorConfirmedExpansionCount += metrics.safeEditorConfirmedExpansionCount;
+    current.safeEditorRiskAcknowledgementCount += metrics.safeEditorRiskAcknowledgementCount;
+    current.safeEditorFalseExpansionRegressionCount += metrics.safeEditorFalseExpansionRegressionCount;
     current.tools.calls += metrics.tools.calls;
     current.tools.repeatedCalls += metrics.tools.repeatedCalls;
     current.tools.failedCalls += metrics.tools.failedCalls;
@@ -181,6 +193,21 @@ export async function recordTaskPatchMetrics(key: string | null | undefined, pat
     const current = await loadTaskMetrics(key);
     if (!current) return null;
     current.result.patchFileCount = Math.max(current.result.patchFileCount, patchFileCount);
+    await writeSnapshot(key, current);
+    return structuredClone(current);
+  });
+}
+
+/** 审批恢复发生在新模型运行创建前，直接把脱敏事件合并到已有任务指标。 */
+export async function recordTaskSafeEditorMetrics(key: string | null | undefined, delta: SafeEditorMetricDelta) {
+  if (!key) return null;
+  return enqueueTaskMetricUpdate(key, async () => {
+    const current = await loadTaskMetrics(key);
+    if (!current) return null;
+    for (const metric of Object.keys(delta) as Array<keyof SafeEditorMetricDelta>) {
+      const value = delta[metric];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) current[metric] += Math.floor(value);
+    }
     await writeSnapshot(key, current);
     return structuredClone(current);
   });

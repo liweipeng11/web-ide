@@ -1,7 +1,7 @@
 import type { ImpactAnalysisOptions, ImpactAnalysisResult, ImpactChangeTarget } from "../impactAnalyzer/index.js";
 import { decideImpactPreflight, executeImpactPreflight } from "./impactPreflight.js";
-import { buildSafeEditRecommendation, evaluateSafeEdit } from "./safeEditor.js";
-import type { SafeEditCandidate, SafeEditRecommendation, SafeEditReport, StructuredModificationPlan } from "./types.js";
+import { buildSafeEditRecommendation, evaluateSafeEditRollout } from "./safeEditor.js";
+import type { SafeEditCandidate, SafeEditRecommendation, SafeEditReport, SafeEditTelemetry, StructuredModificationPlan } from "./types.js";
 
 export type EditPatchImpactAnalysisExecutor = (
   workspaceRoot: string,
@@ -12,6 +12,7 @@ export type EditPatchImpactAnalysisExecutor = (
 export type EditPatchSafeEditOptions = {
   previousAnalyses?: ImpactAnalysisResult[];
   executeImpactAnalysis?: EditPatchImpactAnalysisExecutor;
+  evidenceV2Enabled?: boolean;
 };
 
 export type PatchSafeEditPreflightResult = {
@@ -27,12 +28,20 @@ type PreparePatchSafeEditInput = {
   recommendationOverride?: SafeEditRecommendation;
   previousAnalyses?: ImpactAnalysisResult[];
   executeImpactAnalysis?: EditPatchImpactAnalysisExecutor;
+  evidenceV2Enabled?: boolean;
 };
 
 type RecoverPatchSafeEditInput = PreparePatchSafeEditInput & {
   taskDescription: string;
   candidates: SafeEditCandidate[];
   current: PatchSafeEditPreflightResult;
+};
+
+type SafeEditRolloutComparison = {
+  legacyStatus: SafeEditReport["status"];
+  nextStatus: SafeEditReport["status"];
+  legacyExpansionCount: number;
+  nextExpansionCount: number;
 };
 
 function formatImpactAnalysisError(error: unknown) {
@@ -100,11 +109,27 @@ export async function preparePatchSafeEditRecommendation(input: PreparePatchSafe
 }
 
 /** needs_analysis 只允许补跑一次；真实扩散和不完整分析都不会进入循环恢复。 */
-export async function recoverPatchSafeEditReport(input: RecoverPatchSafeEditInput): Promise<{ report: SafeEditReport; state: PatchSafeEditPreflightResult }> {
-  let report = evaluateSafeEdit({
+export async function recoverPatchSafeEditReport(input: RecoverPatchSafeEditInput): Promise<{ report: SafeEditReport; state: PatchSafeEditPreflightResult; telemetry: SafeEditTelemetry; comparison: SafeEditRolloutComparison }> {
+  const evaluationInput = {
     taskDescription: input.taskDescription,
     recommendation: input.current.recommendation,
     candidates: input.candidates
+  };
+  const initialRollout = evaluateSafeEditRollout(evaluationInput, input.evidenceV2Enabled ?? true);
+  let report = initialRollout.report;
+  const createTelemetry = (finalState: PatchSafeEditPreflightResult, finalReport: SafeEditReport, falseExpansionRegressionCount: number): SafeEditTelemetry => ({
+    needsAnalysisCount: initialRollout.report.status === "needs_analysis" ? 1 : 0,
+    autoAnalysisAttemptCount: finalState.analysisAttemptCount,
+    autoAnalysisSuccessCount: finalState.analysisAttemptCount > 0 && !finalState.analysisIncomplete && finalReport.status !== "needs_analysis" ? 1 : 0,
+    confirmedExpansionCount: finalReport.files.filter((file) => file.role === "expansion" && file.risks.some((risk) => risk.kind === "scope_expansion")).length,
+    riskAcknowledgementCount: 0,
+    falseExpansionRegressionCount
+  });
+  const createComparison = (rollout: typeof initialRollout): SafeEditRolloutComparison => ({
+    legacyStatus: rollout.legacyReport.status,
+    nextStatus: rollout.nextReport.status,
+    legacyExpansionCount: rollout.legacyReport.expansionFiles.length,
+    nextExpansionCount: rollout.nextReport.expansionFiles.length
   });
   if (
     report.status !== "needs_analysis"
@@ -113,7 +138,12 @@ export async function recoverPatchSafeEditReport(input: RecoverPatchSafeEditInpu
     || !input.modificationPlan
     || !input.executeImpactAnalysis
   ) {
-    return { report, state: input.current };
+    return {
+      report,
+      state: input.current,
+      telemetry: createTelemetry(input.current, report, initialRollout.falseExpansionRegressionCount),
+      comparison: createComparison(initialRollout)
+    };
   }
 
   const recovered = await preparePatchSafeEditRecommendation({
@@ -128,10 +158,16 @@ export async function recoverPatchSafeEditReport(input: RecoverPatchSafeEditInpu
     // 即使执行器异常或策略发生变化，本次恢复也已经消费唯一重试额度。
     analysisAttemptCount: 1
   };
-  report = evaluateSafeEdit({
+  const finalRollout = evaluateSafeEditRollout({
     taskDescription: input.taskDescription,
     recommendation: state.recommendation,
     candidates: input.candidates
-  });
-  return { report, state };
+  }, input.evidenceV2Enabled ?? true);
+  report = finalRollout.report;
+  return {
+    report,
+    state,
+    telemetry: createTelemetry(state, report, finalRollout.falseExpansionRegressionCount),
+    comparison: createComparison(finalRollout)
+  };
 }
