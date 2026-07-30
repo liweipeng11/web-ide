@@ -173,6 +173,36 @@ function getRiskText(riskLevel: ApprovalStep["riskLevel"]) {
   return "低风险";
 }
 
+function getApprovalOperationName(step: ApprovalStep) {
+  const title = typeof step.title === "string" ? step.title.trim() : "";
+  if (title) return title;
+
+  const actionNames: Record<ApprovalStep["actionType"], string> = {
+    inspect_project: "检查项目",
+    search_code: "搜索代码",
+    read_file: "读取文件",
+    edit_files: "编辑文件",
+    run_command: "运行命令",
+    apply_patch: "应用补丁",
+    write_file: "写入文件",
+    delete_file: "删除文件",
+    ask_user: "请求用户确认",
+    tool_call: "调用工具"
+  };
+
+  // 兼容历史审批记录缺少标题的情况，至少展示稳定的操作类型或工具名称。
+  const toolName = isRecord(step.details) && typeof step.details.toolName === "string" ? step.details.toolName.trim() : "";
+  return toolName || actionNames[step.actionType] || "执行智能体操作";
+}
+
+function getApprovalOperationDescription(step: ApprovalStep) {
+  const summary = typeof step.summary === "string" ? step.summary.trim() : "";
+  if (summary) return summary;
+
+  const target = step.command || step.targets?.filter(Boolean).join("、") || "";
+  return target ? `准备对 ${target} 执行此操作，批准后智能体将继续。` : "批准后智能体将执行此操作并继续当前任务。";
+}
+
 function getCommandStatusText(step: Extract<AgentStep, { type: "command" }>) {
   if (step.status === "blocked") return "Blocked";
   if (step.status === "cancelled") return "Cancelled";
@@ -363,6 +393,8 @@ function ApprovalRequestCard({
   onDecideApproval?: (step: ApprovalStep, decision: "approved" | "rejected") => Promise<void>;
 }) {
   const targets = step.command ? [step.command] : step.targets || [];
+  const operationName = getApprovalOperationName(step);
+  const operationDescription = getApprovalOperationDescription(step);
   // 只有 runtime 绑定了 pendingToolCall 的审批才能批准/拒绝，避免普通 diff 预览误显示为工具审批。
   const canDecide = step.status === "pending" && isRuntimeApprovalStep(step) && Boolean(onDecideApproval);
   const processing = pending && canDecide;
@@ -373,8 +405,16 @@ function ApprovalRequestCard({
         <span>{getRiskText(step.riskLevel)}</span>
         <small>{processing ? "处理中..." : getApprovalStatusText(step.status)}</small>
       </div>
-      <strong>{step.title}</strong>
-      <p>{step.summary}</p>
+      <dl className="agent-approval-operation">
+        <div>
+          <dt>操作名称</dt>
+          <dd>{operationName}</dd>
+        </div>
+        <div>
+          <dt>操作描述</dt>
+          <dd>{operationDescription}</dd>
+        </div>
+      </dl>
       {targets.length > 0 && (
         <ul>
           {targets.slice(0, 5).map((target) => (

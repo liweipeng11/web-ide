@@ -1548,16 +1548,34 @@
   color: #647181;
 }
 
-.agent-approval-card strong {
-  color: #1f2d3d;
-  font-size: 11px;
+.agent-approval-operation {
+  display: grid;
+  gap: 6px;
+  margin: 0;
 }
 
-.agent-approval-card p {
-  color: #475569;
+.agent-approval-operation > div {
+  display: grid;
+  gap: 2px;
+}
+
+.agent-approval-operation dt {
+  color: #647181;
   font-size: 10px;
+  font-weight: 700;
+}
+
+.agent-approval-operation dd {
+  color: #1f2d3d;
+  font-size: 11px;
   line-height: 1.45;
   margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-approval-operation > div:last-child dd {
+  color: #475569;
+  font-size: 10px;
 }
 
 .agent-approval-card ul {

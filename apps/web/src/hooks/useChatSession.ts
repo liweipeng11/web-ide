@@ -87,11 +87,19 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
 
   function handleNewChat() {
     streamAbortController.current?.abort();
+    if (pendingChatDeltaTimer.current !== null) {
+      window.clearTimeout(pendingChatDeltaTimer.current);
+      pendingChatDeltaTimer.current = null;
+    }
+    pendingChatDeltas.current = {};
     setState((current) => ({
       ...current,
       chatId: createChatId(),
       chatMessages: [],
       agentSteps: [],
+      // 新对话不再绑定旧任务，否则任务计划和上下文预算会继续从旧会话回填。
+      currentTaskSessionId: null,
+      selectedTaskSession: null,
       chatContextPaths: [],
       userRequest: "",
       agentMode: current.defaultAgentMode,
