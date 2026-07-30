@@ -140,7 +140,8 @@ test("压缩后保留验证失败证据并继续完成修复", async () => {
         return { message: { role: "assistant", toolCalls: [{ id: "validation-call", name: "validateCode", arguments: {} }] }, usage };
       }
       if (modelStep === 2) {
-        failureVisibleAfterCompression = JSON.stringify(request.messages).includes("TypeError TS2322");
+        // 压缩摘要属于系统指令，按新请求契约与普通对话历史分开检查。
+        failureVisibleAfterCompression = JSON.stringify({ systemPrompt: request.systemPrompt, messages: request.messages }).includes("TypeError TS2322");
         return { message: { role: "assistant", toolCalls: [{ id: "repair-call", name: "repairCode", arguments: {} }] }, usage };
       }
       return { message: { role: "assistant", content: "修复完成" }, usage };

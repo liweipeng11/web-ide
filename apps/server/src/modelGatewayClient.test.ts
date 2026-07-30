@@ -17,19 +17,31 @@ test("任务执行上下文覆盖请求体模型并记录普通聊天 Usage", as
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "model-gateway-client-"));
   const selectedModel = "context-selected-model";
   let requestedModel = "";
+  let requestedMessages: Array<{ role: string; content?: string }> = [];
   config.featureFlags.modelProviderGateway = true;
   config.aiApiKey = "test-key";
   config.aiModels = [selectedModel];
   config.stateDirectory = directory;
   globalThis.fetch = async (_url, init) => {
-    requestedModel = (JSON.parse(String(init?.body)) as { model: string }).model;
+    const body = JSON.parse(String(init?.body)) as { model: string; messages: Array<{ role: string; content?: string }> };
+    requestedModel = body.model;
+    requestedMessages = body.messages;
     return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { role: "assistant", content: "ok" } }], usage: { prompt_tokens: 12, completion_tokens: 4 } }), { status: 200 });
   };
   try {
     await clearTaskMetricsForTest({ memoryOnly: true });
-    const response = await withModelExecution({ selection: { providerId: "openai-compatible", modelId: selectedModel }, taskSessionId: "task-model-context", mode: "chat" }, () => requestChatCompletion({ model: "wrong-model", messages: [{ role: "user", content: "hello" }] }));
+    const response = await withModelExecution({ selection: { providerId: "openai-compatible", modelId: selectedModel }, taskSessionId: "task-model-context", mode: "chat" }, () => requestChatCompletion({
+      model: "wrong-model",
+      messages: [
+        { role: "system", content: "固定规则" },
+        { role: "user", content: "hello" },
+        { role: "system", content: "动态状态" }
+      ]
+    }));
     const metrics = await getTaskMetricsSnapshot("task-model-context");
     assert.equal(requestedModel, selectedModel);
+    assert.deepEqual(requestedMessages.map((message) => message.role), ["system", "user"]);
+    assert.match(requestedMessages[0]?.content || "", /固定规则[\s\S]*动态状态/);
     assert.equal(response.choices?.[0]?.message?.content, "ok");
     assert.equal(metrics?.usage.inputTokens, 12);
     assert.equal(metrics?.usage.outputTokens, 4);

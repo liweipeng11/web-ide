@@ -287,6 +287,17 @@ function createInitialMessages(userRequest: string, mode: AgentMode, workflow?: 
   ];
 }
 
+function separateRuntimeSystemPrompt(messages: ModelMessage[], additionalSystemPrompts: Array<string | null | undefined> = []) {
+  const systemParts = messages
+    .filter((message) => message.role === "system" && message.content?.trim())
+    .map((message) => message.content!.trim());
+
+  return {
+    systemPrompt: [...systemParts, ...additionalSystemPrompts.map((prompt) => prompt?.trim()).filter((prompt): prompt is string => Boolean(prompt))].join("\n\n"),
+    conversationMessages: messages.filter((message) => message.role !== "system")
+  };
+}
+
 function toAgentToolCall(toolCall: ModelToolCall): AgentToolCall {
   return {
     id: toolCall.id,
@@ -847,7 +858,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     if (config.featureFlags.modelProviderGateway && implementedFeatures.modelProviderGateway) {
       return providerGateway.complete(
         { providerId, modelId },
-        { messages: request.messages, temperature: request.temperature, tools: request.tools, toolChoice: request.toolChoice },
+        { systemPrompt: request.systemPrompt, messages: request.messages, temperature: request.temperature, tools: request.tools, toolChoice: request.toolChoice },
         options.signal
       );
     }
@@ -938,17 +949,19 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
     logAi(runId, "runtime.completion.request", { step, messageCount: messages.length });
     const negativeEvidenceMessage = buildNegativeEvidenceMessage(agentContext);
-    const workflowProgressMessage: ModelMessage | null = options.workflow
-      ? { role: "system", content: buildTaskWorkflowProgressPrompt(options.workflow, agentContext, currentAvailableToolNames) }
+    const workflowProgressPrompt = options.workflow
+      ? buildTaskWorkflowProgressPrompt(options.workflow, agentContext, currentAvailableToolNames)
       : null;
     const forceFinalMessage = budgetPhase === "force_final"
       ? createForceFinalMessage(agentContext, generatedPatchIds)
       : null;
-    const transientDecisionMessages = [negativeEvidenceMessage, workflowProgressMessage, forceFinalMessage].filter((message): message is ModelMessage => Boolean(message));
+    const transientDecisionMessages = [negativeEvidenceMessage, forceFinalMessage].filter((message): message is ModelMessage => Boolean(message));
+    const separatedRequest = separateRuntimeSystemPrompt(messages, [workflowProgressPrompt]);
     const fullModelRequest: ModelRequest = {
       model: modelId,
+      systemPrompt: separatedRequest.systemPrompt || undefined,
       temperature: config.aiChatTemperature,
-      messages: transientDecisionMessages.length ? [...messages, ...transientDecisionMessages] : messages,
+      messages: transientDecisionMessages.length ? [...separatedRequest.conversationMessages, ...transientDecisionMessages] : separatedRequest.conversationMessages,
       tools: budgetPhase === "force_final" ? [] : visibleToolSchemas,
       toolChoice: budgetPhase === "force_final" ? "none" : "auto"
     };
@@ -957,7 +970,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const taskContextState = await loadRuntimeContextState(options.taskSessionId);
       latestContextSummary ??= taskContextState.contextSummary;
       const prepared = prepareContextBudget({
-        messages: fullModelRequest.messages,
+        messages: [
+          ...(fullModelRequest.systemPrompt ? [{ role: "system" as const, content: fullModelRequest.systemPrompt }] : []),
+          ...fullModelRequest.messages
+        ],
         tools: fullModelRequest.tools,
         agentContext,
         planStatus: taskContextState.planStatus.length ? taskContextState.planStatus : options.workflow?.steps.map((workflowStep) => `pending: ${workflowStep.title}`),
@@ -971,7 +987,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       });
       latestContextBudgetSnapshot = prepared.snapshot;
       latestContextSummary = prepared.summary ?? latestContextSummary;
-      modelRequest = { ...fullModelRequest, messages: prepared.messages };
+      const separatedPrepared = separateRuntimeSystemPrompt(prepared.messages);
+      modelRequest = {
+        ...fullModelRequest,
+        systemPrompt: separatedPrepared.systemPrompt || undefined,
+        messages: separatedPrepared.conversationMessages
+      };
       metrics.recordContextEstimate(prepared.snapshot.estimatedInputTokensBeforeCompression, prepared.snapshot.estimatedInputTokensAfterCompression, prepared.snapshot.automaticCompression);
       // 每次都传播当前有效摘要，避免新 Runtime 丢失上一次压缩状态或保留已经清理的审批。
       await recordTaskSessionContextBudget(options.taskSessionId, prepared.snapshot, latestContextSummary);
@@ -985,7 +1006,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       });
     } else {
       const estimator = new ConservativeTokenEstimator();
-      metrics.recordContextEstimate(estimator.estimateMessages(fullModelRequest.messages) + estimator.estimateValue(fullModelRequest.tools ?? []));
+      metrics.recordContextEstimate(estimator.estimateMessages([
+        ...(fullModelRequest.systemPrompt ? [{ role: "system" as const, content: fullModelRequest.systemPrompt }] : []),
+        ...fullModelRequest.messages
+      ]) + estimator.estimateValue(fullModelRequest.tools ?? []));
     }
     const completionStartedAt = Date.now();
     const completion = await completeModel(modelRequest);

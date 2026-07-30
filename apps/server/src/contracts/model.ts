@@ -62,6 +62,8 @@ export type ModelMessage = {
 
 export type ModelRequest = {
   model: string;
+  // 系统指令独立于对话历史，由各 Provider 适配层转换为对应协议格式。
+  systemPrompt?: string;
   messages: ModelMessage[];
   temperature?: number;
   tools?: unknown[];

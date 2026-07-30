@@ -76,12 +76,34 @@ function toOpenAiMessage(message: ModelMessage): AgentMessage {
   };
 }
 
+function separateSystemPrompt(messages: ModelMessage[]) {
+  const systemParts: string[] = [];
+  const conversationMessages: ModelMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role === "system") {
+      if (message.content?.trim()) systemParts.push(message.content.trim());
+      continue;
+    }
+    conversationMessages.push(message);
+  }
+
+  return { systemPrompt: systemParts.join("\n\n"), conversationMessages };
+}
+
 // 兼容期只在边界转换 OpenAI 字段，业务层统一使用内部契约。
 export function toOpenAiChatCompletionBody(request: ModelRequest) {
+  const separated = separateSystemPrompt(request.messages);
+  const systemPrompt = [request.systemPrompt?.trim(), separated.systemPrompt].filter(Boolean).join("\n\n");
+
   return {
     model: request.model,
     temperature: request.temperature,
-    messages: request.messages.map(toOpenAiMessage),
+    // OpenAI-compatible 模型通常要求 system 只出现在消息开头，因此在边界统一合并。
+    messages: [
+      ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+      ...separated.conversationMessages.map(toOpenAiMessage)
+    ],
     tools: request.tools,
     tool_choice: request.toolChoice,
     response_format: request.responseFormat ? { type: request.responseFormat } : undefined
@@ -90,18 +112,20 @@ export function toOpenAiChatCompletionBody(request: ModelRequest) {
 
 export function fromOpenAiChatCompletionBody(body: Record<string, unknown>): ModelRequest {
   const messages = Array.isArray(body.messages) ? body.messages : [];
+  const separated = separateSystemPrompt(messages.map((message) => {
+    const value = message as AgentMessage;
+    return {
+      role: value.role,
+      content: value.content,
+      toolCallId: value.tool_call_id,
+      toolCalls: value.tool_calls?.map(toModelToolCall)
+    };
+  }));
   return {
     model: typeof body.model === "string" ? body.model : "",
     temperature: typeof body.temperature === "number" ? body.temperature : undefined,
-    messages: messages.map((message) => {
-      const value = message as AgentMessage;
-      return {
-        role: value.role,
-        content: value.content,
-        toolCallId: value.tool_call_id,
-        toolCalls: value.tool_calls?.map(toModelToolCall)
-      };
-    }),
+    systemPrompt: separated.systemPrompt || undefined,
+    messages: separated.conversationMessages,
     tools: Array.isArray(body.tools) ? body.tools : undefined,
     toolChoice: body.tool_choice === "none" || body.tool_choice === "required" ? body.tool_choice : body.tool_choice ? "auto" : undefined,
     responseFormat: (body.response_format as { type?: unknown } | undefined)?.type === "json_object" ? "json_object" : undefined

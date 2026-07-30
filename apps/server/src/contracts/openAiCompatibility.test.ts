@@ -18,3 +18,18 @@ test("内部请求只在 Provider 边界恢复 OpenAI 字段", () => {
   assert.equal(body.messages[0].tool_calls?.[0].function.name, "readFile");
 });
 
+test("Provider 边界将所有系统指令合并到消息开头", () => {
+  const body = toOpenAiChatCompletionBody({
+    model: "mock",
+    systemPrompt: "固定系统规则",
+    messages: [
+      { role: "user", content: "用户任务" },
+      { role: "system", content: "动态工作流状态" },
+      { role: "assistant", content: "处理中" }
+    ]
+  });
+
+  assert.deepEqual(body.messages.map((message) => message.role), ["system", "user", "assistant"]);
+  assert.match(body.messages[0]?.content || "", /固定系统规则/);
+  assert.match(body.messages[0]?.content || "", /动态工作流状态/);
+});

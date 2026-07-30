@@ -401,6 +401,7 @@ test("context budget feature flag override can return to the legacy message path
     { role: "user" as const, content: "current" }
   ];
   let sentMessageCount = 0;
+  let sentSystemPrompt = "";
 
   const result = await runAgentRuntime({
     userRequest: "current",
@@ -409,12 +410,14 @@ test("context budget feature flag override can return to the legacy message path
     contextBudgetEnabled: false,
     completeModel: async (request) => {
       sentMessageCount = request.messages.length;
+      sentSystemPrompt = request.systemPrompt || "";
       return { message: { role: "assistant", content: "done" }, usage: { inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cachedInputTokens: 0 } };
     },
     metricsRecorder: async () => undefined
   });
 
-  assert.equal(sentMessageCount, messages.length);
+  assert.equal(sentMessageCount, messages.length - 1);
+  assert.equal(sentSystemPrompt, "rules");
   assert.equal(result.contextBudgetSnapshot, undefined);
 });
 
@@ -1883,6 +1886,7 @@ test("analysis-only workflow injects its prompt and exposes only read-only tools
   assert.match(messages[0]?.content || "", /Task workflow: analysis-only/);
   assert.equal(messages.some((message) => message.role === "system" && message.content?.includes("Workflow decision state")), true);
   assert.equal(messages.some((message) => message.content?.includes("workspace mutation allowed: false")), true);
+  assert.equal(messages.slice(1).some((message) => message.role === "system"), false);
 });
 
 test("analysis-only workflow blocks side-effect tools even in a custom registry", async () => {

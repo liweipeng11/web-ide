@@ -81,6 +81,7 @@ export async function requestChatCompletion(body: Record<string, unknown>, signa
   const startedAt = Date.now();
   try {
     const response = await providerGateway.complete(selection, {
+      systemPrompt: request.systemPrompt,
       messages: request.messages,
       temperature: request.temperature,
       tools: request.tools,
@@ -148,6 +149,7 @@ export async function requestChatCompletionStream(body: Record<string, unknown>,
   let firstEventRecorded = false;
   try {
     for await (const event of providerGateway.stream(selection, {
+      systemPrompt: request.systemPrompt,
       messages: request.messages,
       temperature: request.temperature,
       tools: request.tools,
