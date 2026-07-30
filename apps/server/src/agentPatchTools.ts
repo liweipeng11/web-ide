@@ -7,7 +7,7 @@ import { getWorkspaceRoot } from "./workspaceStore.js";
 import { config } from "./config.js";
 import { recordFeatureDecisionDifference } from "./featureFlags.js";
 import { parsePlannedChanges } from "./agentModificationPlanTools.js";
-import { buildSafeEditRecommendation, createStructuredModificationPlan, executeImpactPreflight, validateStructuredModificationPlan, type StructuredModificationPlan } from "./safeEditor/index.js";
+import { createStructuredModificationPlan, validateStructuredModificationPlan, type StructuredModificationPlan } from "./safeEditor/index.js";
 import { setTaskSessionModificationPlan } from "./taskSessionStore.js";
 import { executeImpactAnalysis } from "./agentTools.js";
 
@@ -117,27 +117,18 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
       );
       runtime.agentContext.modificationPlan = modificationPlan;
       await setTaskSessionModificationPlan(runtime.taskSessionId, modificationPlan);
-      // 在生成候选补丁前自动补齐必要的影响证据；create 目标由计划文件图证明，不进入静态索引。
-      const preflight = await executeImpactPreflight({
-        workspaceRoot,
-        plan: modificationPlan,
-        previousAnalyses: runtime.agentContext.impactAnalyses,
-        executeAnalysis: (root, targets, options) => executeImpactAnalysis(root, targets, runtime.agentContext, options)
-      });
-      const safeEditRecommendation = buildSafeEditRecommendation({
-        ...(preflight.analysis ? { impactAnalysis: preflight.analysis } : {}),
-        modificationPlan,
-        fallbackTargetFiles: filePath ? [filePath] : [],
-        editableScopeFiles: runtime.agentContext.filesRead,
-        evidence: preflight.evidence
-      });
+      // 由补丁服务统一执行预检与一次性恢复，避免工具层和服务层分别重试造成循环。
       const patch = await createEditPatchResponse(
         filePath,
         userRequest,
         runtime.onAgentStep,
         runtime.taskSessionId || undefined,
-        safeEditRecommendation,
-        modificationPlan
+        undefined,
+        modificationPlan,
+        {
+          previousAnalyses: runtime.agentContext.impactAnalyses,
+          executeImpactAnalysis: (root, targets, options) => executeImpactAnalysis(root, targets, runtime.agentContext, options)
+        }
       );
       const importValidation = await validateAgentGeneratedPatchImports(workspaceRoot, patch.files);
       if (importValidation.unresolved.length) {

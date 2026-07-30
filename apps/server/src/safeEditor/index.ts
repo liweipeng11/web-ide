@@ -11,6 +11,12 @@ export type {
   ImpactPreflightReason,
   ImpactPreflightResult
 } from "./impactPreflight.js";
+export { preparePatchSafeEditRecommendation, recoverPatchSafeEditReport } from "./patchRecovery.js";
+export type {
+  EditPatchImpactAnalysisExecutor,
+  EditPatchSafeEditOptions,
+  PatchSafeEditPreflightResult
+} from "./patchRecovery.js";
 export {
   createStructuredModificationPlan,
   normalizeStructuredModificationPlan,

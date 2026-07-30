@@ -4,8 +4,42 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { buildPatchCompletenessReport, createContextSelectionSnapshot } from "./contextSelection/index.js";
-import { buildFinalPatchSummary, buildPatchGenerationDiagnostics, validateFinalPatchImports } from "./editPatchService.js";
-import { buildSafeEditRecommendation, evaluateSafeEdit } from "./safeEditor/index.js";
+import {
+  buildFinalPatchSummary,
+  buildPatchGenerationDiagnostics,
+  validateFinalPatchImports
+} from "./editPatchService.js";
+import { buildSafeEditRecommendation, createStructuredModificationPlan, evaluateSafeEdit, preparePatchSafeEditRecommendation, recoverPatchSafeEditReport } from "./safeEditor/index.js";
+import type { ImpactAnalysisResult, ImpactChangeTarget } from "./impactAnalyzer/index.js";
+
+function createImpactResult(targets: ImpactChangeTarget[], complete = true): ImpactAnalysisResult {
+  return {
+    analyzedAt: Date.now(),
+    changes: targets.map((target) => ({ ...target, changeKind: target.changeKind || "modify", status: "resolved", definitions: [] })),
+    impactedFiles: [],
+    relatedTests: [],
+    boundaryFiles: [],
+    risk: { level: "low", score: 0, factors: [] },
+    diagnostics: complete ? [] : ["影响索引不完整"],
+    complete,
+    truncated: !complete,
+    indexedFileCount: 2,
+    indexedSymbolCount: 0,
+    unresolvedReferenceCount: complete ? 0 : 1,
+    indexedUnresolvedReferenceCount: complete ? 0 : 1
+  };
+}
+
+function createMultiFilePlan() {
+  return createStructuredModificationPlan({
+    taskDescription: "接入 Vue Router",
+    createdAt: 1,
+    files: [
+      { filePath: "src/main.js", changeKind: "modify", reason: "在应用入口注入 router" },
+      { filePath: "src/router/index.js", changeKind: "create", reason: "新增路由配置" }
+    ]
+  });
+}
 
 test("final patch summary uses cleaned file count instead of model candidate count", () => {
   const summary = buildFinalPatchSummary({
@@ -159,4 +193,111 @@ test("final patch import validation accepts planned files and blocks unknown imp
     ]),
     /unresolved import references.*truly_missing/
   );
+});
+
+test("补丁生成前预检最多执行一次并生成完整组合证据", async () => {
+  const plan = createMultiFilePlan();
+  let analysisCalls = 0;
+  const state = await preparePatchSafeEditRecommendation({
+    workspaceRoot: "C:/workspace",
+    selectedFilePath: null,
+    modificationPlan: plan,
+    executeImpactAnalysis: async (_root, targets) => {
+      analysisCalls += 1;
+      return createImpactResult(targets);
+    }
+  });
+
+  assert.equal(analysisCalls, 1);
+  assert.equal(state.analysisAttemptCount, 1);
+  assert.equal(state.analysisIncomplete, false);
+  assert.deepEqual(state.recommendation.requiredFiles, ["src/main.js", "src/router/index.js"]);
+  assert.deepEqual(state.recommendation.evidence.sources, ["agent_plan", "planned_file_graph", "impact_analysis"]);
+  assert.equal(state.recommendation.evidence.complete, true);
+});
+
+test("分析不完整时停止自动恢复且不会误报范围扩散", async () => {
+  const plan = createMultiFilePlan();
+  let analysisCalls = 0;
+  const state = await preparePatchSafeEditRecommendation({
+    workspaceRoot: "C:/workspace",
+    selectedFilePath: null,
+    modificationPlan: plan,
+    executeImpactAnalysis: async (_root, targets) => {
+      analysisCalls += 1;
+      return createImpactResult(targets, false);
+    }
+  });
+  const recovered = await recoverPatchSafeEditReport({
+    workspaceRoot: "C:/workspace",
+    selectedFilePath: null,
+    taskDescription: plan.taskDescription,
+    modificationPlan: plan,
+    candidates: [
+      { filePath: "src/main.js", status: "modify", oldContent: "old", newContent: "new" },
+      { filePath: "src/router/index.js", status: "create", oldContent: "", newContent: "export default []" }
+    ],
+    current: state,
+    executeImpactAnalysis: async (_root, targets) => {
+      analysisCalls += 1;
+      return createImpactResult(targets);
+    }
+  });
+
+  assert.equal(analysisCalls, 1);
+  assert.equal(recovered.report.status, "needs_analysis");
+  assert.equal(recovered.report.risks.every((risk) => risk.kind === "incomplete_impact_analysis"), true);
+  assert.deepEqual(recovered.report.expansionFiles, []);
+});
+
+test("needs_analysis 自动补跑一次后重新评估原候选补丁", async () => {
+  const plan = createMultiFilePlan();
+  let analysisCalls = 0;
+  const initialRecommendation = buildSafeEditRecommendation({
+    modificationPlan: plan,
+    evidence: { sources: ["agent_plan", "planned_file_graph"], complete: false, diagnostics: ["待补充影响分析"] }
+  });
+  const recovered = await recoverPatchSafeEditReport({
+    workspaceRoot: "C:/workspace",
+    selectedFilePath: null,
+    taskDescription: plan.taskDescription,
+    modificationPlan: plan,
+    candidates: [
+      { filePath: "src/main.js", status: "modify", oldContent: "old", newContent: "new" },
+      { filePath: "src/router/index.js", status: "create", oldContent: "", newContent: "export default []" }
+    ],
+    current: { recommendation: initialRecommendation, analysisAttemptCount: 0, analysisIncomplete: false },
+    executeImpactAnalysis: async (_root, targets) => {
+      analysisCalls += 1;
+      return createImpactResult(targets);
+    }
+  });
+
+  assert.equal(analysisCalls, 1);
+  assert.equal(recovered.state.analysisAttemptCount, 1);
+  assert.equal(recovered.report.status, "clean");
+  assert.equal(recovered.report.risks.some((risk) => risk.kind === "missing_impact_analysis" || risk.kind === "incomplete_impact_analysis"), false);
+});
+
+test("确认的计划外扩散不会触发自动分析或被恢复放行", async () => {
+  const plan = createMultiFilePlan();
+  let analysisCalls = 0;
+  const recommendation = buildSafeEditRecommendation({ modificationPlan: plan });
+  const recovered = await recoverPatchSafeEditReport({
+    workspaceRoot: "C:/workspace",
+    selectedFilePath: null,
+    taskDescription: plan.taskDescription,
+    modificationPlan: plan,
+    candidates: [{ filePath: "src/components/Unrelated.vue", status: "modify", oldContent: "old", newContent: "new" }],
+    current: { recommendation, analysisAttemptCount: 0, analysisIncomplete: false },
+    executeImpactAnalysis: async (_root, targets) => {
+      analysisCalls += 1;
+      return createImpactResult(targets);
+    }
+  });
+
+  assert.equal(analysisCalls, 0);
+  assert.equal(recovered.report.status, "high_risk");
+  assert.deepEqual(recovered.report.expansionFiles, ["src/components/Unrelated.vue"]);
+  assert.equal(recovered.report.risks.some((risk) => risk.kind === "scope_expansion"), true);
 });

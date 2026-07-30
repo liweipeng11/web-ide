@@ -49,13 +49,14 @@ export function buildSafeEditRecommendation(input: BuildSafeEditRecommendationIn
     ...(!analysis && !input.modificationPlan && requiredFiles.length ? ["explicit_target" as const] : [])
   ];
   const evidenceSources = [...new Set([...(input.evidence?.sources || []), ...derivedSources])];
-  const evidenceComplete = analysis
-    ? analysis.complete && (input.evidence?.complete ?? true)
-    : input.modificationPlan
-      ? true
-      : input.evidence
-      ? input.evidence.complete
-      : requiredFiles.length > 0;
+  // 预检显式给出的完整性优先级最高，避免“存在修改计划”掩盖影响分析失败。
+  const evidenceComplete = input.evidence
+    ? input.evidence.complete && (analysis?.complete ?? true)
+    : analysis
+      ? analysis.complete
+      : input.modificationPlan
+        ? true
+        : requiredFiles.length > 0;
   const diagnostics = [...new Set([...(analysis?.diagnostics || []), ...(input.evidence?.diagnostics || [])])];
 
   return {

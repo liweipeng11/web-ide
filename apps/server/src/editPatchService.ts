@@ -16,6 +16,12 @@ import { getWorkspaceRoot } from "./workspaceStore.js";
 import { isValidationCommand, selectDefaultValidationCommand } from "./validationCommand.js";
 import { config } from "./config.js";
 import { recordFeatureDecisionDifference } from "./featureFlags.js";
+import {
+  preparePatchSafeEditRecommendation,
+  recoverPatchSafeEditReport,
+  type EditPatchSafeEditOptions,
+  type SafeEditCandidate,
+} from "./safeEditor/index.js";
 
 const routeLogPreviewChars = 500;
 
@@ -424,7 +430,8 @@ export async function createEditPatchResponse(
   onAgentStep?: (step: AgentStep) => void,
   taskSessionId?: string,
   safeEditRecommendationOverride?: import("./safeEditor/index.js").SafeEditRecommendation,
-  modificationPlanOverride?: import("./safeEditor/index.js").StructuredModificationPlan
+  modificationPlanOverride?: import("./safeEditor/index.js").StructuredModificationPlan,
+  safeEditOptions: EditPatchSafeEditOptions = {}
 ) {
   const workspaceRoot = getWorkspaceRoot();
   if (!workspaceRoot) throw new HttpError(400, "No workspace selected");
@@ -460,6 +467,21 @@ export async function createEditPatchResponse(
     );
     throw new HttpError(428, contextNeed.message);
   }
+
+  // 计划证据和必要的影响分析必须先于模型补丁生成，后续候选结果不能反向扩大安全范围。
+  let patchSafeEditState = await preparePatchSafeEditRecommendation({
+    workspaceRoot,
+    selectedFilePath,
+    modificationPlan: modificationPlanOverride,
+    recommendationOverride: safeEditRecommendationOverride,
+    previousAnalyses: safeEditOptions.previousAnalyses,
+    executeImpactAnalysis: safeEditOptions.executeImpactAnalysis
+  });
+  logRoute(runId, "safeEdit.preflight", {
+    evidenceSources: patchSafeEditState.recommendation.evidence.sources,
+    evidenceComplete: patchSafeEditState.recommendation.evidence.complete,
+    analysisAttemptCount: patchSafeEditState.analysisAttemptCount
+  });
 
   let retryContext: EditPathRetryContext | undefined;
   let aiResult: AiEditResult | null = null;
@@ -641,21 +663,40 @@ export async function createEditPatchResponse(
     snapshot: contextSelection,
     patchFiles: files.map((file) => file.path)
   });
+  const candidates: SafeEditCandidate[] = files.map((file) => ({
+    filePath: file.path,
+    status: file.status,
+    oldContent: file.oldContent,
+    newContent: file.newContent,
+    summary: file.summary
+  }));
   const generatedSafeEditRecommendation = aiResult.editScope?.safeEditRecommendation;
-  // 内层补丁生成若执行了更新的影响分析，应优先使用；否则复用连续 Agent 外层已有证据。
-  const safeEditRecommendation = generatedSafeEditRecommendation?.evidenceSource === "impact_analysis"
-    ? generatedSafeEditRecommendation
-    : safeEditRecommendationOverride || generatedSafeEditRecommendation || buildSafeEditRecommendation({ fallbackTargetFiles: selectedFilePath ? [selectedFilePath] : [] });
-  const safeEditReport = evaluateSafeEdit({
+  // 外层结构化计划是权威边界；只有缺少外层证据时才采用模型内部生成的推荐，避免候选补丁反向扩权。
+  if (!modificationPlanOverride && !safeEditRecommendationOverride && generatedSafeEditRecommendation) {
+    patchSafeEditState = {
+      recommendation: generatedSafeEditRecommendation,
+      analysisAttemptCount: patchSafeEditState.analysisAttemptCount,
+      analysisIncomplete: generatedSafeEditRecommendation.evidence.complete === false
+    };
+  }
+  const recoveredSafeEdit = await recoverPatchSafeEditReport({
+    workspaceRoot,
+    selectedFilePath,
     taskDescription: userRequest,
-    recommendation: safeEditRecommendation,
-    candidates: files.map((file) => ({
-      filePath: file.path,
-      status: file.status,
-      oldContent: file.oldContent,
-      newContent: file.newContent,
-      summary: file.summary
-    }))
+    candidates,
+    modificationPlan: modificationPlanOverride,
+    recommendationOverride: safeEditRecommendationOverride,
+    previousAnalyses: safeEditOptions.previousAnalyses,
+    executeImpactAnalysis: safeEditOptions.executeImpactAnalysis,
+    current: patchSafeEditState
+  });
+  patchSafeEditState = recoveredSafeEdit.state;
+  const safeEditReport = recoveredSafeEdit.report;
+  logRoute(runId, "safeEdit.final", {
+    status: safeEditReport.status,
+    analysisAttemptCount: patchSafeEditState.analysisAttemptCount,
+    analysisIncomplete: patchSafeEditState.analysisIncomplete,
+    expansionFiles: safeEditReport.expansionFiles
   });
   const diagnosticsWithoutPatchId = buildPatchGenerationDiagnostics({
     modelSummary: aiResult.summary,

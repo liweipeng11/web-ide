@@ -155,6 +155,26 @@ test("影响分析与结构化计划组合时合并目标且保留两类证据",
   assert.deepEqual(recommendation.evidence.sources, ["impact_analysis", "agent_plan"]);
 });
 
+test("预检明确失败时修改计划不能把证据覆盖成完整", () => {
+  const modificationPlan = createStructuredModificationPlan({
+    taskDescription: "修改入口和路由",
+    files: [{ filePath: "src/main.ts", changeKind: "modify", reason: "更新入口" }]
+  });
+  const recommendation = buildSafeEditRecommendation({
+    modificationPlan,
+    evidence: { sources: ["agent_plan"], complete: false, diagnostics: ["自动分析失败"] }
+  });
+  const report = evaluateSafeEdit({
+    taskDescription: modificationPlan.taskDescription,
+    recommendation,
+    candidates: [{ filePath: "src/main.ts", status: "modify", oldContent: "old", newContent: "new" }]
+  });
+
+  assert.equal(recommendation.evidence.complete, false);
+  assert.equal(report.status, "needs_analysis");
+  assert.equal(report.risks.some((risk) => risk.kind === "incomplete_impact_analysis"), true);
+});
+
 test("历史报告缺少组合证据字段时仍可反序列化并推导证据", () => {
   const legacyJson = JSON.stringify({
     status: "clean",
