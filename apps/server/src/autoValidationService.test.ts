@@ -84,6 +84,15 @@ function createHarness(options: { policy?: CommandPolicyResult; result?: Command
       statuses.push(status);
       return null;
     },
+    finalizeTaskSession: async ({ runtimeResult, clientClosed }) => {
+      const status = clientClosed || runtimeResult?.status === "cancelled"
+        ? "cancelled"
+        : runtimeResult?.status === "completed"
+          ? "success"
+          : "failed";
+      statuses.push(status);
+      return null;
+    },
     createMetricsTracker: (taskSessionId) => new RunMetricsTracker({ runId: "validation-test", taskSessionId, provider: "local", model: "none", mode: "validation", scope: "validation_run" }, async (metrics) => { recordedMetrics.push(metrics); }, false)
   } as AutoValidationDependencies;
 

@@ -5,7 +5,8 @@ import test from "node:test";
 import { runAgentRuntime } from "../agentRuntime.js";
 import type { AgentContext } from "../agentToolTypes.js";
 import { checkExistence } from "../existenceChecker/index.js";
-import { createTaskSession, getTaskSession, updateTaskSessionStatus } from "../taskSessionStore.js";
+import { createTaskSession, getTaskSession } from "../taskSessionStore.js";
+import { finalizeTaskSession } from "../taskSessionFinalizer.js";
 import { createVue2RouterFixture } from "../testing/vue2RouterFixture.js";
 import { createTaskWorkflow, evaluateTaskWorkflowToolDecision } from "../taskWorkflow/index.js";
 import { setWorkspaceRoot } from "../workspaceStore.js";
@@ -100,7 +101,7 @@ test("任务会话允许 filesChanged 为空时持久化 incomplete", async (con
   await setWorkspaceRoot(fixture.fixtureRoot, { persist: false });
 
   const session = await createTaskSession("新增 Vue 2 路由");
-  const completed = await updateTaskSessionStatus(session.id, "incomplete");
+  const completed = await finalizeTaskSession({ taskSessionId: session.id, runtimeResult: { status: "incomplete" }, source: "agent_runtime" });
   const persisted = await getTaskSession(session.id);
 
   assert.equal(completed?.status, "incomplete");

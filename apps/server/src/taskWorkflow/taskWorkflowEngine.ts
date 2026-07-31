@@ -1,5 +1,5 @@
 import type { AgentRequestClassification } from "../aiClient.js";
-import type { AgentRuntimeStatus, TaskSessionStatus } from "../types.js";
+import type { AgentRuntimeStatus, TaskSessionStatus, TaskSessionTerminalStatus } from "../types.js";
 import { getTaskWorkflowSteps } from "./workflowDefinitions.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./types.js";
 
@@ -89,6 +89,10 @@ export function resolveRuntimeTaskStatus(runtimeStatus: AgentRuntimeStatus): Tas
   if (runtimeStatus === "incomplete") return "incomplete";
   if (runtimeStatus === "blocked") return "blocked";
   return "failed";
+}
+
+export function isTerminalTaskSessionStatus(status: TaskSessionStatus): status is TaskSessionTerminalStatus {
+  return status === "success" || status === "incomplete" || status === "blocked" || status === "failed" || status === "cancelled";
 }
 
 export function resolvePlanModeTaskStatus(workflowType: TaskWorkflowType | undefined, runtimeStatus: AgentRuntimeStatus): TaskSessionStatus {

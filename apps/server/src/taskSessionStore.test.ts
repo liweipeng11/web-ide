@@ -11,6 +11,7 @@ import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, 
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 import { RunMetricsTracker } from "./observability/index.js";
+import { finalizeTaskSession } from "./taskSessionFinalizer.js";
 
 async function createIsolatedTaskSession(userGoal = "实现任务计划器") {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-plan-"));
@@ -66,7 +67,7 @@ test("任务完成时把模型 Usage 和费用写入会话", async () => {
     tracker.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8 });
     tracker.addUsage({ inputTokens: 10, outputTokens: 2, reasoningTokens: 0, cachedInputTokens: 0 });
     await tracker.finish({ status: "completed" });
-    const completed = await updateTaskSessionStatus(session.id, "success");
+    const completed = await finalizeTaskSession({ taskSessionId: session.id, runtimeResult: { status: "completed" }, source: "agent_runtime" });
     assert.deepEqual(completed?.modelUsage, { inputTokens: 10, outputTokens: 2, reasoningTokens: 0, cachedInputTokens: 0 });
     assert.equal(completed?.estimatedCostUsd, 0.000036);
   } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
@@ -75,12 +76,12 @@ test("任务完成时把模型 Usage 和费用写入会话", async () => {
 test("任务会话持久化 incomplete 与 blocked 终态", async () => {
   const { workspaceRoot, session } = await createIsolatedTaskSession("验证阶段 4 状态持久化");
   try {
-    const incomplete = await updateTaskSessionStatus(session.id, "incomplete");
+    const incomplete = await finalizeTaskSession({ taskSessionId: session.id, runtimeResult: { status: "incomplete" }, source: "agent_runtime" });
     assert.equal(incomplete?.status, "incomplete");
     assert.equal((await getTaskSession(session.id)).status, "incomplete");
 
     const blockedSession = await createTaskSession("等待用户选择");
-    const blocked = await updateTaskSessionStatus(blockedSession.id, "blocked");
+    const blocked = await finalizeTaskSession({ taskSessionId: blockedSession.id, runtimeResult: { status: "blocked" }, source: "agent_runtime" });
     assert.equal(blocked?.status, "blocked");
     assert.equal((await getTaskSession(blockedSession.id)).status, "blocked");
   } finally {
@@ -91,10 +92,13 @@ test("任务会话持久化 incomplete 与 blocked 终态", async () => {
 test("任务会话以 UTF-8 原子 JSON 保存 Runtime 六态和完成证据", async () => {
   const { workspaceRoot, session } = await createIsolatedTaskSession("修复中文路由与状态展示");
   try {
-    await updateTaskSessionStatus(session.id, "incomplete", {
-      runtimeStatus: "step_limit_reached",
-      reason: "达到步骤上限，仍有中文计划待处理",
-      completionEvidence: {
+    await finalizeTaskSession({
+      taskSessionId: session.id,
+      source: "agent_runtime",
+      runtimeResult: {
+        status: "step_limit_reached",
+        statusReason: "达到步骤上限，仍有中文计划待处理",
+        completionEvidence: {
         workflowType: "feature",
         mutationExpected: true,
         generatedPatchCount: 0,
@@ -105,6 +109,7 @@ test("任务会话以 UTF-8 原子 JSON 保存 Runtime 六态和完成证据", a
         pendingApprovalCount: 0,
         activeCommandCount: 0,
         failedToolCallCount: 0
+        }
       }
     });
 

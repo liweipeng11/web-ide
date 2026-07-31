@@ -14,8 +14,8 @@ import {
   deleteTaskSession,
   getTaskSession,
   setTaskPlanItems,
-  updateTaskSessionStatus
 } from "../taskSessionStore.js";
+import { finalizeTaskSession } from "../taskSessionFinalizer.js";
 import { createVue2RouterFixture } from "../testing/vue2RouterFixture.js";
 import type { PatchFileChange } from "../types.js";
 import { checkExistence } from "../existenceChecker/index.js";
@@ -136,10 +136,13 @@ test("阶段七：原始 Vue 2 路由任务完成双文件补丁、审批应用�
   assert.deepEqual(applied.files.map((file) => file.path).sort(), [mainPath, routerPath].sort());
   await execAsync("pnpm run build", { cwd: fixture.projectRoot });
   await advanceTaskPlanProgress(session.id, "validation_success");
-  await updateTaskSessionStatus(session.id, "success", {
-    runtimeStatus: "completed",
-    reason: "双文件补丁已审批应用并通过构建验证。",
-    completionEvidence: {
+  await finalizeTaskSession({
+    taskSessionId: session.id,
+    source: "agent_runtime",
+    runtimeResult: {
+      status: "completed",
+      statusReason: "双文件补丁已审批应用并通过构建验证。",
+      completionEvidence: {
       workflowType: "feature",
       mutationExpected: true,
       generatedPatchCount: 1,
@@ -150,6 +153,7 @@ test("阶段七：原始 Vue 2 路由任务完成双文件补丁、审批应用�
       pendingApprovalCount: 0,
       activeCommandCount: 0,
       failedToolCallCount: 0
+      }
     }
   });
 

@@ -4,10 +4,11 @@ import path from "node:path";
 import { getCheckpoint } from "./checkpointStore.js";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
-import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession } from "./types.js";
+import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession, TaskSessionFinalizationSource, TaskSessionTerminalStatus } from "./types.js";
 import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
+import { isTerminalTaskSessionStatus } from "./taskWorkflow/index.js";
 import { getTaskMetricsSnapshot, scheduleTaskMetricsFinalization } from "./observability/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { deleteStoredContextArtifacts } from "./contextBudget/artifactStore.js";
@@ -75,6 +76,8 @@ async function enqueueTaskSessionUpdate(taskSessionId: string, update: (session:
     .then(async () => {
       const session = await readTaskSessionRecord(taskSessionId);
       const updated = await update(session);
+      // finalizer 重复提交同一终态时返回原对象，避免重复写任务文件。
+      if (updated === session) return session;
       await writeTaskSession(updated);
       return updated;
     });
@@ -144,6 +147,21 @@ function isAgentRuntimeStatus(value: unknown): value is NonNullable<TaskSession[
     || value === "blocked"
     || value === "step_limit_reached"
     || value === "no_progress";
+}
+
+function isTaskSessionTerminalStatus(value: unknown): value is TaskSessionTerminalStatus {
+  return isTaskSessionStatus(value) && isTerminalTaskSessionStatus(value);
+}
+
+function isTaskSessionFinalizationSource(value: unknown): value is TaskSessionFinalizationSource {
+  return value === "agent_runtime"
+    || value === "plan_runtime"
+    || value === "auto_validation"
+    || value === "legacy_chat"
+    || value === "provider_error"
+    || value === "client_disconnect"
+    || value === "patch_rejection"
+    || value === "route_error";
 }
 
 function normalizeTaskPlanItems(items: unknown): TaskPlanItem[] {
@@ -550,6 +568,13 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
       && isAgentRuntimeStatus(session.runtimeOutcome.requestedStatus)
       && isAgentRuntimeStatus(session.runtimeOutcome.effectiveStatus)
       ? session.runtimeOutcome
+      : undefined,
+    finalization: session.finalization
+      && typeof session.finalization === "object"
+      && isTaskSessionTerminalStatus(session.finalization.status)
+      && isTaskSessionFinalizationSource(session.finalization.source)
+      && typeof session.finalization.finalizedAt === "number"
+      ? session.finalization
       : undefined,
     agentMode: isAgentMode(session.agentMode) ? session.agentMode : "act",
     workflow: normalizeTaskWorkflow(session.workflow),
@@ -1477,10 +1502,13 @@ export async function updateTaskSessionStatus(
 ) {
   if (!taskSessionId) return null;
 
-  let updated = await enqueueTaskSessionUpdate(taskSessionId, (session) => {
-    if (!["running", "awaiting_approval", "awaiting_user", "paused"].includes(session.status) && status === "cancelled") {
-      return session;
-    }
+  if (isTerminalTaskSessionStatus(status)) {
+    throw new Error(`终态 ${status} 必须通过 finalizeTaskSession 写入`);
+  }
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    // 已终结的任务不可被普通状态更新重新激活。
+    if (isTerminalTaskSessionStatus(session.status)) return session;
 
     return {
       ...session,
@@ -1500,15 +1528,62 @@ export async function updateTaskSessionStatus(
       updatedAt: Date.now()
     };
   });
+}
 
-  if (
-    updated.status === "success"
-    || updated.status === "incomplete"
-    || updated.status === "blocked"
-    || updated.status === "failed"
-    || updated.status === "cancelled"
-  ) {
-    const finalMetricStatus = updated.status === "success" ? "completed" : updated.status;
+export type CommitTaskSessionFinalizationInput = {
+  status: TaskSessionTerminalStatus;
+  source: TaskSessionFinalizationSource;
+  runtimeOutcome?: {
+    runtimeStatus: NonNullable<TaskSession["runtimeStatus"]>;
+    requestedStatus?: NonNullable<TaskSession["runtimeStatus"]>;
+    reason?: string;
+    completionEvidence?: TaskSession["completionEvidence"];
+  };
+};
+
+/**
+ * 仅供 taskSessionFinalizer 使用：在单任务写队列内原子提交第一次终态。
+ */
+export async function commitTaskSessionFinalization(
+  taskSessionId: string | null | undefined,
+  input: CommitTaskSessionFinalizationInput
+) {
+  if (!taskSessionId) return null;
+
+  let transitioned = false;
+  let updated = await enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    if (isTerminalTaskSessionStatus(session.status)) {
+      return session;
+    }
+
+    const finalizedAt = Date.now();
+    transitioned = true;
+    return {
+      ...session,
+      status: input.status,
+      runtimeStatus: input.runtimeOutcome?.runtimeStatus ?? session.runtimeStatus,
+      runtimeStatusReason: input.runtimeOutcome?.reason ?? session.runtimeStatusReason,
+      completionEvidence: input.runtimeOutcome?.completionEvidence ?? session.completionEvidence,
+      runtimeOutcome: input.runtimeOutcome
+        ? {
+            requestedStatus: input.runtimeOutcome.requestedStatus ?? input.runtimeOutcome.runtimeStatus,
+            effectiveStatus: input.runtimeOutcome.runtimeStatus,
+            reason: input.runtimeOutcome.reason,
+            completionEvidence: input.runtimeOutcome.completionEvidence,
+            recordedAt: finalizedAt
+          }
+        : session.runtimeOutcome,
+      finalization: {
+        status: input.status,
+        source: input.source,
+        finalizedAt
+      },
+      updatedAt: finalizedAt
+    };
+  });
+
+  if (transitioned) {
+    const finalMetricStatus = input.status === "success" ? "completed" : input.status;
     const metrics = await getTaskMetricsSnapshot(taskSessionId);
     if (metrics) {
       updated = await enqueueTaskSessionUpdate(taskSessionId, (session) => ({

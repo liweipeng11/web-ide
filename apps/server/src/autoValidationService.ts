@@ -8,6 +8,7 @@ import { getWorkspaceRoot } from "./workspaceStore.js";
 import { RunMetricsTracker } from "./observability/index.js";
 import { createAiRunId } from "./aiHttp.js";
 import { config } from "./config.js";
+import { finalizeTaskSession } from "./taskSessionFinalizer.js";
 
 const defaultMaxAttempts = 3;
 const maxFailurePromptChars = 6_000;
@@ -107,6 +108,7 @@ export type AutoValidationDependencies = {
   appendTaskSessionPatchEvent?: typeof appendTaskSessionPatchEvent;
   advanceTaskPlanProgress: typeof advanceTaskPlanProgress;
   updateTaskSessionStatus: typeof updateTaskSessionStatus;
+  finalizeTaskSession: typeof finalizeTaskSession;
   createMetricsTracker?: (taskSessionId: string | null) => RunMetricsTracker;
 };
 
@@ -118,6 +120,7 @@ const defaultDependencies: AutoValidationDependencies = {
   appendTaskSessionPatchEvent,
   advanceTaskPlanProgress,
   updateTaskSessionStatus,
+  finalizeTaskSession,
   createMetricsTracker: (taskSessionId) => new RunMetricsTracker({
     runId: createAiRunId("validation"),
     taskSessionId,
@@ -194,7 +197,7 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
 
     if (verification.status === "blocked") {
       await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
-      await dependencies.updateTaskSessionStatus(taskSessionId, "failed");
+      await dependencies.finalizeTaskSession({ taskSessionId, runtimeResult: { status: "failed" }, source: "auto_validation" });
       return finish({ status: "blocked", command, attempts, maxAttempts, policy, verification, agentSteps });
     }
 
@@ -204,13 +207,13 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
 
     if (verification.status === "cancelled") {
       await dependencies.advanceTaskPlanProgress(taskSessionId, "task_cancelled");
-      await dependencies.updateTaskSessionStatus(taskSessionId, "cancelled");
+      await dependencies.finalizeTaskSession({ taskSessionId, runtimeResult: { status: "cancelled" }, source: "auto_validation" });
       return finish({ status: "cancelled", command, attempts, maxAttempts, policy, result, verification, agentSteps });
     }
 
     if (verification.status === "success") {
       await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_success");
-      await dependencies.updateTaskSessionStatus(taskSessionId, "success");
+      await dependencies.finalizeTaskSession({ taskSessionId, runtimeResult: { status: "completed" }, source: "auto_validation" });
       return finish({ status: "success", command, attempts, maxAttempts, policy, result, verification, agentSteps });
     }
 
@@ -222,7 +225,7 @@ export function createAutoValidationRunner(dependencies: AutoValidationDependenc
     if (nextAttempt > maxAttempts) {
       pushAgentStep(createAgentStep({ type: "error", message: `Auto-fix stopped after ${maxAttempts} failed repair attempts for: ${command}` }));
       await dependencies.advanceTaskPlanProgress(taskSessionId, "validation_failed");
-      await dependencies.updateTaskSessionStatus(taskSessionId, "failed");
+      await dependencies.finalizeTaskSession({ taskSessionId, runtimeResult: { status: "failed" }, source: "auto_validation" });
       return finish({ status: "max_attempts_reached", command, attempts: maxAttempts, maxAttempts, policy, result, verification, failureSummary, agentSteps });
     }
 

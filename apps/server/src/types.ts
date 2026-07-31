@@ -427,6 +427,18 @@ export type TaskSessionStatus =
   | "cancelled"
   | "awaiting_replan";
 
+export type TaskSessionTerminalStatus = Extract<TaskSessionStatus, "success" | "incomplete" | "blocked" | "failed" | "cancelled">;
+
+export type TaskSessionFinalizationSource =
+  | "agent_runtime"
+  | "plan_runtime"
+  | "auto_validation"
+  | "legacy_chat"
+  | "provider_error"
+  | "client_disconnect"
+  | "patch_rejection"
+  | "route_error";
+
 export type TaskSession = {
   id: string;
   userGoal: string;
@@ -450,6 +462,12 @@ export type TaskSession = {
     reason?: string;
     completionEvidence?: import("./agentCompletionPolicy.js").CompletionEvidence;
     recordedAt: number;
+  };
+  // 终态来源只由统一 finalizer 写入，用于排查 Runtime、路由和持久化状态分歧。
+  finalization?: {
+    status: TaskSessionTerminalStatus;
+    source: TaskSessionFinalizationSource;
+    finalizedAt: number;
   };
   filesRead: string[];
   filesChanged: string[];

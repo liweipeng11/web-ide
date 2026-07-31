@@ -14,6 +14,7 @@ import { runProjectCommand } from "./commandRunner.js";
 import { createMultiFileDiffHtml } from "./diffTools.js";
 import { buildFinalPatchSummary, createEditPatchResponse } from "./editPatchService.js";
 import { runAutoValidation } from "./autoValidationService.js";
+import { finalizeTaskSession } from "./taskSessionFinalizer.js";
 import { listFiles, readWorkspaceFile, writeWorkspaceFile } from "./fileTools.js";
 import { createGitWorkflowRouter } from "./gitWorkflow/routes.js";
 import { createVue2TemplateRouter } from "./vue2Template/routes.js";
@@ -23,9 +24,8 @@ import { applyPendingPatch } from "./patchApplyService.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory, readAgentRulesSettings, writeAgentRulesSettings } from "./projectRules.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
-import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionStatus, updateTaskSessionUserGoal } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
-import { resolvePlanModeTaskStatus, resolveRuntimeTaskStatus } from "./taskWorkflow/index.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
@@ -176,14 +176,20 @@ async function shouldAutoCancelTaskSession(taskSessionId: string | null) {
 async function persistStreamTaskSessionOutcome(
   taskSessionId: string | null,
   progressEvent: Parameters<typeof advanceTaskPlanProgress>[1],
-  status: TaskSession["status"]
+  status: "failed" | "cancelled",
+  failureSource: "provider_error" | "route_error" = "route_error"
 ) {
   if (!taskSessionId) return;
 
   // 错误收尾属于降级路径；即使状态文件仍被占用，也不能让持久化异常再次击穿流式路由。
   const results = await Promise.allSettled([
     advanceTaskPlanProgress(taskSessionId, progressEvent),
-    updateTaskSessionStatus(taskSessionId, status)
+    finalizeTaskSession({
+      taskSessionId,
+      runtimeResult: { status },
+      clientClosed: status === "cancelled",
+      source: status === "cancelled" ? "client_disconnect" : failureSource
+    })
   ]);
 
   results.forEach((result, index) => {
@@ -498,7 +504,7 @@ app.post(
     } catch (error) {
       await Promise.allSettled(taskStepWrites);
       await advanceTaskPlanProgress(taskSession.id, "task_failed");
-      await updateTaskSessionStatus(taskSession.id, "failed");
+      await finalizeTaskSession({ taskSessionId: taskSession.id, runtimeResult: { status: "failed" }, source: "route_error" });
       throw error;
     }
   })
@@ -514,7 +520,7 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
     if (completed) return;
     clientClosed = true;
     void advanceTaskPlanProgress(taskSessionId, "task_cancelled");
-    void updateTaskSessionStatus(taskSessionId, "cancelled");
+    void finalizeTaskSession({ taskSessionId, clientClosed: true, source: "client_disconnect" });
   });
 
   const sendEvent = (event: string, data: unknown) => {
@@ -599,11 +605,11 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
     if (clientClosed) {
       if (await shouldAutoCancelTaskSession(taskSessionId)) {
         await advanceTaskPlanProgress(taskSessionId, "task_cancelled");
-        await updateTaskSessionStatus(taskSessionId, "cancelled");
+        await finalizeTaskSession({ taskSessionId, clientClosed: true, source: "client_disconnect" });
       }
     } else {
       await advanceTaskPlanProgress(taskSessionId, "task_failed");
-      await updateTaskSessionStatus(taskSessionId, "failed");
+      await finalizeTaskSession({ taskSessionId, runtimeResult: { status: "failed" }, source: error instanceof ProviderError ? "provider_error" : "route_error" });
     }
 
     if (!response.headersSent) {
@@ -787,18 +793,16 @@ app.post(
     let runtimeStatus;
     if (runtimePatch) {
       await advanceTaskPlanProgress(taskSessionId, "patch_generated");
-      runtimeStatus = await updateTaskSessionStatus(taskSessionId, "awaiting_approval", {
-        runtimeStatus: "awaiting_approval",
-        requestedStatus: runtimeResult.requestedStatus,
-        reason: runtimeResult.statusReason,
-        completionEvidence: runtimeResult.completionEvidence
+      runtimeStatus = await finalizeTaskSession({
+        taskSessionId,
+        runtimeResult: { ...runtimeResult, status: "awaiting_approval" },
+        source: "agent_runtime"
       });
     } else {
-      runtimeStatus = await updateTaskSessionStatus(taskSessionId, resolveRuntimeTaskStatus(runtimeResult.status), {
-        runtimeStatus: runtimeResult.status,
-        requestedStatus: runtimeResult.requestedStatus,
-        reason: runtimeResult.statusReason,
-        completionEvidence: runtimeResult.completionEvidence
+      runtimeStatus = await finalizeTaskSession({
+        taskSessionId,
+        runtimeResult,
+        source: "agent_runtime"
       });
     }
     const chatId = sessionBeforeDecision.chatId?.trim() || `chat:${taskSessionId}`;
@@ -907,12 +911,12 @@ app.post(
       const messages = await appendFileChatTurn(chatKey, userRequest.trim(), answer);
       await Promise.all(taskStepWrites);
       await advanceTaskPlanProgress(taskSession.id, "validation_success");
-      await updateTaskSessionStatus(taskSession.id, "success");
+      await finalizeTaskSession({ taskSessionId: taskSession.id, runtimeResult: { status: "completed" }, source: "legacy_chat" });
 
       response.json({ messages, taskSessionId: taskSession.id });
     } catch (error) {
       await advanceTaskPlanProgress(taskSession.id, "task_failed");
-      await updateTaskSessionStatus(taskSession.id, "failed");
+      await finalizeTaskSession({ taskSessionId: taskSession.id, runtimeResult: { status: "failed" }, source: error instanceof ProviderError ? "provider_error" : "route_error" });
       throw error;
     }
   })
@@ -1045,16 +1049,16 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       }
       const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
       const workflowType = plannedTaskSession?.workflow?.type || taskSession.workflow?.type;
-      const nextStatus = resolvePlanModeTaskStatus(workflowType, runtimeResult.status);
 
-      if (nextStatus === "success" && workflowType === "analysis-only") {
+      if (runtimeResult.status === "completed" && workflowType === "analysis-only") {
         await advanceTaskPlanProgress(taskSession.id, "validation_success");
       }
-      const completedTaskSession = await updateTaskSessionStatus(taskSession.id, nextStatus, {
-        runtimeStatus: runtimeResult.status,
-        requestedStatus: runtimeResult.requestedStatus,
-        reason: runtimeResult.statusReason,
-        completionEvidence: runtimeResult.completionEvidence
+      const completedTaskSession = await finalizeTaskSession({
+        taskSessionId: taskSession.id,
+        runtimeResult,
+        source: "plan_runtime",
+        mode: "plan",
+        workflowType
       });
 
       completed = true;
@@ -1095,18 +1099,16 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       let runtimeProgressedTaskSession;
       if (runtimePatch) {
         await advanceTaskPlanProgress(taskSession.id, "patch_generated");
-        runtimeProgressedTaskSession = await updateTaskSessionStatus(taskSession.id, "awaiting_approval", {
-          runtimeStatus: "awaiting_approval",
-          requestedStatus: runtimeResult.requestedStatus,
-          reason: runtimeResult.statusReason,
-          completionEvidence: runtimeResult.completionEvidence
+        runtimeProgressedTaskSession = await finalizeTaskSession({
+          taskSessionId: taskSession.id,
+          runtimeResult: { ...runtimeResult, status: "awaiting_approval" },
+          source: "agent_runtime"
         });
       } else {
-        runtimeProgressedTaskSession = await updateTaskSessionStatus(taskSession.id, resolveRuntimeTaskStatus(runtimeResult.status), {
-          runtimeStatus: runtimeResult.status,
-          requestedStatus: runtimeResult.requestedStatus,
-          reason: runtimeResult.statusReason,
-          completionEvidence: runtimeResult.completionEvidence
+        runtimeProgressedTaskSession = await finalizeTaskSession({
+          taskSessionId: taskSession.id,
+          runtimeResult,
+          source: "agent_runtime"
         });
       }
       const runtimeAnswer = buildDeferredRuntimeAnswer(runtimeResult, runtimePatch) || "";
@@ -1143,8 +1145,13 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
 
     completed = true;
     await Promise.all(taskStepWrites);
-    const completedTaskSession = await advanceTaskPlanProgress(taskSession.id, "validation_success");
-    await updateTaskSessionStatus(taskSession.id, clientClosed ? "cancelled" : "success");
+    await advanceTaskPlanProgress(taskSession.id, "validation_success");
+    const completedTaskSession = await finalizeTaskSession({
+      taskSessionId: taskSession.id,
+      runtimeResult: { status: "completed" },
+      clientClosed,
+      source: "legacy_chat"
+    });
     if (completedTaskSession) {
       sendEvent("task_session", { session: completedTaskSession });
     }
@@ -1157,7 +1164,8 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     await persistStreamTaskSessionOutcome(
       taskSessionId,
       clientClosed ? "task_cancelled" : "task_failed",
-      clientClosed ? "cancelled" : "failed"
+      clientClosed ? "cancelled" : "failed",
+      error instanceof ProviderError ? "provider_error" : "route_error"
     );
 
     if (!response.headersSent) {
@@ -1291,7 +1299,7 @@ app.post(
           }
         });
         await advanceTaskPlanProgress(patch.taskSessionId, "task_cancelled");
-        await updateTaskSessionStatus(patch.taskSessionId, "cancelled");
+        await finalizeTaskSession({ taskSessionId: patch.taskSessionId, runtimeResult: { status: "cancelled" }, source: "patch_rejection" });
       }
     } else {
       const patch = getPendingPatch(patchId);
@@ -1323,7 +1331,7 @@ app.post(
         });
       }
       await advanceTaskPlanProgress(patch?.taskSessionId, "task_cancelled");
-      await updateTaskSessionStatus(patch?.taskSessionId, "cancelled");
+      await finalizeTaskSession({ taskSessionId: patch?.taskSessionId, runtimeResult: { status: "cancelled" }, source: "patch_rejection" });
     }
 
     response.json({ success: true });
