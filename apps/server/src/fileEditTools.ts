@@ -53,6 +53,19 @@ function createToolResult(result: FileEditResult, checkpointId?: string): AgentF
   };
 }
 
+function createNoOpToolResult(filePath: string, content: string, replacements?: number) {
+  // 无变化编辑在生命周期外直接返回，避免创建 checkpoint 或写入任务会话状态。
+  return createToolResult({
+    filePath,
+    oldContent: content,
+    finalContent: content,
+    changed: false,
+    replacements,
+    beforeExists: true,
+    afterExists: true
+  });
+}
+
 function summarizeFileEditResult(result: unknown, cached: boolean) {
   const value = result && typeof result === "object" && !Array.isArray(result) ? (result as AgentFileEditToolResult) : null;
 
@@ -198,18 +211,31 @@ export const fileEditToolDefinitions: AgentToolDefinition[] = [
     },
     async execute(args, runtime) {
       const filePath = requiredString(args, "filePath");
+      const search = requiredRawString(args, "search");
+      const replace = requiredRawString(args, "replace");
+      const replaceAll = optionalBoolean(args, "replaceAll");
+
+      // 先预计算完整结果；完全相同时不进入会产生任务状态写入的编辑生命周期。
+      if (search) {
+        const oldContent = await readWorkspaceFile(filePath);
+        const resolved = resolveSearchReplaceContent(oldContent, search, replace, replaceAll);
+        if (resolved?.content === oldContent) {
+          return createNoOpToolResult(filePath, oldContent, resolved.replacements);
+        }
+      }
+
       // replacement 中新增的 import 必须先在真实工作区中解析成功，防止直接编辑绕过 Agent 门禁。
-      await ensureWrittenImportsExist(requiredRawString(args, "replace"), filePath);
+      await ensureWrittenImportsExist(replace, filePath);
       const result = await executeFileEditWithLifecycle("replaceInFile", filePath, runtime, async () => {
         const oldContent = await readWorkspaceFile(filePath);
-        const resolved = resolveSearchReplaceContent(oldContent, requiredRawString(args, "search"), requiredRawString(args, "replace"), optionalBoolean(args, "replaceAll"));
+        const resolved = resolveSearchReplaceContent(oldContent, search, replace, replaceAll);
         if (!resolved) throw new SearchReplaceMismatchError(filePath);
         assertDirectEditIsSafe({ filePath, status: "modify", oldContent, newContent: resolved.content, runtime });
         return replaceInFile({
           filePath,
-          search: requiredRawString(args, "search"),
-          replace: requiredRawString(args, "replace"),
-          replaceAll: optionalBoolean(args, "replaceAll")
+          search,
+          replace,
+          replaceAll
         });
       });
 
@@ -243,20 +269,32 @@ export const fileEditToolDefinitions: AgentToolDefinition[] = [
     },
     async execute(args, runtime) {
       const filePath = requiredString(args, "filePath");
+      const content = requiredRawString(args, "content");
+      const createIfMissing = optionalBoolean(args, "createIfMissing");
+      const exists = await workspacePathExists(filePath);
+
+      if (exists) {
+        const oldContent = await readWorkspaceFile(filePath);
+        if (oldContent === content) {
+          return createNoOpToolResult(filePath, oldContent);
+        }
+      }
+
       // 全量写入前校验最终内容中的 import，避免将不存在的模块落盘。
-      await ensureWrittenImportsExist(requiredRawString(args, "content"), filePath);
+      await ensureWrittenImportsExist(content, filePath);
       const result = await executeFileEditWithLifecycle("writeFile", filePath, runtime, async () => {
-        const exists = await workspacePathExists(filePath);
+        // no-op 预检后文件状态可能变化，真实编辑前重新读取以维持安全边界。
+        const currentExists = await workspacePathExists(filePath);
         // createIfMissing 只是创建授权，不得用它覆盖未读取的已有文件。
-        if (exists && !runtime.agentContext.filesRead.includes(filePath)) {
+        if (currentExists && !runtime.agentContext.filesRead.includes(filePath)) {
           throw new Error(`Cannot overwrite unread file: ${filePath}. Read the existing file before writing.`);
         }
-        const oldContent = exists ? await readWorkspaceFile(filePath) : "";
-        assertDirectEditIsSafe({ filePath, status: exists ? "modify" : "create", oldContent, newContent: requiredRawString(args, "content"), runtime });
+        const oldContent = currentExists ? await readWorkspaceFile(filePath) : "";
+        assertDirectEditIsSafe({ filePath, status: currentExists ? "modify" : "create", oldContent, newContent: content, runtime });
         return writeFile({
           filePath,
-          content: requiredRawString(args, "content"),
-          createIfMissing: optionalBoolean(args, "createIfMissing")
+          content,
+          createIfMissing
         });
       });
 

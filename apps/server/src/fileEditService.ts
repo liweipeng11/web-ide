@@ -47,6 +47,19 @@ export async function replaceInFile(input: ReplaceInFileInput): Promise<FileEdit
     throw new SearchReplaceMismatchError(input.filePath);
   }
 
+  // 替换结果与原内容完全一致时直接返回，避免无意义写盘触发文件监听器。
+  if (resolved.content === oldContent) {
+    return {
+      filePath: input.filePath,
+      oldContent,
+      finalContent: oldContent,
+      changed: false,
+      replacements: resolved.replacements,
+      beforeExists: true,
+      afterExists: true
+    };
+  }
+
   await writeWorkspaceFile(input.filePath, resolved.content);
   const finalContent = await readWorkspaceFile(input.filePath);
 
@@ -70,7 +83,6 @@ export async function writeFile(input: WriteFileInput): Promise<FileEditResult> 
 
   try {
     oldContent = await readWorkspaceFile(input.filePath);
-    await writeWorkspaceFile(input.filePath, input.content);
   } catch (error) {
     if (!isFileNotFoundError(error) || !input.createIfMissing) {
       throw error;
@@ -78,6 +90,22 @@ export async function writeFile(input: WriteFileInput): Promise<FileEditResult> 
 
     beforeExists = false;
     await createWorkspaceFile(input.filePath, input.content);
+  }
+
+  // 已有文件内容完全相同时保留原文件元数据，并返回完整内容供后续链路使用。
+  if (beforeExists && oldContent === input.content) {
+    return {
+      filePath: input.filePath,
+      oldContent,
+      finalContent: oldContent,
+      changed: false,
+      beforeExists: true,
+      afterExists: true
+    };
+  }
+
+  if (beforeExists) {
+    await writeWorkspaceFile(input.filePath, input.content);
   }
 
   const finalContent = await readWorkspaceFile(input.filePath);

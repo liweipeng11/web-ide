@@ -232,7 +232,8 @@ export default function App() {
       setState((current) => ({
         ...current,
         chatMessages: result.messages || current.chatMessages,
-        patch: result.patch ?? current.patch
+        // 审批接口返回 null 表示旧补丁已经被本次运行时操作消费，只有未返回 patch 字段时才保留当前预览。
+        patch: Object.prototype.hasOwnProperty.call(result, "patch") ? result.patch ?? null : current.patch
       }));
     } catch (error) {
       setState((current) => ({ ...current, error: error instanceof Error ? error.message : "处理审批失败" }));

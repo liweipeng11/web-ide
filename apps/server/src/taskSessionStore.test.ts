@@ -127,6 +127,55 @@ test("任务会话以 UTF-8 原子 JSON 保存 Runtime 六态和完成证据", a
   }
 });
 
+test("任务会话原子替换遇到短暂文件占用时会重试", async (t) => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-rename-retry-"));
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const originalRename = fs.rename.bind(fs);
+  let renameAttempts = 0;
+
+  t.mock.method(fs, "rename", async (...args: Parameters<typeof fs.rename>) => {
+    renameAttempts += 1;
+    if (renameAttempts < 3) {
+      const error = new Error("target file is temporarily locked") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    }
+    return originalRename(...args);
+  });
+
+  try {
+    const session = await createTaskSession("验证 Windows 文件占用重试");
+    assert.equal((await getTaskSession(session.id)).userGoal, "验证 Windows 文件占用重试");
+    assert.equal(renameAttempts, 3);
+    const directory = projectRuntimeDirectory("task-sessions");
+    assert.deepEqual((await fs.readdir(directory)).filter((name) => name.endsWith(".tmp")), []);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("任务会话原子替换不会重试非文件占用错误", async (t) => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-rename-failure-"));
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  let renameAttempts = 0;
+
+  t.mock.method(fs, "rename", async () => {
+    renameAttempts += 1;
+    const error = new Error("invalid rename target") as NodeJS.ErrnoException;
+    error.code = "EINVAL";
+    throw error;
+  });
+
+  try {
+    await assert.rejects(() => createTaskSession("验证非占用错误直接失败"), /invalid rename target/);
+    assert.equal(renameAttempts, 1);
+    const directory = projectRuntimeDirectory("task-sessions");
+    assert.deepEqual((await fs.readdir(directory)).filter((name) => name.endsWith(".tmp")), []);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("rejects empty task plan item titles", async () => {
   const { session } = await createIsolatedTaskSession();
 

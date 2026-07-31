@@ -173,6 +173,27 @@ async function shouldAutoCancelTaskSession(taskSessionId: string | null) {
   }
 }
 
+async function persistStreamTaskSessionOutcome(
+  taskSessionId: string | null,
+  progressEvent: Parameters<typeof advanceTaskPlanProgress>[1],
+  status: TaskSession["status"]
+) {
+  if (!taskSessionId) return;
+
+  // 错误收尾属于降级路径；即使状态文件仍被占用，也不能让持久化异常再次击穿流式路由。
+  const results = await Promise.allSettled([
+    advanceTaskPlanProgress(taskSessionId, progressEvent),
+    updateTaskSessionStatus(taskSessionId, status)
+  ]);
+
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      const operation = index === 0 ? "task plan progress" : "task session status";
+      console.error("Failed to persist stream cleanup operation:", operation, result.reason);
+    }
+  });
+}
+
 function summarizeTaskSessionList(title: string, values: string[]) {
   if (!values.length) return "";
 
@@ -911,8 +932,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     controller.abort();
     void (async () => {
       if (!(await shouldAutoCancelTaskSession(taskSessionId))) return;
-      await advanceTaskPlanProgress(taskSessionId, "task_cancelled");
-      await updateTaskSessionStatus(taskSessionId, "cancelled");
+      await persistStreamTaskSessionOutcome(taskSessionId, "task_cancelled", "cancelled");
     })();
   });
 
@@ -1134,8 +1154,11 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     completed = true;
     const message = error instanceof Error ? error.message : "Internal server error";
     console.error(message);
-    await advanceTaskPlanProgress(taskSessionId, clientClosed ? "task_cancelled" : "task_failed");
-    await updateTaskSessionStatus(taskSessionId, clientClosed ? "cancelled" : "failed");
+    await persistStreamTaskSessionOutcome(
+      taskSessionId,
+      clientClosed ? "task_cancelled" : "task_failed",
+      clientClosed ? "cancelled" : "failed"
+    );
 
     if (!response.headersSent) {
       response.status(error instanceof HttpError ? error.status : 500).json({ error: message });

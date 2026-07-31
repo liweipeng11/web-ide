@@ -18,6 +18,13 @@ async function withTempWorkspace(run: (workspaceRoot: string) => Promise<void>) 
   }
 }
 
+async function setStablePastMtime(filePath: string) {
+  // 使用固定的过去时间，确保误写盘时 mtime 变化能够被稳定检测。
+  const stableTime = new Date("2020-01-02T03:04:05.000Z");
+  await fs.utimes(filePath, stableTime, stableTime);
+  return (await fs.stat(filePath)).mtimeMs;
+}
+
 test("replaceInFile 可以替换单个精确片段", async () => {
   await withTempWorkspace(async (workspaceRoot) => {
     await fs.writeFile(path.join(workspaceRoot, "hello.txt"), "hello world\nhello codex\n", "utf8");
@@ -138,5 +145,60 @@ test("writeFile 在 createIfMissing=true 时创建文件", async () => {
     assert.equal(result.finalContent, "created content");
     assert.equal(result.changed, true);
     assert.equal(await fs.readFile(path.join(workspaceRoot, "nested", "new-file.txt"), "utf8"), "created content");
+  });
+});
+
+test("replaceInFile 搜索和替换内容相同时不写盘", async () => {
+  await withTempWorkspace(async (workspaceRoot) => {
+    const filePath = path.join(workspaceRoot, "hello.txt");
+    await fs.writeFile(filePath, "hello world\n", "utf8");
+    const previousMtimeMs = await setStablePastMtime(filePath);
+
+    const result = await replaceInFile({
+      filePath: "hello.txt",
+      search: "hello",
+      replace: "hello"
+    });
+
+    assert.equal(result.oldContent, "hello world\n");
+    assert.equal(result.finalContent, "hello world\n");
+    assert.equal(result.changed, false);
+    assert.equal(result.replacements, 1);
+    assert.equal((await fs.stat(filePath)).mtimeMs, previousMtimeMs);
+  });
+});
+
+test("writeFile 写入相同内容时不写盘并返回完整内容", async () => {
+  await withTempWorkspace(async (workspaceRoot) => {
+    const filePath = path.join(workspaceRoot, "note.txt");
+    await fs.writeFile(filePath, "same content\n", "utf8");
+    const previousMtimeMs = await setStablePastMtime(filePath);
+
+    const result = await writeFile({
+      filePath: "note.txt",
+      content: "same content\n"
+    });
+
+    assert.equal(result.oldContent, "same content\n");
+    assert.equal(result.finalContent, "same content\n");
+    assert.equal(result.changed, false);
+    assert.equal(result.beforeExists, true);
+    assert.equal((await fs.stat(filePath)).mtimeMs, previousMtimeMs);
+  });
+});
+
+test("writeFile 将空格和换行差异视为真实变更", async () => {
+  await withTempWorkspace(async (workspaceRoot) => {
+    const filePath = path.join(workspaceRoot, "format.txt");
+    await fs.writeFile(filePath, "line one\nline two\n", "utf8");
+
+    const result = await writeFile({
+      filePath: "format.txt",
+      content: "line one \r\nline two\n"
+    });
+
+    assert.equal(result.changed, true);
+    assert.equal(result.finalContent, "line one \r\nline two\n");
+    assert.equal(await fs.readFile(filePath, "utf8"), "line one \r\nline two\n");
   });
 });

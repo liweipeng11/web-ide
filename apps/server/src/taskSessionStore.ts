@@ -43,6 +43,30 @@ function withoutValues(values: string[], excluded: string[]) {
 }
 
 const taskSessionWriteQueues = new Map<string, Promise<unknown>>();
+const taskSessionRenameRetryDelaysMs = [20, 50, 100, 200, 400];
+
+function isRetryableTaskSessionRenameError(error: unknown) {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+
+async function renameTaskSessionFileWithRetry(source: string, destination: string) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(source, destination);
+      return;
+    } catch (error) {
+      const delayMs = taskSessionRenameRetryDelaysMs[attempt];
+
+      if (delayMs === undefined || !isRetryableTaskSessionRenameError(error)) {
+        throw error;
+      }
+
+      // Windows 的杀毒、索引或同步程序可能短暂占用目标文件，等待后重试可保留原子替换语义。
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
 
 async function enqueueTaskSessionUpdate(taskSessionId: string, update: (session: TaskSession) => TaskSession | Promise<TaskSession>) {
   const previous = taskSessionWriteQueues.get(taskSessionId) || Promise.resolve();
@@ -624,7 +648,7 @@ async function writeTaskSession(session: TaskSession) {
   try {
     // 同目录临时文件 + rename 保证读者只会看到旧版本或完整新版本，且显式使用 UTF-8 保存中文。
     await fs.writeFile(temporary, `${JSON.stringify(session, null, 2)}\n`, "utf8");
-    await fs.rename(temporary, destination);
+    await renameTaskSessionFileWithRetry(temporary, destination);
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => undefined);
   }

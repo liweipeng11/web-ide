@@ -8,6 +8,7 @@ import { executeAgentToolCall } from "./agentTools.js";
 import { getCheckpoint, rollbackCheckpoint } from "./checkpointStore.js";
 import { fileEditToolDefinitions } from "./fileEditTools.js";
 import { runtimeAgentToolRegistry } from "./runtimeAgentTools.js";
+import { projectRuntimeDirectory } from "./statePaths.js";
 import { createTaskSession, getTaskSession } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import type { AgentFileEditToolResult, AgentToolRuntime } from "./agentToolTypes.js";
@@ -39,6 +40,13 @@ async function withTempWorkspace(run: (workspaceRoot: string) => Promise<void>) 
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }
+}
+
+async function listCheckpointFiles() {
+  return fs.readdir(projectRuntimeDirectory("checkpoints")).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
 }
 
 test("runtime registry 同时暴露新编辑工具和旧 patch 工具", () => {
@@ -167,6 +175,75 @@ test("replaceInFile 工具会记录 task session 事件并生成可回滚 checkp
 
     await rollbackCheckpoint(content.checkpointId || "");
     assert.equal(await fs.readFile(path.join(workspaceRoot, "target.ts"), "utf8"), "const value = 'before';\n");
+  });
+});
+
+test("无变化编辑不会创建 checkpoint 或更新任务会话生命周期", async () => {
+  await withTempWorkspace(async (workspaceRoot) => {
+    await fs.writeFile(path.join(workspaceRoot, "target.ts"), "export const value = 1;\n", "utf8");
+    await fs.writeFile(path.join(workspaceRoot, "note.txt"), "same content\n", "utf8");
+    const session = await createTaskSession("忽略无变化编辑");
+    const steps: AgentStep[] = [];
+    const runtime = createToolRuntime({
+      taskSessionId: session.id,
+      agentContext: {
+        userGoal: "忽略无变化编辑",
+        filesRead: ["target.ts", "note.txt"],
+        searchQueries: [],
+        searchResultFiles: [],
+        relevantFiles: []
+      },
+      onAgentStep(step) {
+        steps.push(step);
+      }
+    });
+    const checkpointFilesBefore = await listCheckpointFiles();
+    const taskSessionPath = path.join(projectRuntimeDirectory("task-sessions"), `${session.id}.json`);
+    const stableTime = new Date("2020-01-02T03:04:05.000Z");
+    await fs.utimes(taskSessionPath, stableTime, stableTime);
+    const taskSessionMtimeBefore = (await fs.stat(taskSessionPath)).mtimeMs;
+
+    const replaceMessage = await executeAgentToolCall(
+      {
+        id: "tool-replace-no-op-1",
+        type: "function",
+        function: {
+          name: "replaceInFile",
+          arguments: JSON.stringify({ filePath: "target.ts", search: "value = 1", replace: "value = 1" })
+        }
+      },
+      runtime
+    );
+    const writeMessage = await executeAgentToolCall(
+      {
+        id: "tool-write-no-op-1",
+        type: "function",
+        function: {
+          name: "writeFile",
+          arguments: JSON.stringify({ filePath: "note.txt", content: "same content\n" })
+        }
+      },
+      runtime
+    );
+
+    const replaceResult = JSON.parse(replaceMessage.content) as AgentFileEditToolResult;
+    const writeResult = JSON.parse(writeMessage.content) as AgentFileEditToolResult;
+    const loaded = await getTaskSession(session.id);
+
+    assert.equal(replaceResult.changed, false);
+    assert.equal(replaceResult.replacements, 1);
+    assert.equal(replaceResult.finalContent, "export const value = 1;\n");
+    assert.equal(replaceResult.checkpointId, undefined);
+    assert.equal(writeResult.changed, false);
+    assert.equal(writeResult.finalContent, "same content\n");
+    assert.equal(writeResult.checkpointId, undefined);
+    assert.deepEqual(loaded.checkpointIds, []);
+    assert.deepEqual(loaded.filesChanged, []);
+    assert.deepEqual(loaded.fileEditEvents, []);
+    assert.equal(steps.some((step) => step.type === "checkpoint"), false);
+    assert.deepEqual(await listCheckpointFiles(), checkpointFilesBefore);
+    // no-op 不触发任何任务会话更新，持久化 JSON 的修改时间也必须保持不变。
+    assert.equal((await fs.stat(taskSessionPath)).mtimeMs, taskSessionMtimeBefore);
   });
 });
 
