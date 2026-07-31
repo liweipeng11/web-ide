@@ -1072,7 +1072,8 @@ export async function getTaskSessionContextState(taskSessionId: string) {
     planItems: session.planItems ?? [],
     planApproval: session.planApproval,
     filesChanged: session.filesChanged,
-    contextSummary: session.contextSummary
+    contextSummary: session.contextSummary,
+    pendingToolCall: session.pendingToolCall
   };
 }
 

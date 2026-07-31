@@ -71,3 +71,12 @@ test("收敛阶段保留精确读取、门禁解除、编辑与验证工具", ()
   const visible = filterToolSchemasForBudgetPhase([...retained, ...blocked].map(schema), "convergence");
   assert.deepEqual(visible.map((item) => item.function.name), retained);
 });
+
+test("最终预算轮只保留显式完成工具", () => {
+  assert.equal(isToolAvailableInBudgetPhase("completeTask", "force_final"), true);
+  assert.equal(isToolAvailableInBudgetPhase("writeFile", "force_final"), false);
+  assert.deepEqual(filterToolSchemasForBudgetPhase([
+    { function: { name: "completeTask" } },
+    { function: { name: "runCommand" } }
+  ], "force_final"), [{ function: { name: "completeTask" } }]);
+});

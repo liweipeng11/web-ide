@@ -78,7 +78,7 @@ export type RunMetrics = {
     failureCategory: RunFailureCategory;
     patchFileCount: number;
     validationCommandCount: number;
-    validationStatus: "not_run" | "passed" | "failed";
+    validationStatus: "not_required" | "not_run" | "passed" | "failed" | "unavailable";
   };
 };
 
@@ -141,6 +141,7 @@ export class RunMetricsTracker {
   private toolCalls = 0;
   private repeatedToolCalls = 0;
   private failedToolCalls = 0;
+  private completionEvidenceFailedToolCalls = 0;
   private cacheHits = 0;
   private emptyResults = 0;
   private invalidToolCalls = 0;
@@ -252,8 +253,14 @@ export class RunMetricsTracker {
     this.consecutiveNoProgressSteps = 0;
   }
 
-  recordToolFailure() {
+  recordToolFailure(input: { completionEvidence?: boolean } = {}) {
     this.failedToolCalls += 1;
+    if (input.completionEvidence !== false) this.completionEvidenceFailedToolCalls += 1;
+  }
+
+  /** 向完成策略提供只读快照，避免策略直接依赖指标对象的内部计数。 */
+  getCompletionEvidenceSnapshot() {
+    return { failedToolCallCount: this.completionEvidenceFailedToolCalls };
   }
 
   private getMostRepeatedCall(): MostRepeatedToolCall | null {

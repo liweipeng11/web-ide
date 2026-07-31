@@ -101,7 +101,10 @@ test("任务会话以 UTF-8 原子 JSON 保存 Runtime 六态和完成证据", a
         changedFileCount: 0,
         pendingPlanCount: 4,
         blockedPlanCount: 0,
-        validationAttempted: false
+        validationStatus: "not_run",
+        pendingApprovalCount: 0,
+        activeCommandCount: 0,
+        failedToolCallCount: 0
       }
     });
 

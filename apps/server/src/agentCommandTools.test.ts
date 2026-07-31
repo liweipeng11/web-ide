@@ -68,7 +68,9 @@ test("runCommand emits running and success command steps", async () => {
   assert.equal(summary.cached, false);
   assert.equal(summary.result?.status, "success");
   assert.deepEqual(commandStatuses(steps), ["running", "success"]);
-  assert.deepEqual(runtime.agentContext.commandsRun, [{ command: "pnpm test", status: "success", exitCode: 0 }]);
+  assert.deepEqual(runtime.agentContext.commandsRun?.map(({ finishedAt, ...command }) => ({ ...command, hasFinishedAt: typeof finishedAt === "number" })), [
+    { command: "pnpm test", status: "success", exitCode: 0, validation: true, hasFinishedAt: true }
+  ]);
 });
 
 test("runCommand returns failed status details for model repair loop", async () => {
@@ -91,7 +93,9 @@ test("runCommand 保留用户主动取消状态", async () => {
   await tool.execute({ command: "pnpm test" }, runtime);
 
   assert.deepEqual(commandStatuses(steps), ["running", "cancelled"]);
-  assert.deepEqual(runtime.agentContext.commandsRun, [{ command: "pnpm test", status: "cancelled", exitCode: null }]);
+  assert.deepEqual(runtime.agentContext.commandsRun?.map(({ finishedAt, ...command }) => ({ ...command, hasFinishedAt: typeof finishedAt === "number" })), [
+    { command: "pnpm test", status: "cancelled", exitCode: null, validation: true, hasFinishedAt: true }
+  ]);
 });
 
 test("runCommand 将后台模式和超时参数传给统一执行内核", async () => {
@@ -101,6 +105,15 @@ test("runCommand 将后台模式和超时参数传给统一执行内核", async 
   await tool.execute({ command: "npm run dev", mode: "background", waitTimeoutMs: 15000, readyPattern: "ready" }, createRuntime((step) => steps.push(step)));
   assert.deepEqual(received, { mode: "background", waitTimeoutMs: 15000, executionTimeoutMs: undefined, readyPattern: "ready", initiator: "agent" });
   assert.deepEqual(commandStatuses(steps), ["running", "running"]);
+});
+
+test("runCommand 不把普通检查命令误记为验证", async () => {
+  const runtime = createRuntime();
+  const tool = createTool({ result: commandResult("success", "git status --short") });
+
+  await tool.execute({ command: "git status --short" }, runtime);
+
+  assert.equal(runtime.agentContext.commandsRun?.[0]?.validation, false);
 });
 
 test("runCommand blocks command when command policy rejects it", async () => {

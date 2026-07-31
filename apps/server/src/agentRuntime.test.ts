@@ -9,6 +9,7 @@ import type { AgentStep } from "./types.js";
 import { createTaskWorkflow } from "./taskWorkflow/index.js";
 import type { RunMetrics } from "./observability/index.js";
 import { resolveAgentNoProgressPolicy, resolveAgentRepeatToolCallThresholds } from "./config.js";
+import { completionAgentToolDefinitions } from "./agentCompletionTools.js";
 
 function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runtime: AgentToolRuntime) => void): AgentToolDefinition {
   return {
@@ -28,6 +29,215 @@ function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runti
     }
   };
 }
+
+function createModelToolCall(id: string, name: string, args: Record<string, unknown>) {
+  return {
+    id,
+    type: "function" as const,
+    function: { name, arguments: JSON.stringify(args) }
+  };
+}
+
+test("启用显式完成协议后，自然停止不能直接 completed", async () => {
+  let completionCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "分析当前实现",
+    mode: "plan",
+    maxSteps: 2,
+    contextBudgetEnabled: false,
+    registry: createAgentToolRegistry(completionAgentToolDefinitions),
+    requestCompletion: async () => {
+      completionCount += 1;
+      return { choices: [{ message: { role: "assistant", content: "分析已经完成。" } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "incomplete");
+  assert.equal(completionCount, 2);
+  assert.match(result.statusReason ?? "", /没有调用 completeTask/);
+  assert.equal(result.messages.some((message) => message.role === "user" && String(message.content).includes("completeTask")), true);
+});
+
+test("completeTask 与编辑工具混用时整轮拒绝且不执行编辑", async () => {
+  let editExecutionCount = 0;
+  let completionCount = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("replaceInFile", { changed: true, filePath: "src/a.ts" }, () => { editExecutionCount += 1; }),
+    ...completionAgentToolDefinitions
+  ]);
+  const result = await runAgentRuntime({
+    userRequest: "分析并在需要时修改 src/a.ts",
+    mode: "plan",
+    maxSteps: 3,
+    contextBudgetEnabled: false,
+    registry,
+    requestCompletion: async () => {
+      completionCount += 1;
+      return completionCount === 1
+        ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+            createModelToolCall("edit-mixed", "replaceInFile", { filePath: "src/a.ts", search: "a", replace: "b" }),
+            createModelToolCall("complete-mixed", "completeTask", { summary: "已完成", verified: true })
+          ] } }] }
+        : { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+            createModelToolCall("complete-only", "completeTask", { summary: "分析已完成", verified: true })
+          ] } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(editExecutionCount, 0);
+  assert.equal(completionCount, 2);
+  assert.equal(result.messages.some((message) => message.role === "tool" && String(message.content).includes("must be the only tool call")), true);
+});
+
+test("completeTask 参数不完整时返回工具错误并允许下一轮修正", async () => {
+  let completionCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "分析错误边界",
+    mode: "plan",
+    maxSteps: 3,
+    contextBudgetEnabled: false,
+    registry: createAgentToolRegistry(completionAgentToolDefinitions),
+    requestCompletion: async () => {
+      completionCount += 1;
+      return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+        completionCount === 1
+          ? createModelToolCall("invalid-complete", "completeTask", { summary: "分析完成" })
+          : createModelToolCall("valid-complete", "completeTask", { summary: "分析完成", verified: true })
+      ] } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(completionCount, 2);
+  assert.equal(result.messages.some((message) => message.role === "tool" && String(message.content).includes("verified is required")), true);
+});
+
+test("completeTask 证据不足时继续运行，真实编辑后才能完成", async () => {
+  let completionCount = 0;
+  const steps: AgentStep[] = [];
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("replaceInFile", { changed: true, filePath: "src/a.ts" }),
+    ...completionAgentToolDefinitions
+  ]);
+  const result = await runAgentRuntime({
+    userRequest: "修改 src/a.ts",
+    mode: "act",
+    maxSteps: 4,
+    contextBudgetEnabled: false,
+    registry,
+    onAgentStep: (step) => steps.push(step),
+    requestCompletion: async () => {
+      completionCount += 1;
+      if (completionCount === 1) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("premature-complete", "completeTask", { summary: "修改完成", verified: true })
+        ] } }] };
+      }
+      if (completionCount === 2) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("apply-edit", "replaceInFile", { filePath: "src/a.ts", search: "a", replace: "b" })
+        ] } }] };
+      }
+      return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+        createModelToolCall("verified-complete", "completeTask", { summary: "修改完成", verified: true, validationSummary: "已检查工具结果" })
+      ] } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(completionCount, 3);
+  assert.equal(result.messages.some((message) => message.role === "tool" && String(message.content).includes("completeTask was rejected")), true);
+  assert.equal(result.completionEvidence?.changedFileCount, 1);
+  assert.equal(steps.filter((step) => step.type === "message" && step.content === "修改完成").length, 1);
+});
+
+test("编辑任务必须在最后变更后获得成功验证才能 completeTask", async () => {
+  let completionCount = 0;
+  let validationAttempt = 0;
+  let capturedMetrics: RunMetrics | undefined;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("replaceInFile", { changed: true, filePath: "src/a.ts" }),
+    // 注册 runCommand 表示环境具备验证能力；recordValidation 模拟审批后返回的命令结果。
+    createRuntimeTestTool("runCommand", {}),
+    createRuntimeTestTool("recordValidation", {}, (runtime) => {
+      validationAttempt += 1;
+      runtime.agentContext.commandsRun = [
+        ...(runtime.agentContext.commandsRun ?? []),
+        {
+          command: "pnpm test",
+          status: validationAttempt === 1 ? "failed" : "success",
+          exitCode: validationAttempt === 1 ? 1 : 0,
+          validation: true,
+          finishedAt: Date.now() + validationAttempt
+        }
+      ];
+    }),
+    ...completionAgentToolDefinitions
+  ]);
+
+  const result = await runAgentRuntime({
+    userRequest: "修改 src/a.ts 并运行测试",
+    mode: "act",
+    maxSteps: 8,
+    contextBudgetEnabled: false,
+    registry,
+    requestCompletion: async () => {
+      completionCount += 1;
+      if (completionCount === 1) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("edit-before-validation", "replaceInFile", { filePath: "src/a.ts" })
+        ] } }] };
+      }
+      if (completionCount === 2 || completionCount === 4) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall(`validation-${completionCount}`, "recordValidation", { command: "pnpm test", attempt: completionCount })
+        ] } }] };
+      }
+      return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+        createModelToolCall(`complete-${completionCount}`, "completeTask", { summary: "修改和验证完成", verified: true, validationSummary: "pnpm test 通过" })
+      ] } }] };
+    },
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; }
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(completionCount, 5);
+  assert.equal(result.completionEvidence?.validationStatus, "passed");
+  assert.equal(result.completionEvidence?.lastValidationAt !== undefined, true);
+  assert.equal(result.messages.some((message) => message.role === "tool" && String(message.content).includes("验证命令执行失败")), true);
+  assert.equal(capturedMetrics?.result.validationStatus, "passed");
+  assert.equal(capturedMetrics?.result.validationCommandCount, 2);
+});
+
+test("verified:false 不会结束 Runtime，并按证据返回 incomplete", async () => {
+  let completionCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "分析验证状态",
+    mode: "plan",
+    maxSteps: 3,
+    contextBudgetEnabled: false,
+    registry: createAgentToolRegistry(completionAgentToolDefinitions),
+    requestCompletion: async () => {
+      completionCount += 1;
+      return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+        completionCount === 1
+          ? createModelToolCall("unverified-complete", "completeTask", { summary: "分析完成但尚未验证", verified: false })
+          : createModelToolCall("verified-complete", "completeTask", { summary: "分析和验证均已完成", verified: true })
+      ] } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(completionCount, 2);
+  assert.equal(result.messages.some((message) => message.role === "tool"
+    && String(message.content).includes('"completionStatus":"incomplete"')), true);
+});
 
 test("编辑任务零交付物会恢复一次并返回 incomplete", async () => {
   const steps: AgentStep[] = [];
@@ -1284,6 +1494,8 @@ test("agent runtime pauses before approval-required tools", async () => {
   assert.equal(result.pendingToolCall?.toolName, "runCommand");
   assert.equal(result.pendingToolCall?.riskLevel, "medium");
   assert.deepEqual(result.pendingToolCall?.agentContext?.filesRead, ["src/service.ts"]);
+  assert.equal(result.completionEvidence?.pendingApprovalCount, 1);
+  assert.match(result.statusReason ?? "", /等待用户审批/);
   assert.equal(executed, false);
   assert.deepEqual(steps, [{ type: "approval_request", status: "pending", actionType: "run_command" }]);
 });
@@ -1701,7 +1913,9 @@ test("plan mode exposes only readonly tools to the model", async () => {
     requestCompletion: async (body) => {
       requests.push(body);
       return {
-        choices: [{ message: { role: "assistant", content: "Plan completed." } }]
+        choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("complete-plan", "completeTask", { summary: "Plan completed.", verified: true })
+        ] } }]
       };
     }
   });
@@ -1709,7 +1923,7 @@ test("plan mode exposes only readonly tools to the model", async () => {
   const toolNames = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   assert.equal(result.status, "completed");
   // Symbol Graph 和 External Context Gateway 都是只读上下文能力，因此规划模式也应允许使用。
-  assert.deepEqual(toolNames.sort(), ["analyzeImpact", "analyzeSymbolGraph", "browseWebPage", "checkExistence", "fetchApiDocs", "findSimilarPatterns", "getExternalContextStatus", "inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "recoverContextArtifact", "searchCode", "searchCodeRegex", "searchFilesByName", "searchOfficialDocs", "searchWeb", "sequenceReasoning"].sort());
+  assert.deepEqual(toolNames.sort(), ["analyzeImpact", "analyzeSymbolGraph", "browseWebPage", "checkExistence", "completeTask", "fetchApiDocs", "findSimilarPatterns", "getExternalContextStatus", "inspectProject", "listCodeDefinitionNames", "listFiles", "readFile", "readFileChunk", "readFileRange", "recoverContextArtifact", "searchCode", "searchCodeRegex", "searchFilesByName", "searchOfficialDocs", "searchWeb", "sequenceReasoning"].sort());
 });
 
 test("act mode exposes edit, patch, and command tools to the model", async () => {

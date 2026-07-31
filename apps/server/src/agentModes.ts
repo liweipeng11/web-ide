@@ -6,6 +6,7 @@ import { readonlyAgentToolDefinitions } from "./agentTools.js";
 import { AI_AGENT_ACT_SYSTEM_PROMPT, AI_AGENT_PLAN_SYSTEM_PROMPT } from "./prompts.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
 import { externalBrowserAgentToolDefinitions } from "./externalContext/index.js";
+import { completionAgentToolDefinitions } from "./agentCompletionTools.js";
 
 export type AgentMode = "plan" | "act";
 
@@ -23,11 +24,15 @@ const actToolDefinitions: AgentToolDefinition[] = [
   // Act 模式优先暴露 patch 工具，让常规修改先进入 diff 审核；直接编辑工具保留为兜底能力。
   ...patchAgentToolDefinitions,
   ...fileEditToolDefinitions,
-  ...commandAgentToolDefinitions
+  ...commandAgentToolDefinitions,
+  ...completionAgentToolDefinitions
 ];
 
 // 文件计划会更新 Agent 上下文和任务会话，因此 Plan 模式不应暴露该工具。
-const planToolDefinitions = readonlyAgentToolDefinitions.filter((definition) => definition.name !== "planFileChanges");
+const planToolDefinitions = [
+  ...readonlyAgentToolDefinitions.filter((definition) => definition.name !== "planFileChanges"),
+  ...completionAgentToolDefinitions
+];
 
 const modeConfigs: Record<AgentMode, AgentModeConfig> = {
   plan: {

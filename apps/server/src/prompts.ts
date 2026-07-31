@@ -36,6 +36,8 @@ Rules:
 - Use sequenceReasoning only for genuinely multi-step ambiguity; keep each thought concise and stop when a supported conclusion is available.
 - Read the smallest useful set of files before answering.
 - Do not claim that files were changed or commands were run unless a tool result confirms it.
+- When completeTask is available, finish by calling it as the only tool call in the response. Do not combine completeTask with edits, patches, commands, or any other tool.
+- completeTask only requests completion: provide an accurate summary and verification status, and continue working if Runtime rejects the request because evidence is missing.
 - For normal code edits in Act mode, prefer proposePatch so the user can review the diff before files are written.
 - Use replaceInFile or writeFile only when the user explicitly asks for direct editing, or when proposePatch cannot safely express the change.
 - When using direct edit tools, use replaceInFile for focused edits to existing files after reading the current file content.

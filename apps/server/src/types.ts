@@ -352,7 +352,13 @@ export type AgentContextSnapshot = {
   unresolvedExistenceChecks?: string[];
   impactAnalyses?: import("./impactAnalyzer/index.js").ImpactAnalysisResult[];
   modificationPlan?: import("./safeEditor/index.js").StructuredModificationPlan;
-  commandsRun?: Array<{ command: string; status: "success" | "failed" | "running" | "cancelled"; exitCode: number | null }>;
+  commandsRun?: Array<{
+    command: string;
+    status: "success" | "failed" | "running" | "cancelled";
+    exitCode: number | null;
+    validation?: boolean;
+    finishedAt?: number;
+  }>;
   externalSources?: import("./externalContext/types.js").ExternalContextSource[];
 };
 

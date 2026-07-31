@@ -49,6 +49,7 @@ import { implementedFeatures, recordFeatureDecisionDifference } from "./featureF
 import { getTaskSessionContextState, recordTaskSessionContextBudget } from "./taskSessionStore.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
+import { parseCompleteTaskInput, type CompleteTaskInput } from "./agentCompletionTools.js";
 
 export type AgentRuntimeResult = {
   status: AgentRuntimeStatus;
@@ -99,7 +100,7 @@ export type AgentRuntimeOptions = {
 };
 
 async function loadRuntimeContextState(taskSessionId: string | null | undefined) {
-  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
+  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null };
   try {
     const session = await getTaskSessionContextState(taskSessionId);
     return {
@@ -110,11 +111,12 @@ async function loadRuntimeContextState(taskSessionId: string | null | undefined)
       planItems: session.planItems ?? [],
       filesModified: [...session.filesChanged],
       unresolvedQuestions: (session.planItems ?? []).filter((item) => item.status === "blocked").map((item) => item.note || item.title),
-      contextSummary: session.contextSummary ?? null
+      contextSummary: session.contextSummary ?? null,
+      pendingToolCall: session.pendingToolCall ?? null
     };
   } catch {
     // 无持久化任务的单元调用继续使用 Runtime 内存状态。
-    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null };
+    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null };
   }
 }
 
@@ -335,11 +337,30 @@ async function collectCompletionEvidence(input: {
   generatedPatchIds: string[];
   directAppliedFiles: ReadonlySet<string>;
   agentContext: AgentContext;
+  validationAvailable: boolean;
+  failedToolCallCount: number;
+  lastMutationAt?: number;
+  pendingApprovalCount?: number;
 }): Promise<CompletionEvidence> {
   const taskState = await loadRuntimeContextState(input.taskSessionId);
   const relevantPlanItems = taskState.planItems.filter((item) =>
     item.workflowStepId ? completionRelevantWorkflowSteps.has(item.workflowStepId) : true
   );
+
+  const commands = input.agentContext.commandsRun ?? [];
+  const validationCommands = commands.filter((command) => command.validation === true);
+  const latestValidation = validationCommands
+    .filter((command) => command.finishedAt !== undefined)
+    .sort((left, right) => (right.finishedAt ?? 0) - (left.finishedAt ?? 0))[0];
+  const validationStatus: CompletionEvidence["validationStatus"] = !input.mutationExpected
+    ? "not_required"
+    : !input.validationAvailable
+      ? "unavailable"
+      : !latestValidation
+        ? "not_run"
+        : latestValidation.status === "success"
+          ? "passed"
+          : "failed";
 
   return {
     workflowType: input.workflowType,
@@ -349,7 +370,12 @@ async function collectCompletionEvidence(input: {
     changedFileCount: new Set(input.directAppliedFiles).size,
     pendingPlanCount: relevantPlanItems.filter((item) => item.status === "pending" || item.status === "in_progress").length,
     blockedPlanCount: relevantPlanItems.filter((item) => item.status === "blocked").length,
-    validationAttempted: Boolean(input.agentContext.commandsRun?.length)
+    validationStatus,
+    pendingApprovalCount: Math.max(input.pendingApprovalCount ?? 0, taskState.pendingToolCall ? 1 : 0),
+    activeCommandCount: commands.filter((command) => command.status === "running").length,
+    failedToolCallCount: input.failedToolCallCount,
+    lastMutationAt: input.lastMutationAt,
+    lastValidationAt: latestValidation?.finishedAt
   };
 }
 
@@ -736,6 +762,25 @@ function createBlockedToolMessage(toolCall: ModelToolCall, reason: string): Mode
   };
 }
 
+function createCompletionToolErrorMessage(toolCall: ModelToolCall, reason: string, status: string = "incomplete"): ModelMessage {
+  return {
+    role: "tool",
+    toolCallId: toolCall.id,
+    content: JSON.stringify({ error: reason, completionRequested: true, completionStatus: status })
+  };
+}
+
+function createExplicitCompletionReminder(reason: string): ModelMessage {
+  return {
+    role: "user",
+    content: [
+      "Runtime 尚未收到显式完成声明，本轮不能结束。",
+      `当前证据判断：${reason}`,
+      "若任务已经完成，请将 completeTask 作为下一响应中的唯一工具调用；否则继续完成剩余工作。"
+    ].join("\n")
+  };
+}
+
 function createRejectedToolMessage(pendingToolCall: PendingAgentToolCall): ModelMessage {
   return {
     role: "tool",
@@ -842,6 +887,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const runId = options.runId || createAiRunId("agent-runtime");
   const mode = normalizeAgentMode(options.mode);
   const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
+  const explicitCompletionToolEnabled = config.featureFlags.explicitCompletionTool
+    && implementedFeatures.explicitCompletionTool
+    && Boolean(registry.get("completeTask"));
   const budgetPolicy = normalizeRuntimeAgentBudgetPolicy({
     maxSteps: options.maxSteps ?? config.aiAgentMaxSteps,
     convergenceRemainingSteps: options.convergenceRemainingSteps ?? config.aiAgentConvergenceRemainingSteps,
@@ -898,6 +946,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let recoveryAttempts = 0;
   let completionRecoveryAttempted = false;
   const directAppliedFiles = new Set(options.appliedFilePaths || []);
+  let lastMutationAt = directAppliedFiles.size ? Date.now() : undefined;
   const workflowType = options.workflow?.type ?? classifyTaskWorkflow(options.userRequest).type;
   const mutationExpected = mode === "act" && workflowType !== "analysis-only";
   const workspaceMutationAuthorized = options.workflow?.authorization?.workspaceMutation ?? mutationExpected;
@@ -928,7 +977,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     for (let step = 0; step < maxSteps; step += 1) {
       const remainingSteps = maxSteps - step;
       const budgetPhase = getAgentBudgetPhase(remainingSteps, budgetPolicy);
-      const visibleToolSchemas = filterToolSchemasForBudgetPhase(registry.schemas, budgetPhase);
+      const visibleToolSchemas = filterToolSchemasForBudgetPhase(registry.schemas, budgetPhase)
+        .filter((schema) => explicitCompletionToolEnabled || schema.function.name !== "completeTask");
       const currentAvailableToolNames = new Set(visibleToolSchemas.map((schema) => schema.function.name));
 
     if (!budgetWarningSent && budgetPhase === "convergence") {
@@ -962,8 +1012,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       systemPrompt: separatedRequest.systemPrompt || undefined,
       temperature: config.aiChatTemperature,
       messages: transientDecisionMessages.length ? [...separatedRequest.conversationMessages, ...transientDecisionMessages] : separatedRequest.conversationMessages,
-      tools: budgetPhase === "force_final" ? [] : visibleToolSchemas,
-      toolChoice: budgetPhase === "force_final" ? "none" : "auto"
+      tools: visibleToolSchemas,
+      toolChoice: visibleToolSchemas.length ? "auto" : "none"
     };
     let modelRequest = fullModelRequest;
     if (contextBudgetEnabled) {
@@ -1021,7 +1071,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     const message = completion.message;
     const toolCalls = message.toolCalls ?? [];
 
-    if (budgetPhase === "force_final" && toolCalls.length) {
+    if (budgetPhase === "force_final" && toolCalls.length && !toolCalls.some((toolCall) => toolCall.name === "completeTask")) {
       // 即使 Provider 违反 toolChoice=none，最终轮也只记录越权尝试，不执行任何工具。
       for (const toolCall of toolCalls) {
         const signature = getToolCallSignature(toolCall);
@@ -1080,7 +1130,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         mutationExpected,
         generatedPatchIds,
         directAppliedFiles,
-        agentContext
+        agentContext,
+        validationAvailable: Boolean(registry.get("runCommand")),
+        failedToolCallCount: metrics.getCompletionEvidenceSnapshot().failedToolCallCount,
+        lastMutationAt
       });
       const semanticCompletionDecision = evaluateAgentCompletion({
         evidence,
@@ -1102,8 +1155,26 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         ? semanticCompletionDecision
         : legacyCompletionDecision;
 
-      if (completionDecision.shouldRecover && step + 1 < maxSteps) {
-        const recoveryMessage = createCompletionRecoveryMessage(completionDecision, evidence);
+      const explicitCompletionDecision = completionDecision.status === "completed"
+        ? {
+            status: "incomplete" as const,
+            reason: "模型自然停止，但没有调用 completeTask 请求结束。",
+            shouldRecover: true
+          }
+        : completionDecision;
+      recordFeatureDecisionDifference({
+        feature: "explicitCompletionTool",
+        legacyDecision: { status: completionDecision.status },
+        nextDecision: { status: explicitCompletionDecision.status }
+      });
+      const effectiveCompletionDecision = explicitCompletionToolEnabled
+        ? explicitCompletionDecision
+        : completionDecision;
+
+      if (effectiveCompletionDecision.shouldRecover && step + 1 < maxSteps) {
+        const recoveryMessage = explicitCompletionToolEnabled && completionDecision.status === "completed"
+          ? createExplicitCompletionReminder(effectiveCompletionDecision.reason)
+          : createCompletionRecoveryMessage(effectiveCompletionDecision, evidence);
         messages.push(recoveryMessage);
         await persistAgentMessage(options.taskSessionId, recoveryMessage);
         completionRecoveryAttempted = true;
@@ -1111,25 +1182,27 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         options.onAgentStep?.(createAgentStep({
           type: "strategy",
           event: "completion_recovery",
-          message: completionDecision.reason,
+          message: effectiveCompletionDecision.reason,
           currentStep: step + 1,
           maxSteps,
           facts: buildRecoveryFacts(agentContext, generatedPatchIds)
         }));
-        logAi(runId, "runtime.completionRecovery", { step, status: completionDecision.status, evidence });
+        logAi(runId, "runtime.completionRecovery", { step, status: effectiveCompletionDecision.status, evidence, explicitCompletionToolEnabled });
         continue;
       }
 
       options.onAgentStep?.(createAgentStep({ type: "message", content: content || "Agent runtime completed without text output." }));
-      logAi(runId, "runtime.done", { step, mode, contentLength: content.length, status: completionDecision.status, evidence });
+      logAi(runId, "runtime.done", { step, mode, contentLength: content.length, status: effectiveCompletionDecision.status, evidence });
       await metrics.finish({
-        status: completionDecision.status,
-        stopReason: completionDecision.status,
+        status: effectiveCompletionDecision.status,
+        stopReason: effectiveCompletionDecision.status,
         failureCategory: "none",
-        patchFileCount: countGeneratedPatchFiles(generatedPatchIds)
+        patchFileCount: countGeneratedPatchFiles(generatedPatchIds),
+        validationCommandCount: agentContext.commandsRun?.filter((command) => command.validation === true).length ?? 0,
+        validationStatus: evidence.validationStatus
       });
       return {
-        status: completionDecision.status,
+        status: effectiveCompletionDecision.status,
         runId,
         content,
         messages,
@@ -1139,7 +1212,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         contextBudgetSnapshot: latestContextBudgetSnapshot,
         contextSummary: latestContextSummary,
         completionEvidence: evidence,
-        statusReason: completionDecision.reason,
+        statusReason: effectiveCompletionDecision.reason,
         // 模型请求结束不代表交付完成；保留“请求完成”与 Runtime 证据裁决后的有效状态。
         requestedStatus: "completed"
       };
@@ -1174,6 +1247,116 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         repeatedToolWarnings.add(signature);
         repeatedToolNames.push(toolCall.name);
       }
+    }
+
+    const completionCalls = toolCalls.filter((toolCall) => toolCall.name === "completeTask");
+    if (completionCalls.length) {
+      const exclusive = toolCalls.length === 1 && completionCalls.length === 1;
+      if (!explicitCompletionToolEnabled || !exclusive) {
+        const reason = !explicitCompletionToolEnabled
+          ? "completeTask is not enabled for this runtime."
+          : "completeTask must be the only tool call in the assistant response; no other tool was executed.";
+        for (const toolCall of toolCalls) {
+          const errorMessage = createCompletionToolErrorMessage(toolCall, reason);
+          messages.push(errorMessage);
+          await persistAgentMessage(options.taskSessionId, errorMessage);
+          metrics.recordToolFailure({ completionEvidence: false });
+          metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
+        }
+        options.onAgentStep?.(createAgentStep({ type: "error", message: reason }));
+        logAi(runId, "runtime.completeTaskRejected", { reason, toolNames: toolCalls.map((toolCall) => toolCall.name) });
+        continue;
+      }
+
+      const completionCall = completionCalls[0];
+      let completionInput: CompleteTaskInput;
+      try {
+        completionInput = parseCompleteTaskInput(completionCall.arguments);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "Invalid completeTask arguments.";
+        const errorMessage = createCompletionToolErrorMessage(completionCall, reason);
+        messages.push(errorMessage);
+        await persistAgentMessage(options.taskSessionId, errorMessage);
+        metrics.recordToolFailure({ completionEvidence: false });
+        metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
+        logAi(runId, "runtime.completeTaskRejected", { reason });
+        continue;
+      }
+
+      const evidence = await collectCompletionEvidence({
+        taskSessionId: options.taskSessionId,
+        workflowType,
+        mutationExpected,
+        generatedPatchIds,
+        directAppliedFiles,
+        agentContext,
+        validationAvailable: Boolean(registry.get("runCommand")),
+        failedToolCallCount: metrics.getCompletionEvidenceSnapshot().failedToolCallCount,
+        lastMutationAt
+      });
+      const completionContent = [
+        completionInput.summary,
+        completionInput.validationSummary,
+        ...(completionInput.unresolvedItems ?? [])
+      ].filter(Boolean).join("\n");
+      const evidenceDecision = evaluateAgentCompletion({
+        evidence,
+        finalContent: completionContent,
+        recoveryAttempted: completionRecoveryAttempted,
+        editingToolsAvailable: registry.definitions.some((definition) =>
+          ["proposePatch", "replaceInFile", "writeFile"].includes(definition.name)
+        )
+      });
+      const requestedDecision = completionInput.verified
+        ? evidenceDecision
+        : {
+            status: (evidenceDecision.status === "blocked" || (completionInput.unresolvedItems?.length ?? 0) > 0 ? "blocked" : "incomplete") as "blocked" | "incomplete",
+            reason: completionInput.unresolvedItems?.length
+              ? "完成声明仍包含未解决事项。"
+              : "完成声明明确标记为尚未验证。",
+            shouldRecover: true
+          };
+
+      if (completionInput.verified && requestedDecision.status === "completed") {
+        const toolResult = toModelToolMessage(await executeAgentToolCall(toAgentToolCall(completionCall), toolRuntime));
+        messages.push(toolResult);
+        await persistAgentMessage(options.taskSessionId, toolResult);
+        metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: false });
+        options.onAgentStep?.(createAgentStep({ type: "message", content: completionInput.summary }));
+        logAi(runId, "runtime.completeTaskAccepted", { step, evidence });
+        await metrics.finish({
+          status: "completed",
+          stopReason: "completed",
+          failureCategory: "none",
+          patchFileCount: countGeneratedPatchFiles(generatedPatchIds),
+          validationCommandCount: agentContext.commandsRun?.filter((command) => command.validation === true).length ?? 0,
+          validationStatus: evidence.validationStatus
+        });
+        return {
+          status: "completed",
+          runId,
+          content: completionInput.summary,
+          messages,
+          agentContext,
+          generatedPatchIds,
+          pendingToolCall: null,
+          contextBudgetSnapshot: latestContextBudgetSnapshot,
+          contextSummary: latestContextSummary,
+          completionEvidence: evidence,
+          statusReason: evidenceDecision.reason,
+          requestedStatus: "completed"
+        };
+      }
+
+      const rejectionReason = `completeTask was rejected: ${requestedDecision.reason}`;
+      const errorMessage = createCompletionToolErrorMessage(completionCall, rejectionReason, requestedDecision.status);
+      messages.push(errorMessage);
+      await persistAgentMessage(options.taskSessionId, errorMessage);
+      metrics.recordToolFailure({ completionEvidence: false });
+      metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
+      options.onAgentStep?.(createAgentStep({ type: "error", message: rejectionReason }));
+      logAi(runId, "runtime.completeTaskRejected", { reason: requestedDecision.reason, evidence });
+      continue;
     }
 
     for (const toolCall of toolCalls) {
@@ -1347,7 +1530,24 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           options.onContextBudget?.({ snapshot: latestContextBudgetSnapshot, summary: latestContextSummary });
         }
         logAi(runId, "runtime.awaitingApproval", { toolName: pendingToolCall.toolName, actionId: pendingToolCall.actionId });
-        await metrics.finish({ status: "awaiting_approval", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+        const evidence = await collectCompletionEvidence({
+          taskSessionId: options.taskSessionId,
+          workflowType,
+          mutationExpected,
+          generatedPatchIds,
+          directAppliedFiles,
+          agentContext,
+          validationAvailable: Boolean(registry.get("runCommand")),
+          failedToolCallCount: metrics.getCompletionEvidenceSnapshot().failedToolCallCount,
+          lastMutationAt,
+          pendingApprovalCount: 1
+        });
+        await metrics.finish({
+          status: "awaiting_approval",
+          patchFileCount: countGeneratedPatchFiles(generatedPatchIds),
+          validationCommandCount: agentContext.commandsRun?.filter((command) => command.validation === true).length ?? 0,
+          validationStatus: evidence.validationStatus
+        });
 
         return {
           status: "awaiting_approval",
@@ -1358,7 +1558,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           generatedPatchIds,
           pendingToolCall,
           contextBudgetSnapshot: latestContextBudgetSnapshot,
-          contextSummary: latestContextSummary
+          contextSummary: latestContextSummary,
+          completionEvidence: evidence,
+          statusReason: "仍有工具调用等待用户审批。"
         };
       }
 
@@ -1371,6 +1573,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const appliedFilePaths = getConfirmedAppliedFilePaths(toolCall.name, result.content, toolCall.arguments);
         if (!resultMetrics.failed) {
           for (const filePath of appliedFilePaths) directAppliedFiles.add(filePath);
+          if (appliedFilePaths.length) lastMutationAt = Date.now();
         }
         const readScope = getSuccessfulReadScope(toolCall);
         if (!resultMetrics.cached && !resultMetrics.failed && readScope) readScopes.add(readScope);

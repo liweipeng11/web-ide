@@ -59,6 +59,12 @@ test("command prompts require cwd for a named subproject", () => {
   assertIncludes(AI_FILE_CHAT_SYSTEM_PROMPT, "workspace-relative directory");
 });
 
+test("Agent Prompt 要求使用独占的显式完成协议", () => {
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "finish by calling it as the only tool call");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "Do not combine completeTask with edits");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "continue working if Runtime rejects the request");
+});
+
 test("Act Prompt 将完整未命中转换为创建动作并校验补丁后引用", () => {
   assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "Treat exhaustive target_absent evidence");
   assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "stop searching for the same target");

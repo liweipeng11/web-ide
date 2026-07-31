@@ -78,7 +78,13 @@ export type AgentContext = {
   /** 补丁生成前确认的文件级修改计划，Safe Editor 将其作为 agent_plan 证据。 */
   modificationPlan?: import("./safeEditor/index.js").StructuredModificationPlan;
   /** 记录 Runtime 实际执行过的命令，bugfix 工作流据此确认已尝试复现或验证。 */
-  commandsRun?: Array<{ command: string; status: "success" | "failed" | "running" | "cancelled"; exitCode: number | null }>;
+  commandsRun?: Array<{
+    command: string;
+    status: "success" | "failed" | "running" | "cancelled";
+    exitCode: number | null;
+    validation?: boolean;
+    finishedAt?: number;
+  }>;
   /** 保存本轮检索或抓取使用的外部来源，便于审批恢复、引用和审计。 */
   externalSources?: ExternalContextSource[];
 };

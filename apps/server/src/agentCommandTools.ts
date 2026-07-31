@@ -67,6 +67,19 @@ function createCommandSummary(result: CommandResult) {
   };
 }
 
+function isValidationCommand(command: string) {
+  // 仅将测试、类型检查、构建和静态检查视为验证，避免把 ls/search 等普通命令误记为通过。
+  const packageScript = parsePackageScript(command)?.script.toLowerCase();
+  const scriptIsValidation = packageScript
+    ? ["test", "typecheck", "lint", "build", "check", "compile"].includes(packageScript.split(":")[0] || "")
+    : false;
+  return scriptIsValidation
+    || /(?:^|[\s:&|;])(?:test|typecheck|lint|build|check|compile)(?=$|[\s:&|;])/i.test(command)
+    || /(?:^|[\s:&|;])(?:tsc|pytest|vitest|jest|mocha)(?=$|[\s:&|;])/i.test(command)
+    || /(?:^|[\s:&|;])(?:go|cargo|dotnet)\s+test(?=$|[\s:&|;])/i.test(command)
+    || /--test(?:\s|$)/i.test(command);
+}
+
 export function createCommandAgentToolDefinitions(dependencies: CommandToolDependencies = defaultDependencies): AgentToolDefinition[] {
   return [
     {
@@ -147,7 +160,13 @@ export function createCommandAgentToolDefinitions(dependencies: CommandToolDepen
               : "failed";
         runtime.agentContext.commandsRun = [
           ...(runtime.agentContext.commandsRun || []),
-          { command, status, exitCode: result.exitCode }
+          {
+            command,
+            status,
+            exitCode: result.exitCode,
+            validation: isValidationCommand(command),
+            finishedAt: status === "running" ? undefined : Date.now()
+          }
         ];
         runtime.onAgentStep?.(createAgentStep({ type: "command", command, policy, status, result }));
 

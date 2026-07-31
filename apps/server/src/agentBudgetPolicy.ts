@@ -27,7 +27,8 @@ const CONVERGENCE_ALLOWED_TOOL_NAMES = new Set([
   "replaceInFile",
   "writeFile",
   "applyPatch",
-  "runCommand"
+  "runCommand",
+  "completeTask"
 ]);
 
 function readPositiveInteger(env: NodeJS.ProcessEnv, name: string, fallback: number) {
@@ -100,7 +101,8 @@ export function getAgentBudgetPhase(
 }
 
 export function isToolAvailableInBudgetPhase(toolName: string, phase: AgentBudgetPhase) {
-  if (phase === "force_final") return false;
+  // 最终预算轮只允许提交完成声明，避免显式完成协议被 force_final 阶段反向禁用。
+  if (phase === "force_final") return toolName === "completeTask";
   return phase === "normal" || CONVERGENCE_ALLOWED_TOOL_NAMES.has(toolName);
 }
 

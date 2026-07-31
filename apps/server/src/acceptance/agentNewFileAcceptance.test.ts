@@ -121,7 +121,10 @@ test("阶段七：原始 Vue 2 路由任务完成双文件补丁、审批应用�
       changedFileCount: 0,
       pendingPlanCount: 2,
       blockedPlanCount: 0,
-      validationAttempted: false
+      validationStatus: "not_run",
+      pendingApprovalCount: 0,
+      activeCommandCount: 0,
+      failedToolCallCount: 0
     },
     finalContent: "已生成双文件补丁，等待审批。",
     recoveryAttempted: false,
@@ -143,7 +146,10 @@ test("阶段七：原始 Vue 2 路由任务完成双文件补丁、审批应用�
       changedFileCount: 2,
       pendingPlanCount: 0,
       blockedPlanCount: 0,
-      validationAttempted: true
+      validationStatus: "passed",
+      pendingApprovalCount: 0,
+      activeCommandCount: 0,
+      failedToolCallCount: 0
     }
   });
 
@@ -186,7 +192,10 @@ test("阶段七：零交付物不能完成，真实缺失与工作区越界仍�
         changedFileCount: 0,
         pendingPlanCount: 0,
         blockedPlanCount: 0,
-        validationAttempted: false
+        validationStatus: "not_run",
+        pendingApprovalCount: 0,
+        activeCommandCount: 0,
+        failedToolCallCount: 0
       },
       finalContent: "已经完成。",
       recoveryAttempted: true,

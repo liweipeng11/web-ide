@@ -4,11 +4,16 @@ import type { TaskWorkflowType } from "./taskWorkflow/index.js";
 export type CompletionEvidence = {
   workflowType?: TaskWorkflowType;
   mutationExpected: boolean;
-  generatedPatchCount: number;
   changedFileCount: number;
+  generatedPatchCount: number;
   pendingPlanCount: number;
   blockedPlanCount: number;
-  validationAttempted: boolean;
+  validationStatus: "not_required" | "not_run" | "passed" | "failed" | "unavailable";
+  pendingApprovalCount: number;
+  activeCommandCount: number;
+  failedToolCallCount: number;
+  lastMutationAt?: number;
+  lastValidationAt?: number;
 };
 
 export type CompletionDecision = {
@@ -74,10 +79,15 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
 
   const claimsIncomplete = finalContentClaimsIncomplete(input.finalContent);
   const hasPendingWork = evidence.pendingPlanCount > 0 || evidence.blockedPlanCount > 0;
-  if (evidence.changedFileCount > 0 && !hasPendingWork && !claimsIncomplete) {
+  const validationPassed = evidence.validationStatus === "passed" || evidence.validationStatus === "unavailable";
+  const validationIsCurrent = evidence.lastMutationAt === undefined
+    || evidence.validationStatus === "unavailable"
+    || (evidence.lastValidationAt !== undefined && evidence.lastValidationAt >= evidence.lastMutationAt);
+
+  if (evidence.pendingApprovalCount > 0) {
     return {
-      status: "completed",
-      reason: "文件变更已经落盘，且实现计划没有未完成步骤。",
+      status: "awaiting_approval",
+      reason: "仍有工具调用等待用户审批。",
       shouldRecover: false
     };
   }
@@ -90,12 +100,38 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
     };
   }
 
+  if (
+    evidence.changedFileCount > 0
+    && !hasPendingWork
+    && evidence.activeCommandCount === 0
+    && evidence.failedToolCallCount === 0
+    && validationPassed
+    && validationIsCurrent
+    && !claimsIncomplete
+  ) {
+    return {
+      status: "completed",
+      reason: "文件变更、计划、工具状态与验证证据均满足完成条件。",
+      shouldRecover: false
+    };
+  }
+
   return {
     status: "incomplete",
     reason: evidence.changedFileCount === 0
       ? "编辑任务没有生成补丁，也没有产生已应用文件变更。"
       : claimsIncomplete
         ? "最终回答明确表示任务尚未完成。"
+        : evidence.activeCommandCount > 0
+          ? "仍有命令正在运行，不能确认验证结果。"
+          : evidence.failedToolCallCount > 0
+            ? "本轮仍存在失败的工具调用。"
+            : evidence.validationStatus === "failed"
+              ? "验证命令执行失败。"
+              : evidence.validationStatus === "not_run" || evidence.validationStatus === "not_required"
+                ? "编辑任务尚未运行必要验证。"
+                : !validationIsCurrent
+                  ? "最近一次验证早于最后一次文件变更，需要重新验证。"
         : "编辑任务仍有未完成的计划步骤。",
     shouldRecover: !input.recoveryAttempted && input.editingToolsAvailable
   };
@@ -107,7 +143,7 @@ export function createCompletionRecoveryMessage(decision: CompletionDecision, ev
     content: [
       "Runtime 完成前检查未通过，本轮不能结束。",
       `原因：${decision.reason}`,
-      `当前证据：待审核补丁 ${evidence.generatedPatchCount} 个，已变更文件 ${evidence.changedFileCount} 个，未完成计划 ${evidence.pendingPlanCount} 项，阻塞计划 ${evidence.blockedPlanCount} 项。`,
+      `当前证据：待审核补丁 ${evidence.generatedPatchCount} 个，已变更文件 ${evidence.changedFileCount} 个，验证状态 ${evidence.validationStatus}，未完成计划 ${evidence.pendingPlanCount} 项，阻塞计划 ${evidence.blockedPlanCount} 项，待审批 ${evidence.pendingApprovalCount} 项，运行中命令 ${evidence.activeCommandCount} 个，失败工具 ${evidence.failedToolCallCount} 次。`,
       "请立即复用已有上下文生成补丁或完成必要的文件写入；不要重复宽泛搜索。若确实需要用户选择、权限、外部状态或受到安全策略限制，请明确说明该不可自动恢复的阻塞条件。"
     ].join("\n")
   };

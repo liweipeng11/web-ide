@@ -22,6 +22,7 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
     tracker.recordToolCall({ toolName: "searchCode", signature, step: 2, repeated: true });
     tracker.recordToolResult({ signature, cached: true, empty: true });
     tracker.recordToolFailure();
+    assert.deepEqual(tracker.getCompletionEvidenceSnapshot(), { failedToolCallCount: 1 });
     tracker.recordSafeEditorMetrics({
       safeEditorNeedsAnalysisCount: 1,
       safeEditorAutoAnalysisAttemptCount: 1,

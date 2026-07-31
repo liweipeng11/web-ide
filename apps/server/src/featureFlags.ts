@@ -7,6 +7,7 @@ export type FeatureFlags = {
   plannedFileResolution: boolean;
   semanticCompletionCheck: boolean;
   safeEditEvidenceV2: boolean;
+  explicitCompletionTool: boolean;
 };
 
 export type FeatureImplementations = Record<keyof FeatureFlags, boolean>;
@@ -21,7 +22,8 @@ const featureFlagEnvironmentNames: Record<keyof FeatureFlags, string> = {
   commandExecutionV2: "COMMAND_EXECUTION_V2_ENABLED",
   plannedFileResolution: "AGENT_PLANNED_FILE_RESOLUTION",
   semanticCompletionCheck: "AGENT_SEMANTIC_COMPLETION_CHECK",
-  safeEditEvidenceV2: "SAFE_EDIT_EVIDENCE_V2_ENABLED"
+  safeEditEvidenceV2: "SAFE_EDIT_EVIDENCE_V2_ENABLED",
+  explicitCompletionTool: "AGENT_EXPLICIT_COMPLETION_TOOL"
 };
 
 export const defaultFeatureFlags: FeatureFlags = {
@@ -32,11 +34,12 @@ export const defaultFeatureFlags: FeatureFlags = {
   commandExecutionV2: true,
   plannedFileResolution: true,
   semanticCompletionCheck: true,
-  safeEditEvidenceV2: true
+  safeEditEvidenceV2: true,
+  explicitCompletionTool: true
 };
 
 export type FeatureDecisionDifference = {
-  feature: "plannedFileResolution" | "semanticCompletionCheck" | "safeEditEvidenceV2";
+  feature: "plannedFileResolution" | "semanticCompletionCheck" | "safeEditEvidenceV2" | "explicitCompletionTool";
   legacyDecision: unknown;
   nextDecision: unknown;
 };
@@ -120,5 +123,6 @@ export const implementedFeatures: FeatureImplementations = {
   commandExecutionV2: true,
   plannedFileResolution: true,
   semanticCompletionCheck: true,
-  safeEditEvidenceV2: true
+  safeEditEvidenceV2: true,
+  explicitCompletionTool: true
 };
