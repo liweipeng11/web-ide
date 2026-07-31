@@ -141,20 +141,24 @@ async function executeFileEditWithLifecycle(toolName: FileEditToolName, filePath
     const result = await edit();
     const checkpoint = await createFileEditCheckpoint(runtime.taskSessionId || eventIdPrefix, result, { source: createCheckpointSource(runtime, toolName) });
 
-    await Promise.all([addTaskSessionCheckpoint(runtime.taskSessionId, checkpoint.id), addTaskSessionFilesChanged(runtime.taskSessionId, result.changed ? [result.filePath] : [])]);
-    await appendTaskSessionFileEditEvent(runtime.taskSessionId, {
-      id: `${eventIdPrefix}:applied`,
-      type: "file_edit_applied",
-      toolName,
-      filePath: result.filePath,
-      checkpointId: checkpoint.id,
-      detail: {
-        changed: result.changed,
-        replacements: result.replacements,
-        oldContentPreview: createOldContentPreview(result.oldContent),
-        finalContentPreview: createOldContentPreview(result.finalContent)
-      }
-    });
+    // 编辑成功后的 checkpoint、文件集合与生命周期事件属于同一快照，并行提交后由存储层合并写入。
+    await Promise.all([
+      addTaskSessionCheckpoint(runtime.taskSessionId, checkpoint.id),
+      addTaskSessionFilesChanged(runtime.taskSessionId, result.changed ? [result.filePath] : []),
+      appendTaskSessionFileEditEvent(runtime.taskSessionId, {
+        id: `${eventIdPrefix}:applied`,
+        type: "file_edit_applied",
+        toolName,
+        filePath: result.filePath,
+        checkpointId: checkpoint.id,
+        detail: {
+          changed: result.changed,
+          replacements: result.replacements,
+          oldContentPreview: createOldContentPreview(result.oldContent),
+          finalContentPreview: createOldContentPreview(result.finalContent)
+        }
+      })
+    ]);
     runtime.onAgentStep?.(
       createAgentStep({
         type: "checkpoint",

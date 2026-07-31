@@ -48,6 +48,24 @@ export type ToolRuntimeMetrics = {
   mostRepeatedCall: MostRepeatedToolCall | null;
 };
 
+export type TaskSessionPersistenceMetrics = {
+  taskSessionUpdateCount: number;
+  taskSessionPhysicalWriteCount: number;
+  taskSessionWriteSkippedCount: number;
+  taskSessionWriteCoalescedCount: number;
+  taskSessionRenameRetryCount: number;
+};
+
+export function createEmptyTaskSessionPersistenceMetrics(): TaskSessionPersistenceMetrics {
+  return {
+    taskSessionUpdateCount: 0,
+    taskSessionPhysicalWriteCount: 0,
+    taskSessionWriteSkippedCount: 0,
+    taskSessionWriteCoalescedCount: 0,
+    taskSessionRenameRetryCount: 0
+  };
+}
+
 export type RunMetrics = {
   schemaVersion: 1;
   scope: "model_run" | "validation_run" | "task_run";
@@ -70,6 +88,7 @@ export type RunMetrics = {
   safeEditorConfirmedExpansionCount: number;
   safeEditorRiskAcknowledgementCount: number;
   safeEditorFalseExpansionRegressionCount: number;
+  taskSessionPersistence: TaskSessionPersistenceMetrics;
   tools: ToolRuntimeMetrics;
   context: { compressionCount: number; estimatedTokensBefore: number | null; estimatedTokensAfter: number | null; estimator: "conservative" | "unavailable" };
   result: {
@@ -319,6 +338,7 @@ export class RunMetricsTracker {
       usage: { ...this.usage },
       estimatedCostUsd: this.estimateCostUsd(),
       ...this.safeEditorMetrics,
+      taskSessionPersistence: createEmptyTaskSessionPersistenceMetrics(),
       tools: {
         calls: this.toolCalls,
         repeatedCalls: this.repeatedToolCalls,

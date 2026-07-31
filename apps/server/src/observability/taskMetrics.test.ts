@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RunMetricsTracker } from "./runMetrics.js";
-import { clearTaskMetricsForTest, finalizeTaskMetrics, getTaskMetricsSnapshot, recordTaskPatchMetrics, recordTaskSafeEditorMetrics } from "./taskMetrics.js";
+import { clearTaskMetricsForTest, finalizeTaskMetrics, getTaskMetricsSnapshot, getTaskSessionPersistenceMetrics, recordTaskPatchMetrics, recordTaskSafeEditorMetrics, recordTaskSessionPersistenceMetrics } from "./taskMetrics.js";
 
 test("按任务聚合审批前后模型片段、补丁和验证指标", async () => {
   const taskSessionId = "task-metrics-test";
@@ -100,4 +100,42 @@ test("服务重启后从磁盘恢复审批前指标并继续聚合", async () =>
   assert.equal(restored.result.patchFileCount, 1);
   await finalizeTaskMetrics(taskSessionId, "completed", async () => {});
   await clearTaskMetricsForTest({ key: taskSessionId });
+});
+
+test("聚合任务会话逻辑更新、物理写入、跳过、合并和 rename 重试指标", async () => {
+  const taskSessionId = "task-session-persistence-metrics-test";
+  await clearTaskMetricsForTest({ key: taskSessionId });
+  try {
+    // 存储指标可能早于首个模型片段产生，必须在任务指标创建后完整并入。
+    recordTaskSessionPersistenceMetrics(taskSessionId, {
+      taskSessionUpdateCount: 100,
+      taskSessionPhysicalWriteCount: 2,
+      taskSessionWriteSkippedCount: 3,
+      taskSessionWriteCoalescedCount: 98,
+      taskSessionRenameRetryCount: 2
+    });
+    const tracker = new RunMetricsTracker(
+      { runId: "persistence-run", taskSessionId, provider: "mock", model: "mock-v1", mode: "act" },
+      async () => {}
+    );
+    await tracker.finish({ status: "awaiting_approval" });
+
+    recordTaskSessionPersistenceMetrics(taskSessionId, { taskSessionUpdateCount: 1, taskSessionPhysicalWriteCount: 1 });
+    assert.deepEqual(await getTaskSessionPersistenceMetrics(taskSessionId), {
+      taskSessionUpdateCount: 101,
+      taskSessionPhysicalWriteCount: 3,
+      taskSessionWriteSkippedCount: 3,
+      taskSessionWriteCoalescedCount: 98,
+      taskSessionRenameRetryCount: 2
+    });
+    assert.deepEqual((await getTaskMetricsSnapshot(taskSessionId))?.taskSessionPersistence, {
+      taskSessionUpdateCount: 101,
+      taskSessionPhysicalWriteCount: 3,
+      taskSessionWriteSkippedCount: 3,
+      taskSessionWriteCoalescedCount: 98,
+      taskSessionRenameRetryCount: 2
+    });
+  } finally {
+    await clearTaskMetricsForTest({ key: taskSessionId });
+  }
 });

@@ -2,11 +2,26 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { appStatePath } from "../statePaths.js";
-import { appendRunMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta } from "./runMetrics.js";
+import { appendRunMetrics, createEmptyTaskSessionPersistenceMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta, type TaskSessionPersistenceMetrics } from "./runMetrics.js";
 
 const taskMetrics = new Map<string, RunMetrics>();
 const taskMetricQueues = new Map<string, Promise<unknown>>();
 const pendingFinalizers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingTaskSessionPersistenceMetrics = new Map<string, TaskSessionPersistenceMetrics>();
+
+function addTaskSessionPersistenceMetrics(target: TaskSessionPersistenceMetrics, delta: Partial<TaskSessionPersistenceMetrics>) {
+  for (const key of Object.keys(delta) as Array<keyof TaskSessionPersistenceMetrics>) {
+    const value = delta[key];
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) target[key] += Math.floor(value);
+  }
+}
+
+function applyPendingTaskSessionPersistenceMetrics(key: string, metrics: RunMetrics) {
+  const pending = pendingTaskSessionPersistenceMetrics.get(key);
+  if (!pending) return;
+  addTaskSessionPersistenceMetrics(metrics.taskSessionPersistence, pending);
+  pendingTaskSessionPersistenceMetrics.delete(key);
+}
 
 function correlationId(metrics: RunMetrics) {
   return metrics.taskSessionId || metrics.runId;
@@ -35,6 +50,12 @@ function normalizeMetricFields(metrics: RunMetrics) {
   metrics.safeEditorConfirmedExpansionCount ??= 0;
   metrics.safeEditorRiskAcknowledgementCount ??= 0;
   metrics.safeEditorFalseExpansionRegressionCount ??= 0;
+  metrics.taskSessionPersistence ??= createEmptyTaskSessionPersistenceMetrics();
+  metrics.taskSessionPersistence.taskSessionUpdateCount ??= 0;
+  metrics.taskSessionPersistence.taskSessionPhysicalWriteCount ??= 0;
+  metrics.taskSessionPersistence.taskSessionWriteSkippedCount ??= 0;
+  metrics.taskSessionPersistence.taskSessionWriteCoalescedCount ??= 0;
+  metrics.taskSessionPersistence.taskSessionRenameRetryCount ??= 0;
   metrics.result.stopReason ??= metrics.result.status === "completed"
     ? "completed"
     : metrics.result.status === "awaiting_approval"
@@ -97,19 +118,50 @@ async function enqueueTaskMetricUpdate<T>(key: string, update: () => Promise<T>)
 
 async function loadTaskMetrics(key: string) {
   const cached = taskMetrics.get(key);
-  if (cached) return cached;
+  if (cached) {
+    applyPendingTaskSessionPersistenceMetrics(key, cached);
+    return cached;
+  }
   const persisted = await readSnapshot(key);
-  if (persisted) taskMetrics.set(key, persisted);
+  if (persisted) {
+    applyPendingTaskSessionPersistenceMetrics(key, persisted);
+    taskMetrics.set(key, persisted);
+  }
   return persisted;
 }
 
 function createTaskMetrics(metrics: RunMetrics): RunMetrics {
-  return {
+  const created: RunMetrics = {
     ...structuredClone(metrics),
     scope: "task_run",
     runId: metrics.taskSessionId ? `task:${metrics.taskSessionId}` : metrics.runId,
     mode: "task"
   };
+  created.taskSessionPersistence = createEmptyTaskSessionPersistenceMetrics();
+  applyPendingTaskSessionPersistenceMetrics(correlationId(metrics), created);
+  return created;
+}
+
+/**
+ * 记录任务会话存储层的逻辑更新与物理写入差异。
+ * 指标先在内存聚合，避免为了记录“减少写入”反而制造新的高频指标落盘。
+ */
+export function recordTaskSessionPersistenceMetrics(key: string | null | undefined, delta: Partial<TaskSessionPersistenceMetrics>) {
+  if (!key) return;
+  const current = taskMetrics.get(key);
+  if (current) {
+    addTaskSessionPersistenceMetrics(current.taskSessionPersistence, delta);
+    return;
+  }
+  const pending = pendingTaskSessionPersistenceMetrics.get(key) ?? createEmptyTaskSessionPersistenceMetrics();
+  addTaskSessionPersistenceMetrics(pending, delta);
+  pendingTaskSessionPersistenceMetrics.set(key, pending);
+}
+
+export async function getTaskSessionPersistenceMetrics(key: string) {
+  const current = await enqueueTaskMetricUpdate(key, () => loadTaskMetrics(key));
+  if (current) return structuredClone(current.taskSessionPersistence);
+  return structuredClone(pendingTaskSessionPersistenceMetrics.get(key) ?? createEmptyTaskSessionPersistenceMetrics());
 }
 
 function mergeFirstTokenLatency(current: RunMetrics, metrics: RunMetrics) {
@@ -222,7 +274,10 @@ export async function finalizeTaskMetrics(key: string | null | undefined, status
   if (!key) return null;
   return enqueueTaskMetricUpdate(key, async () => {
     const current = await loadTaskMetrics(key);
-    if (!current) return null;
+    if (!current) {
+      pendingTaskSessionPersistenceMetrics.delete(key);
+      return null;
+    }
     current.finishedAt = new Date().toISOString();
     current.durationMs = Math.max(0, Date.parse(current.finishedAt) - Date.parse(current.startedAt));
     current.result.status = status;
@@ -235,6 +290,7 @@ export async function finalizeTaskMetrics(key: string | null | undefined, status
       console.warn("[metrics] failed to persist task metrics", error instanceof Error ? error.message : "unknown error");
     } finally {
       taskMetrics.delete(key);
+      pendingTaskSessionPersistenceMetrics.delete(key);
       await deleteSnapshot(key);
     }
     return structuredClone(current);
@@ -260,6 +316,8 @@ export async function clearTaskMetricsForTest(options: { key?: string; memoryOnl
   pendingFinalizers.clear();
   taskMetrics.clear();
   taskMetricQueues.clear();
+  if (options.key) pendingTaskSessionPersistenceMetrics.delete(options.key);
+  else pendingTaskSessionPersistenceMetrics.clear();
   if (options.memoryOnly) return;
   if (options.key) await deleteSnapshot(options.key);
   else await fs.rm(snapshotDirectory(), { recursive: true, force: true });

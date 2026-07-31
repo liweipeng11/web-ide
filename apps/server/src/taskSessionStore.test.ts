@@ -7,11 +7,12 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
-import { RunMetricsTracker } from "./observability/index.js";
+import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics, RunMetricsTracker } from "./observability/index.js";
 import { finalizeTaskSession } from "./taskSessionFinalizer.js";
+import type { TaskSession } from "./types.js";
 
 async function createIsolatedTaskSession(userGoal = "实现任务计划器") {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-plan-"));
@@ -155,8 +156,12 @@ test("任务会话原子替换遇到短暂文件占用时会重试", async (t) =
     const session = await createTaskSession("验证 Windows 文件占用重试");
     assert.equal((await getTaskSession(session.id)).userGoal, "验证 Windows 文件占用重试");
     assert.equal(renameAttempts, 3);
+    const metrics = await getTaskSessionPersistenceMetrics(session.id);
+    assert.equal(metrics.taskSessionRenameRetryCount, 2);
+    assert.equal(metrics.taskSessionPhysicalWriteCount, 1);
     const directory = projectRuntimeDirectory("task-sessions");
     assert.deepEqual((await fs.readdir(directory)).filter((name) => name.endsWith(".tmp")), []);
+    await clearTaskMetricsForTest({ key: session.id });
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }
@@ -179,6 +184,109 @@ test("任务会话原子替换不会重试非文件占用错误", async (t) => {
     assert.equal(renameAttempts, 1);
     const directory = projectRuntimeDirectory("task-sessions");
     assert.deepEqual((await fs.readdir(directory)).filter((name) => name.endsWith(".tmp")), []);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("同一任务并发提交 100 次更新时按顺序合并为一次物理写入", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("验证任务状态合并写入");
+  await clearTaskMetricsForTest({ key: session.id });
+  try {
+    await Promise.all(
+      Array.from({ length: 100 }, (_, index) => addTaskSessionFilesChanged(session.id, [`src/file-${index}.ts`]))
+    );
+
+    const loaded = await getTaskSession(session.id);
+    const metrics = await getTaskSessionPersistenceMetrics(session.id);
+    assert.equal(loaded.filesChanged.length, 100);
+    assert.deepEqual(loaded.filesChanged, Array.from({ length: 100 }, (_, index) => `src/file-${index}.ts`));
+    assert.equal(metrics.taskSessionUpdateCount, 100);
+    assert.equal(metrics.taskSessionPhysicalWriteCount, 1);
+    assert.equal(metrics.taskSessionWriteCoalescedCount, 99);
+  } finally {
+    await clearTaskMetricsForTest({ key: session.id });
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("不同任务的合并批次可以并行物理写入", async (t) => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-parallel-write-"));
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const first = await createTaskSession("并行任务一");
+  const second = await createTaskSession("并行任务二");
+  const originalWriteFile = fs.writeFile.bind(fs);
+  let activeWrites = 0;
+  let maximumActiveWrites = 0;
+
+  t.mock.method(fs, "writeFile", async (...args: Parameters<typeof fs.writeFile>) => {
+    activeWrites += 1;
+    maximumActiveWrites = Math.max(maximumActiveWrites, activeWrites);
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      return await originalWriteFile(...args);
+    } finally {
+      activeWrites -= 1;
+    }
+  });
+
+  try {
+    await Promise.all([
+      addTaskSessionFilesChanged(first.id, ["src/first.ts"]),
+      addTaskSessionFilesChanged(second.id, ["src/second.ts"])
+    ]);
+    assert.ok(maximumActiveWrites >= 2);
+    assert.deepEqual((await getTaskSession(first.id)).filesChanged, ["src/first.ts"]);
+    assert.deepEqual((await getTaskSession(second.id)).filesChanged, ["src/second.ts"]);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("相同序列化内容跳过任务会话物理写入", async (t) => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("验证任务状态内容去重");
+  try {
+    t.mock.method(Date, "now", () => 1_234_567_890);
+    await updateTaskSessionChatId(session.id, "chat-dedupe");
+    await clearTaskMetricsForTest({ key: session.id });
+
+    await updateTaskSessionChatId(session.id, "chat-dedupe");
+    const metrics = await getTaskSessionPersistenceMetrics(session.id);
+    assert.equal(metrics.taskSessionUpdateCount, 1);
+    assert.equal(metrics.taskSessionPhysicalWriteCount, 0);
+    assert.equal(metrics.taskSessionWriteSkippedCount, 1);
+  } finally {
+    await clearTaskMetricsForTest({ key: session.id });
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("终态立即刷新时会同时写入此前排队的完整快照", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("验证终态立即刷新");
+  try {
+    const pendingUpdate = addTaskSessionFilesChanged(session.id, ["src/final.ts"]);
+    const finalization = finalizeTaskSession({
+      taskSessionId: session.id,
+      runtimeResult: { status: "completed" },
+      source: "agent_runtime"
+    });
+
+    await Promise.all([pendingUpdate, finalization]);
+    const raw = JSON.parse(await fs.readFile(path.join(projectRuntimeDirectory("task-sessions"), `${session.id}.json`), "utf8")) as TaskSession;
+    assert.equal(raw.status, "success");
+    assert.deepEqual(raw.filesChanged, ["src/final.ts"]);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("显式 flush 会在关闭前写出合并窗口中的更新", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("验证退出前刷新");
+  try {
+    const pendingUpdate = addTaskSessionFilesChanged(session.id, ["src/before-exit.ts"]);
+    await flushPendingTaskSessionWrites();
+    await pendingUpdate;
+    assert.deepEqual((await getTaskSession(session.id)).filesChanged, ["src/before-exit.ts"]);
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }

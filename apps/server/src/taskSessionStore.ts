@@ -9,7 +9,7 @@ import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, Mis
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
 import { isTerminalTaskSessionStatus } from "./taskWorkflow/index.js";
-import { getTaskMetricsSnapshot, scheduleTaskMetricsFinalization } from "./observability/index.js";
+import { getTaskMetricsSnapshot, recordTaskSessionPersistenceMetrics, scheduleTaskMetricsFinalization } from "./observability/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { deleteStoredContextArtifacts } from "./contextBudget/artifactStore.js";
 import { normalizeStructuredModificationPlan, type StructuredModificationPlan } from "./safeEditor/index.js";
@@ -43,7 +43,21 @@ function withoutValues(values: string[], excluded: string[]) {
   return values.filter((value) => !excludedSet.has(value));
 }
 
-const taskSessionWriteQueues = new Map<string, Promise<unknown>>();
+type TaskSessionUpdate = (session: TaskSession) => TaskSession | Promise<TaskSession>;
+type PendingTaskSessionUpdate = {
+  update: TaskSessionUpdate;
+  resolve: (session: TaskSession) => void;
+  reject: (error: unknown) => void;
+};
+type TaskSessionUpdateBatch = {
+  updates: PendingTaskSessionUpdate[];
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const taskSessionWriteQueues = new Map<string, Promise<void>>();
+const taskSessionUpdateBatches = new Map<string, TaskSessionUpdateBatch>();
+const lastPersistedTaskSessionHashes = new Map<string, string>();
+export const taskSessionWriteCoalesceWindowMs = 20;
 const taskSessionRenameRetryDelaysMs = [20, 50, 100, 200, 400];
 
 function isRetryableTaskSessionRenameError(error: unknown) {
@@ -51,7 +65,7 @@ function isRetryableTaskSessionRenameError(error: unknown) {
   return code === "EPERM" || code === "EACCES" || code === "EBUSY";
 }
 
-async function renameTaskSessionFileWithRetry(source: string, destination: string) {
+async function renameTaskSessionFileWithRetry(taskSessionId: string, source: string, destination: string) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       await fs.rename(source, destination);
@@ -63,34 +77,90 @@ async function renameTaskSessionFileWithRetry(source: string, destination: strin
         throw error;
       }
 
+      recordTaskSessionPersistenceMetrics(taskSessionId, { taskSessionRenameRetryCount: 1 });
       // Windows 的杀毒、索引或同步程序可能短暂占用目标文件，等待后重试可保留原子替换语义。
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
     }
   }
 }
 
-async function enqueueTaskSessionUpdate(taskSessionId: string, update: (session: TaskSession) => TaskSession | Promise<TaskSession>) {
-  const previous = taskSessionWriteQueues.get(taskSessionId) || Promise.resolve();
-  const next = previous
-    .catch(() => undefined)
-    .then(async () => {
-      const session = await readTaskSessionRecord(taskSessionId);
-      const updated = await update(session);
-      // finalizer 重复提交同一终态时返回原对象，避免重复写任务文件。
-      if (updated === session) return session;
-      await writeTaskSession(updated);
-      return updated;
-    });
+async function flushTaskSessionUpdateBatch(taskSessionId: string) {
+  const batch = taskSessionUpdateBatches.get(taskSessionId);
+  if (!batch) return taskSessionWriteQueues.get(taskSessionId);
+  taskSessionUpdateBatches.delete(taskSessionId);
+  if (batch.timer) clearTimeout(batch.timer);
+
+  if (batch.updates.length > 1) {
+    recordTaskSessionPersistenceMetrics(taskSessionId, { taskSessionWriteCoalescedCount: batch.updates.length - 1 });
+  }
+
+  const previous = taskSessionWriteQueues.get(taskSessionId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(async () => {
+    let current: TaskSession;
+    try {
+      current = await readTaskSessionRecord(taskSessionId);
+    } catch (error) {
+      for (const pending of batch.updates) pending.reject(error);
+      return;
+    }
+
+    const completed: Array<{ pending: PendingTaskSessionUpdate; result: TaskSession }> = [];
+    for (const pending of batch.updates) {
+      try {
+        // 同一任务的更新严格按提交顺序作用于内存快照，单个更新失败不阻断后续更新。
+        current = await pending.update(current);
+        completed.push({ pending, result: current });
+      } catch (error) {
+        pending.reject(error);
+      }
+    }
+
+    try {
+      if (completed.length) await writeTaskSession(current);
+      for (const item of completed) item.pending.resolve(item.result);
+    } catch (error) {
+      for (const item of completed) item.pending.reject(error);
+    }
+  });
 
   taskSessionWriteQueues.set(taskSessionId, next);
+  await next;
+  if (taskSessionWriteQueues.get(taskSessionId) === next) taskSessionWriteQueues.delete(taskSessionId);
+}
 
-  try {
-    return await next;
-  } finally {
-    if (taskSessionWriteQueues.get(taskSessionId) === next) {
-      taskSessionWriteQueues.delete(taskSessionId);
+async function enqueueTaskSessionUpdate(taskSessionId: string, update: TaskSessionUpdate, options: { flushImmediately?: boolean } = {}) {
+  recordTaskSessionPersistenceMetrics(taskSessionId, { taskSessionUpdateCount: 1 });
+  const result = new Promise<TaskSession>((resolve, reject) => {
+    let batch = taskSessionUpdateBatches.get(taskSessionId);
+    if (!batch) {
+      batch = { updates: [], timer: null };
+      taskSessionUpdateBatches.set(taskSessionId, batch);
     }
-  }
+    batch.updates.push({ update, resolve, reject });
+
+    if (options.flushImmediately) {
+      if (batch.timer) clearTimeout(batch.timer);
+      batch.timer = null;
+      // 关键状态在当前同步调用栈结束后立即冲刷，同时仍可吸收同一轮已排队的更新。
+      queueMicrotask(() => void flushTaskSessionUpdateBatch(taskSessionId));
+    } else if (!batch.timer) {
+      batch.timer = setTimeout(() => void flushTaskSessionUpdateBatch(taskSessionId), taskSessionWriteCoalesceWindowMs);
+    }
+  });
+  return result;
+}
+
+export async function flushPendingTaskSessionWrites(taskSessionId?: string) {
+  do {
+    const pendingIds = taskSessionId
+      ? taskSessionUpdateBatches.has(taskSessionId) ? [taskSessionId] : []
+      : [...taskSessionUpdateBatches.keys()];
+    await Promise.all(pendingIds.map((id) => flushTaskSessionUpdateBatch(id)));
+    const queues = taskSessionId
+      ? [taskSessionWriteQueues.get(taskSessionId)].filter((queue): queue is Promise<void> => Boolean(queue))
+      : [...taskSessionWriteQueues.values()];
+    await Promise.all(queues);
+  } while (taskSessionId ? taskSessionUpdateBatches.has(taskSessionId) : taskSessionUpdateBatches.size > 0);
 }
 
 function getStringField(value: unknown, field: string) {
@@ -658,22 +728,41 @@ async function readTaskSessionRecord(taskSessionId: string): Promise<TaskSession
     throw error;
   });
 
-  return normalizeTaskSession(JSON.parse(content) as TaskSession);
+  const session = normalizeTaskSession(JSON.parse(content) as TaskSession);
+  lastPersistedTaskSessionHashes.set(taskSessionPath(taskSessionId), hashTaskSessionContent(serializeTaskSession(session)));
+  return session;
 }
 
 async function readTaskSession(taskSessionId: string): Promise<TaskSession> {
   return attachTaskSessionDiffView(await readTaskSessionRecord(taskSessionId));
 }
 
+function serializeTaskSession(session: TaskSession) {
+  return `${JSON.stringify(session, null, 2)}\n`;
+}
+
+function hashTaskSessionContent(content: string) {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
 async function writeTaskSession(session: TaskSession) {
   const directory = taskSessionDirectory();
   const destination = taskSessionPath(session.id);
   const temporary = path.join(directory, `.${session.id}.${crypto.randomUUID()}.tmp`);
+  const content = serializeTaskSession(session);
+  const contentHash = hashTaskSessionContent(content);
+  if (lastPersistedTaskSessionHashes.get(destination) === contentHash) {
+    recordTaskSessionPersistenceMetrics(session.id, { taskSessionWriteSkippedCount: 1 });
+    return false;
+  }
   await fs.mkdir(directory, { recursive: true });
   try {
     // 同目录临时文件 + rename 保证读者只会看到旧版本或完整新版本，且显式使用 UTF-8 保存中文。
-    await fs.writeFile(temporary, `${JSON.stringify(session, null, 2)}\n`, "utf8");
-    await renameTaskSessionFileWithRetry(temporary, destination);
+    await fs.writeFile(temporary, content, "utf8");
+    await renameTaskSessionFileWithRetry(session.id, temporary, destination);
+    lastPersistedTaskSessionHashes.set(destination, contentHash);
+    recordTaskSessionPersistenceMetrics(session.id, { taskSessionPhysicalWriteCount: 1 });
+    return true;
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => undefined);
   }
@@ -1123,6 +1212,8 @@ export async function deleteTaskSession(taskSessionId: string) {
     throw new HttpError(400, "taskSessionId is required");
   }
 
+  // 删除前先冲刷同一任务，避免延迟批次在 unlink 后重新创建会话文件。
+  await flushPendingTaskSessionWrites(taskSessionId);
   const runtimePath = taskSessionPath(taskSessionId);
   const legacyPath = legacyTaskSessionPath(taskSessionId);
   let deleted = false;
@@ -1154,6 +1245,7 @@ export async function deleteTaskSession(taskSessionId: string) {
   }
 
   await deleteStoredContextArtifacts(taskSessionId);
+  lastPersistedTaskSessionHashes.delete(runtimePath);
 
   return listTaskSessions();
 }
@@ -1247,7 +1339,7 @@ export async function setTaskSessionPendingToolCall(taskSessionId: string | null
     status: "awaiting_approval",
     pendingToolCall: createPendingToolCall(input),
     updatedAt: Date.now()
-  }));
+  }), { flushImmediately: true });
 }
 
 export async function clearTaskSessionPendingToolCall(taskSessionId: string | null | undefined, actionId?: string) {
@@ -1527,7 +1619,7 @@ export async function updateTaskSessionStatus(
         : session.runtimeOutcome,
       updatedAt: Date.now()
     };
-  });
+  }, { flushImmediately: status === "awaiting_approval" });
 }
 
 export type CommitTaskSessionFinalizationInput = {
@@ -1580,7 +1672,7 @@ export async function commitTaskSessionFinalization(
       },
       updatedAt: finalizedAt
     };
-  });
+  }, { flushImmediately: true });
 
   if (transitioned) {
     const finalMetricStatus = input.status === "success" ? "completed" : input.status;

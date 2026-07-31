@@ -24,7 +24,7 @@ import { applyPendingPatch } from "./patchApplyService.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory, readAgentRulesSettings, writeAgentRulesSettings } from "./projectRules.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
-import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionUserGoal } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
@@ -1361,7 +1361,9 @@ server.listen(config.serverPort, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
+    // 先停止可能继续产生状态更新的后台服务，再冲刷 20ms 合并窗口，避免关闭竞态丢失最后一批更新。
     void Promise.allSettled([languageServiceGateway.disposeAll(), commandExecutionService.shutdown()])
+      .then(() => flushPendingTaskSessionWrites())
       .finally(() => server.close(() => process.exit(0)));
   });
 }

@@ -10,6 +10,7 @@ import { fileEditToolDefinitions } from "./fileEditTools.js";
 import { runtimeAgentToolRegistry } from "./runtimeAgentTools.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
 import { createTaskSession, getTaskSession } from "./taskSessionStore.js";
+import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics } from "./observability/index.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import type { AgentFileEditToolResult, AgentToolRuntime } from "./agentToolTypes.js";
 import type { AgentStep } from "./types.js";
@@ -133,6 +134,7 @@ test("replaceInFile 工具会记录 task session 事件并生成可回滚 checkp
   await withTempWorkspace(async (workspaceRoot) => {
     await fs.writeFile(path.join(workspaceRoot, "target.ts"), "const value = 'before';\n", "utf8");
     const session = await createTaskSession("记录工具式编辑");
+    await clearTaskMetricsForTest({ key: session.id });
     const steps: AgentStep[] = [];
 
     const message = await executeAgentToolCall(
@@ -167,6 +169,10 @@ test("replaceInFile 工具会记录 task session 事件并生成可回滚 checkp
     assert.equal(loaded.fileEditEvents?.[1]?.checkpointId, content.checkpointId);
     assert.deepEqual(loaded.filesChanged, ["target.ts"]);
     assert.equal(steps.some((step) => step.type === "checkpoint" && step.checkpointId === content.checkpointId), true);
+    const persistenceMetrics = await getTaskSessionPersistenceMetrics(session.id);
+    assert.equal(persistenceMetrics.taskSessionUpdateCount, 4);
+    assert.equal(persistenceMetrics.taskSessionPhysicalWriteCount, 2);
+    assert.equal(persistenceMetrics.taskSessionWriteCoalescedCount, 2);
 
     const checkpoint = await getCheckpoint(content.checkpointId || "");
     assert.equal(checkpoint.source?.toolCallId, "tool-replace-session-1");
@@ -175,6 +181,7 @@ test("replaceInFile 工具会记录 task session 事件并生成可回滚 checkp
 
     await rollbackCheckpoint(content.checkpointId || "");
     assert.equal(await fs.readFile(path.join(workspaceRoot, "target.ts"), "utf8"), "const value = 'before';\n");
+    await clearTaskMetricsForTest({ key: session.id });
   });
 });
 

@@ -99,6 +99,13 @@ test("并发指标写入保持 UTF-8 JSONL 行完整", async () => {
       safeEditorConfirmedExpansionCount: 0,
       safeEditorRiskAcknowledgementCount: 0,
       safeEditorFalseExpansionRegressionCount: 0,
+      taskSessionPersistence: {
+        taskSessionUpdateCount: 0,
+        taskSessionPhysicalWriteCount: 0,
+        taskSessionWriteSkippedCount: 0,
+        taskSessionWriteCoalescedCount: 0,
+        taskSessionRenameRetryCount: 0
+      },
       tools: {
         calls: 0,
         repeatedCalls: 0,
