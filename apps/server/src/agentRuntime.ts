@@ -30,7 +30,7 @@ import { createAgentToolRuntime, executeAgentToolCall } from "./agentTools.js";
 import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import type { AgentMessage as PersistedAgentMessage, AgentRuntimeStatus, AgentStep, PendingAgentToolCall, TaskPlanItem, TaskRuntimeEvidence } from "./types.js";
+import type { AgentMessage as PersistedAgentMessage, AgentRuntimeStatus, AgentStep, CompletionRejectionCode, PendingAgentToolCall, TaskPlanItem, TaskRuntimeEvidence } from "./types.js";
 import {
   buildTaskWorkflowProgressPrompt,
   buildTaskWorkflowRuntimePrompt,
@@ -83,6 +83,8 @@ export type AgentRuntimeOptions = {
   generatedPatchIds?: string[];
   appliedFilePaths?: string[];
   runtimeEvidence?: TaskRuntimeEvidence;
+  /** 审批恢复会创建新的运行片段，用于按任务聚合恢复次数。 */
+  approvalResume?: boolean;
   taskSessionId?: string | null;
   mode?: AgentMode;
   workflow?: TaskWorkflowSnapshot;
@@ -946,7 +948,8 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     agentContext,
     generatedPatchIds,
     appliedFilePaths: mergedAppliedFilePaths,
-    runtimeEvidence
+    runtimeEvidence,
+    approvalResume: true
   });
 }
 
@@ -1066,6 +1069,31 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     options.metricsRecorder
   );
   metrics.setPrice(selectedModelDescriptor?.price);
+  if (options.approvalResume) metrics.recordApprovalResume();
+  metrics.recordChangedFileCount(directAppliedFiles.size);
+  const persistedAppliedFileCount = restoredRuntimeEvidence?.appliedFilePaths?.length ?? 0;
+  let mutationEvidenceRestoreFailureRecorded = false;
+  const recordCompletionEvidenceObservation = (evidence: CompletionEvidence) => {
+    metrics.recordChangedFileCount(evidence.changedFileCount);
+    if (!mutationEvidenceRestoreFailureRecorded && persistedAppliedFileCount > 0 && evidence.changedFileCount === 0) {
+      // 持久化证据存在但裁决看不到变更时记录异常，避免仅凭最终错误文本推断根因。
+      metrics.recordMutationEvidenceRestoreFailure();
+      mutationEvidenceRestoreFailureRecorded = true;
+    }
+  };
+  const createRejectionDiagnostic = (
+    rejectionCode: CompletionRejectionCode,
+    evidence?: CompletionEvidence,
+    evidenceFingerprint?: string
+  ) => ({
+    rejectionCode,
+    evidenceFingerprint: evidenceFingerprint ?? null,
+    changedFileCount: evidence?.changedFileCount ?? directAppliedFiles.size,
+    persistedAppliedFileCount,
+    validationStatus: evidence?.validationStatus ?? "not_run" as const,
+    lastMutationAt: evidence?.lastMutationAt ?? lastMutationAt ?? null,
+    lastValidationAt: evidence?.lastValidationAt ?? lastValidationAt ?? null
+  });
 
   logAi(runId, "runtime.start", { userGoal: agentContext.userGoal, mode, maxSteps, tools: registry.definitions.map((tool) => tool.name) });
 
@@ -1158,6 +1186,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       ]) + estimator.estimateValue(fullModelRequest.tools ?? []));
     }
     const completionStartedAt = Date.now();
+    metrics.recordProviderCall();
     const completion = await completeModel(modelRequest);
     metrics.recordFirstTokenLatency(
       completion.firstTokenLatencyMs ?? Date.now() - completionStartedAt,
@@ -1234,6 +1263,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         lastMutationAt,
         lastValidationAt
       });
+      recordCompletionEvidenceObservation(evidence);
       const semanticCompletionDecision = evaluateAgentCompletion({
         evidence,
         finalContent: content,
@@ -1378,7 +1408,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         }
         options.onAgentStep?.(createCompletionRejectedStep(rejection));
         logAi(runId, "runtime.completeTaskRejected", { reason, toolNames: toolCalls.map((toolCall) => toolCall.name) });
-        metrics.recordCompletionRejected();
+        metrics.recordCompletionRejected({ diagnostic: createRejectionDiagnostic(
+          rejection.code === "COMPLETED" ? "INCOMPLETE_CLAIM" : rejection.code
+        ) });
         continue;
       }
 
@@ -1402,7 +1434,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
         options.onAgentStep?.(createCompletionRejectedStep(rejection));
         logAi(runId, "runtime.completeTaskRejected", { reason });
-        metrics.recordCompletionRejected();
+        metrics.recordCompletionRejected({ diagnostic: createRejectionDiagnostic(
+          rejection.code === "COMPLETED" ? "INCOMPLETE_CLAIM" : rejection.code
+        ) });
         continue;
       }
 
@@ -1418,6 +1452,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         lastMutationAt,
         lastValidationAt
       });
+      recordCompletionEvidenceObservation(evidence);
       const completionContent = [
         completionInput.summary,
         completionInput.validationSummary,
@@ -1499,7 +1534,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       metrics.recordToolFailure({ completionEvidence: false });
       metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
       options.onAgentStep?.(createCompletionRejectedStep(rejectionDecision));
-      metrics.recordCompletionRejected({ sameEvidence, loopStopped });
+      const diagnosticCode = rejectionDecision.code === "COMPLETED" ? "INCOMPLETE_CLAIM" : rejectionDecision.code;
+      metrics.recordCompletionRejected({
+        sameEvidence,
+        loopStopped,
+        diagnostic: createRejectionDiagnostic(diagnosticCode, evidence, completionRejectionState.fingerprint)
+      });
       logAi(runId, "runtime.completeTaskRejected", {
         reason: requestedDecision.reason,
         rejectionCode: rejectionDecision.code,
@@ -1722,6 +1762,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           lastValidationAt,
           pendingApprovalCount: 1
         });
+        recordCompletionEvidenceObservation(evidence);
         await persistRuntimeEvidence();
         await metrics.finish({
           status: "awaiting_approval",
@@ -1755,6 +1796,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const appliedFilePaths = getConfirmedAppliedFilePaths(toolCall.name, result.content, toolCall.arguments);
         if (!resultMetrics.failed) {
           for (const filePath of appliedFilePaths) directAppliedFiles.add(filePath);
+          metrics.recordChangedFileCount(directAppliedFiles.size);
           if (appliedFilePaths.length) lastMutationAt = Date.now();
         }
         // 验证命令可能由工具更新 AgentContext；暂停到下一次审批前必须保留完成时间。

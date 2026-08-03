@@ -23,8 +23,23 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
     tracker.recordToolResult({ signature, cached: true, empty: true });
     tracker.recordToolFailure();
     assert.deepEqual(tracker.getCompletionEvidenceSnapshot(), { failedToolCallCount: 1 });
+    tracker.recordProviderCall();
+    tracker.recordApprovalResume();
+    tracker.recordMutationEvidenceRestoreFailure();
+    tracker.recordChangedFileCount(2);
     tracker.recordCompletionRequest();
-    tracker.recordCompletionRejected();
+    tracker.recordCompletionRejected({
+      diagnostic: {
+        rejectionCode: "NO_MUTATION_EVIDENCE",
+        evidenceFingerprint: "[0,0,\"passed\"]",
+        changedFileCount: 0,
+        persistedAppliedFileCount: 1,
+        validationStatus: "passed",
+        lastMutationAt: 10,
+        lastValidationAt: 20
+      }
+    });
+    tracker.recordProviderCall();
     tracker.recordCompletionRequest();
     tracker.recordCompletionRejected({ sameEvidence: true, loopStopped: true });
     tracker.recordCompletionRequest();
@@ -77,12 +92,69 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
     assert.equal(metrics.completionAcceptedCount, 1);
     assert.equal(metrics.completionRejectedCount, 2);
     assert.equal(metrics.sameEvidenceRejectionCount, 1);
+    assert.equal(metrics.approvalResumeCount, 1);
+    assert.equal(metrics.mutationEvidenceRestoreFailureCount, 1);
     assert.equal(metrics.completionLoopStoppedCount, 1);
+    assert.equal(metrics.providerCallCount, 2);
+    assert.equal(metrics.providerCallsAfterFirstCompletionRejection, 1);
+    assert.equal(metrics.changedFileCount, 2);
+    assert.equal(metrics.inputTokensPerChangedFile, 5);
+    assert.equal(metrics.completionRejections[0]?.rejectionCode, "NO_MUTATION_EVIDENCE");
     assert.equal(log.includes("Authorization"), false);
     assert.equal(log.includes("API_KEY"), false);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+test("资源保护指标识别高 Token、过度压缩和拒绝后 Provider 调用", async () => {
+  const tracker = new RunMetricsTracker(
+    { runId: "resource-guard", taskSessionId: "task-resource", provider: "mock", model: "mock", mode: "act" },
+    async () => undefined,
+    false
+  );
+  tracker.addUsage({ inputTokens: 100_001, outputTokens: 0, reasoningTokens: 0, cachedInputTokens: 0 });
+  tracker.recordChangedFileCount(1);
+  for (let index = 0; index < 4; index += 1) tracker.recordContextEstimate(120_000, 80_000, true);
+  tracker.recordCompletionRejected();
+  for (let index = 0; index < 4; index += 1) tracker.recordProviderCall();
+
+  const metrics = await tracker.finish({ status: "incomplete" });
+  assert.equal(metrics.inputTokensPerChangedFile, 100_001);
+  assert.equal(metrics.contextCompressionCount, 4);
+  assert.equal(metrics.providerCallsAfterFirstCompletionRejection, 4);
+  assert.deepEqual(metrics.completionResourceAlerts.sort(), [
+    "EXCESSIVE_CONTEXT_COMPRESSION",
+    "EXCESSIVE_PROVIDER_CALLS_AFTER_REJECTION",
+    "HIGH_INPUT_TOKENS_PER_CHANGED_FILE"
+  ]);
+});
+
+test("结构化完成拒绝诊断有界且不包含业务正文", async () => {
+  const tracker = new RunMetricsTracker(
+    { runId: "bounded-rejections", taskSessionId: "task-bounded", provider: "mock", model: "mock", mode: "act" },
+    async () => undefined,
+    false
+  );
+  for (let index = 0; index < 25; index += 1) {
+    tracker.recordCompletionRejected({
+      diagnostic: {
+        rejectionCode: "VALIDATION_FAILED",
+        evidenceFingerprint: `[1,0,\"failed\",${index}]`,
+        changedFileCount: 1,
+        persistedAppliedFileCount: 1,
+        validationStatus: "failed",
+        lastMutationAt: index,
+        lastValidationAt: index
+      }
+    });
+  }
+
+  const metrics = await tracker.finish({ status: "incomplete" });
+  const serialized = JSON.stringify(metrics.completionRejections);
+  assert.equal(metrics.completionRejections.length, 20);
+  assert.equal(serialized.includes("Authorization"), false);
+  assert.equal(serialized.includes("API_KEY"), false);
 });
 
 test("并发指标写入保持 UTF-8 JSONL 行完整", async () => {
@@ -114,7 +186,16 @@ test("并发指标写入保持 UTF-8 JSONL 行完整", async () => {
       completionAcceptedCount: 0,
       completionRejectedCount: 0,
       sameEvidenceRejectionCount: 0,
+      approvalResumeCount: 0,
+      mutationEvidenceRestoreFailureCount: 0,
       completionLoopStoppedCount: 0,
+      providerCallCount: 0,
+      providerCallsAfterFirstCompletionRejection: 0,
+      changedFileCount: 0,
+      inputTokensPerChangedFile: null,
+      contextCompressionCount: 0,
+      completionResourceAlerts: [],
+      completionRejections: [],
       taskSessionPersistence: {
         taskSessionUpdateCount: 0,
         taskSessionPhysicalWriteCount: 0,

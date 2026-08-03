@@ -2,6 +2,32 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { appStatePath } from "../statePaths.js";
 import type { ModelPrice, ModelUsage } from "../contracts/model.js";
+import type { CompletionRejectionCode } from "../types.js";
+
+export const COMPLETION_RESOURCE_LIMITS = {
+  maxInputTokensPerChangedFile: 100_000,
+  maxContextCompressionCount: 3,
+  maxProviderCallsAfterFirstCompletionRejection: 3,
+  maxCompletionRejectionDiagnostics: 20
+} as const;
+
+export type CompletionResourceAlert =
+  | "HIGH_INPUT_TOKENS_PER_CHANGED_FILE"
+  | "EXCESSIVE_CONTEXT_COMPRESSION"
+  | "EXCESSIVE_PROVIDER_CALLS_AFTER_REJECTION";
+
+export type CompletionRejectionDiagnostic = {
+  taskSessionId: string | null;
+  runId: string;
+  resumeCount: number;
+  rejectionCode: CompletionRejectionCode;
+  evidenceFingerprint: string | null;
+  changedFileCount: number;
+  persistedAppliedFileCount: number;
+  validationStatus: RunMetrics["result"]["validationStatus"];
+  lastMutationAt: number | null;
+  lastValidationAt: number | null;
+};
 
 export type RunFailureCategory = "none" | "timeout" | "model_error" | "tool_error" | "validation_failure" | "cancelled" | "step_limit" | "internal_error";
 export type RunFinalStatus =
@@ -92,7 +118,16 @@ export type RunMetrics = {
   completionAcceptedCount: number;
   completionRejectedCount: number;
   sameEvidenceRejectionCount: number;
+  approvalResumeCount: number;
+  mutationEvidenceRestoreFailureCount: number;
   completionLoopStoppedCount: number;
+  providerCallCount: number;
+  providerCallsAfterFirstCompletionRejection: number;
+  changedFileCount: number;
+  inputTokensPerChangedFile: number | null;
+  contextCompressionCount: number;
+  completionResourceAlerts: CompletionResourceAlert[];
+  completionRejections: CompletionRejectionDiagnostic[];
   taskSessionPersistence: TaskSessionPersistenceMetrics;
   tools: ToolRuntimeMetrics;
   context: { compressionCount: number; estimatedTokensBefore: number | null; estimatedTokensAfter: number | null; estimator: "conservative" | "unavailable" };
@@ -176,7 +211,13 @@ export class RunMetricsTracker {
   private completionAcceptedCount = 0;
   private completionRejectedCount = 0;
   private sameEvidenceRejectionCount = 0;
+  private approvalResumeCount = 0;
+  private mutationEvidenceRestoreFailureCount = 0;
   private completionLoopStoppedCount = 0;
+  private providerCallCount = 0;
+  private providerCallsAfterFirstCompletionRejection = 0;
+  private changedFileCount = 0;
+  private readonly completionRejections: CompletionRejectionDiagnostic[] = [];
   private readonly toolCallDiagnostics = new Map<string, {
     toolName: string;
     calls: number;
@@ -296,10 +337,43 @@ export class RunMetricsTracker {
     this.completionAcceptedCount += 1;
   }
 
-  recordCompletionRejected(input: { sameEvidence?: boolean; loopStopped?: boolean } = {}) {
+  recordCompletionRejected(input: {
+    sameEvidence?: boolean;
+    loopStopped?: boolean;
+    diagnostic?: Omit<CompletionRejectionDiagnostic, "taskSessionId" | "runId" | "resumeCount">;
+  } = {}) {
     this.completionRejectedCount += 1;
     if (input.sameEvidence) this.sameEvidenceRejectionCount += 1;
     if (input.loopStopped) this.completionLoopStoppedCount += 1;
+    if (input.diagnostic) {
+      this.completionRejections.push({
+        taskSessionId: this.identity.taskSessionId,
+        runId: this.identity.runId,
+        resumeCount: this.approvalResumeCount,
+        ...input.diagnostic
+      });
+      if (this.completionRejections.length > COMPLETION_RESOURCE_LIMITS.maxCompletionRejectionDiagnostics) {
+        this.completionRejections.splice(0, this.completionRejections.length - COMPLETION_RESOURCE_LIMITS.maxCompletionRejectionDiagnostics);
+      }
+    }
+  }
+
+  /** Provider 调用与拒绝后的额外调用分开统计，用于识别收敛保护是否生效。 */
+  recordProviderCall() {
+    this.providerCallCount += 1;
+    if (this.completionRejectedCount > 0) this.providerCallsAfterFirstCompletionRejection += 1;
+  }
+
+  recordApprovalResume() {
+    this.approvalResumeCount += 1;
+  }
+
+  recordMutationEvidenceRestoreFailure() {
+    this.mutationEvidenceRestoreFailureCount += 1;
+  }
+
+  recordChangedFileCount(count: number) {
+    if (Number.isFinite(count) && count > this.changedFileCount) this.changedFileCount = Math.floor(count);
   }
 
   /** 向完成策略提供只读快照，避免策略直接依赖指标对象的内部计数。 */
@@ -351,6 +425,19 @@ export class RunMetricsTracker {
     validationStatus?: RunMetrics["result"]["validationStatus"];
   }) {
     const finishedAt = Date.now();
+    const inputTokensPerChangedFile = this.changedFileCount > 0
+      ? Math.round((this.usage.inputTokens / this.changedFileCount) * 100) / 100
+      : null;
+    const completionResourceAlerts: CompletionResourceAlert[] = [];
+    if (inputTokensPerChangedFile !== null && inputTokensPerChangedFile > COMPLETION_RESOURCE_LIMITS.maxInputTokensPerChangedFile) {
+      completionResourceAlerts.push("HIGH_INPUT_TOKENS_PER_CHANGED_FILE");
+    }
+    if (this.context.compressionCount > COMPLETION_RESOURCE_LIMITS.maxContextCompressionCount) {
+      completionResourceAlerts.push("EXCESSIVE_CONTEXT_COMPRESSION");
+    }
+    if (this.providerCallsAfterFirstCompletionRejection > COMPLETION_RESOURCE_LIMITS.maxProviderCallsAfterFirstCompletionRejection) {
+      completionResourceAlerts.push("EXCESSIVE_PROVIDER_CALLS_AFTER_REJECTION");
+    }
     const metrics: RunMetrics = {
       schemaVersion: 1,
       ...this.identity,
@@ -367,7 +454,16 @@ export class RunMetricsTracker {
       completionAcceptedCount: this.completionAcceptedCount,
       completionRejectedCount: this.completionRejectedCount,
       sameEvidenceRejectionCount: this.sameEvidenceRejectionCount,
+      approvalResumeCount: this.approvalResumeCount,
+      mutationEvidenceRestoreFailureCount: this.mutationEvidenceRestoreFailureCount,
       completionLoopStoppedCount: this.completionLoopStoppedCount,
+      providerCallCount: this.providerCallCount,
+      providerCallsAfterFirstCompletionRejection: this.providerCallsAfterFirstCompletionRejection,
+      changedFileCount: this.changedFileCount,
+      inputTokensPerChangedFile,
+      contextCompressionCount: this.context.compressionCount,
+      completionResourceAlerts,
+      completionRejections: structuredClone(this.completionRejections),
       taskSessionPersistence: createEmptyTaskSessionPersistenceMetrics(),
       tools: {
         calls: this.toolCalls,

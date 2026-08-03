@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { appStatePath } from "../statePaths.js";
-import { appendRunMetrics, createEmptyTaskSessionPersistenceMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta, type TaskSessionPersistenceMetrics } from "./runMetrics.js";
+import { appendRunMetrics, COMPLETION_RESOURCE_LIMITS, createEmptyTaskSessionPersistenceMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta, type TaskSessionPersistenceMetrics } from "./runMetrics.js";
 
 const taskMetrics = new Map<string, RunMetrics>();
 const taskMetricQueues = new Map<string, Promise<unknown>>();
@@ -54,7 +54,16 @@ function normalizeMetricFields(metrics: RunMetrics) {
   metrics.completionAcceptedCount ??= 0;
   metrics.completionRejectedCount ??= 0;
   metrics.sameEvidenceRejectionCount ??= 0;
+  metrics.approvalResumeCount ??= 0;
+  metrics.mutationEvidenceRestoreFailureCount ??= 0;
   metrics.completionLoopStoppedCount ??= 0;
+  metrics.providerCallCount ??= 0;
+  metrics.providerCallsAfterFirstCompletionRejection ??= 0;
+  metrics.changedFileCount ??= 0;
+  metrics.inputTokensPerChangedFile ??= null;
+  metrics.contextCompressionCount ??= metrics.context?.compressionCount ?? 0;
+  metrics.completionResourceAlerts ??= [];
+  metrics.completionRejections ??= [];
   metrics.taskSessionPersistence ??= createEmptyTaskSessionPersistenceMetrics();
   metrics.taskSessionPersistence.taskSessionUpdateCount ??= 0;
   metrics.taskSessionPersistence.taskSessionPhysicalWriteCount ??= 0;
@@ -75,6 +84,20 @@ function normalizeMetricFields(metrics: RunMetrics) {
           ? "step_limit"
           : "provider_error";
   return metrics;
+}
+
+function refreshCompletionResourceAlerts(metrics: RunMetrics) {
+  const alerts = new Set(metrics.completionResourceAlerts);
+  if (metrics.inputTokensPerChangedFile !== null && metrics.inputTokensPerChangedFile > COMPLETION_RESOURCE_LIMITS.maxInputTokensPerChangedFile) {
+    alerts.add("HIGH_INPUT_TOKENS_PER_CHANGED_FILE");
+  }
+  if (metrics.contextCompressionCount > COMPLETION_RESOURCE_LIMITS.maxContextCompressionCount) {
+    alerts.add("EXCESSIVE_CONTEXT_COMPRESSION");
+  }
+  if (metrics.providerCallsAfterFirstCompletionRejection > COMPLETION_RESOURCE_LIMITS.maxProviderCallsAfterFirstCompletionRejection) {
+    alerts.add("EXCESSIVE_PROVIDER_CALLS_AFTER_REJECTION");
+  }
+  metrics.completionResourceAlerts = [...alerts];
 }
 
 async function readSnapshot(key: string) {
@@ -214,11 +237,34 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
     current.safeEditorConfirmedExpansionCount += metrics.safeEditorConfirmedExpansionCount;
     current.safeEditorRiskAcknowledgementCount += metrics.safeEditorRiskAcknowledgementCount;
     current.safeEditorFalseExpansionRegressionCount += metrics.safeEditorFalseExpansionRegressionCount;
+    const taskAlreadyRejectedCompletion = current.completionRejectedCount > 0;
+    const previousApprovalResumeCount = current.approvalResumeCount;
     current.completionRequestCount += metrics.completionRequestCount;
     current.completionAcceptedCount += metrics.completionAcceptedCount;
     current.completionRejectedCount += metrics.completionRejectedCount;
     current.sameEvidenceRejectionCount += metrics.sameEvidenceRejectionCount;
+    current.approvalResumeCount += metrics.approvalResumeCount;
+    current.mutationEvidenceRestoreFailureCount += metrics.mutationEvidenceRestoreFailureCount;
     current.completionLoopStoppedCount += metrics.completionLoopStoppedCount;
+    current.providerCallCount += metrics.providerCallCount;
+    current.providerCallsAfterFirstCompletionRejection += taskAlreadyRejectedCompletion
+      ? metrics.providerCallCount
+      : metrics.providerCallsAfterFirstCompletionRejection;
+    current.changedFileCount = Math.max(current.changedFileCount, metrics.changedFileCount);
+    current.inputTokensPerChangedFile = current.changedFileCount > 0
+      ? Math.round((current.usage.inputTokens / current.changedFileCount) * 100) / 100
+      : null;
+    current.completionResourceAlerts = [...new Set([
+      ...current.completionResourceAlerts,
+      ...metrics.completionResourceAlerts
+    ])];
+    current.completionRejections = [
+      ...current.completionRejections,
+      ...metrics.completionRejections.map((diagnostic) => ({
+        ...diagnostic,
+        resumeCount: previousApprovalResumeCount + diagnostic.resumeCount
+      }))
+    ].slice(-20);
     current.tools.calls += metrics.tools.calls;
     current.tools.repeatedCalls += metrics.tools.repeatedCalls;
     current.tools.failedCalls += metrics.tools.failedCalls;
@@ -234,6 +280,7 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
       current.tools.mostRepeatedCall = structuredClone(metrics.tools.mostRepeatedCall);
     }
     current.context.compressionCount += metrics.context.compressionCount;
+    current.contextCompressionCount = current.context.compressionCount;
     current.context.estimatedTokensBefore = Math.max(current.context.estimatedTokensBefore ?? 0, metrics.context.estimatedTokensBefore ?? 0) || null;
     current.context.estimatedTokensAfter = metrics.context.estimatedTokensAfter ?? current.context.estimatedTokensAfter;
     if (metrics.context.estimator !== "unavailable") current.context.estimator = metrics.context.estimator;
@@ -243,6 +290,8 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
     current.result.patchFileCount = Math.max(current.result.patchFileCount, metrics.result.patchFileCount);
     current.result.validationCommandCount += metrics.result.validationCommandCount;
     if (metrics.result.validationStatus !== "not_run") current.result.validationStatus = metrics.result.validationStatus;
+    // 单次运行未越界时，审批前后累计值仍可能触发任务级资源告警。
+    refreshCompletionResourceAlerts(current);
     taskMetrics.set(key, current);
     await writeSnapshot(key, current);
     return structuredClone(current);

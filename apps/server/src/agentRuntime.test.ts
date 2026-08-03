@@ -197,6 +197,13 @@ test("相同完成证据第三次拒绝后终止循环，修改 summary 不能�
   assert.equal(capturedMetrics?.completionRejectedCount, 3);
   assert.equal(capturedMetrics?.sameEvidenceRejectionCount, 2);
   assert.equal(capturedMetrics?.completionLoopStoppedCount, 1);
+  assert.equal(capturedMetrics?.providerCallCount, 3);
+  assert.equal(capturedMetrics?.providerCallsAfterFirstCompletionRejection, 2);
+  assert.deepEqual(capturedMetrics?.completionRejections.map((item) => item.rejectionCode), [
+    "NO_MUTATION_EVIDENCE",
+    "UNCHANGED_COMPLETION_EVIDENCE",
+    "UNCHANGED_COMPLETION_EVIDENCE"
+  ]);
 });
 
 test("编辑任务必须在最后变更后获得成功验证才能 completeTask", async () => {
@@ -1740,6 +1747,7 @@ test("agent runtime blocks prohibited runCommand before approval", async () => {
 
 test("agent runtime resumes after approving a pending tool call", async () => {
   let executed = false;
+  let capturedMetrics: RunMetrics | undefined;
   const registry = createAgentToolRegistry([createRuntimeTestTool("runCommand", { exitCode: 0 }, () => (executed = true))]);
   const result = await resumeAgentRuntimeAfterApproval({
     userRequest: "Run tests",
@@ -1766,13 +1774,16 @@ test("agent runtime resumes after approving a pending tool call", async () => {
     decision: "approved",
     requestCompletion: async () => ({
       choices: [{ message: { role: "assistant", content: "Command result handled." } }]
-    })
+    }),
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; }
   });
 
   assert.equal(executed, true);
   assert.equal(result.status, "completed");
   assert.equal(result.content, "Command result handled.");
   assert.equal(result.messages.some((message) => message.role === "tool" && /exitCode/.test(message.content || "")), true);
+  assert.equal(capturedMetrics?.approvalResumeCount, 1);
+  assert.equal(capturedMetrics?.providerCallCount, 1);
 });
 
 test("agent runtime resumes after rejecting a pending tool call", async () => {

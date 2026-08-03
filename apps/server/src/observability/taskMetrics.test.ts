@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
+import { appStatePath } from "../statePaths.js";
 import { RunMetricsTracker } from "./runMetrics.js";
 import { clearTaskMetricsForTest, finalizeTaskMetrics, getTaskMetricsSnapshot, getTaskSessionPersistenceMetrics, recordTaskPatchMetrics, recordTaskSafeEditorMetrics, recordTaskSessionPersistenceMetrics } from "./taskMetrics.js";
 
@@ -11,8 +15,20 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   first.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8 });
   first.addUsage({ inputTokens: 10, outputTokens: 2, reasoningTokens: 1, cachedInputTokens: 0 });
   first.recordToolCall();
+  first.recordProviderCall();
+  first.recordChangedFileCount(2);
   first.recordCompletionRequest();
-  first.recordCompletionRejected();
+  first.recordCompletionRejected({
+    diagnostic: {
+      rejectionCode: "PENDING_APPROVAL",
+      evidenceFingerprint: "approval-fingerprint",
+      changedFileCount: 2,
+      persistedAppliedFileCount: 2,
+      validationStatus: "not_run",
+      lastMutationAt: 10,
+      lastValidationAt: null
+    }
+  });
   first.recordContextEstimate(100, 80, true);
   await first.finish({ status: "awaiting_approval" });
 
@@ -20,6 +36,9 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   resumed.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8 });
   resumed.addUsage({ inputTokens: 7, outputTokens: 3, reasoningTokens: 0, cachedInputTokens: 2 });
   resumed.recordToolCall({ failed: true });
+  resumed.recordProviderCall();
+  resumed.recordApprovalResume();
+  resumed.recordChangedFileCount(2);
   resumed.recordCompletionRequest();
   resumed.recordCompletionAccepted();
   await resumed.finish({ status: "completed" });
@@ -36,6 +55,13 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   assert.equal(snapshot.completionRequestCount, 2);
   assert.equal(snapshot.completionAcceptedCount, 1);
   assert.equal(snapshot.completionRejectedCount, 1);
+  assert.equal(snapshot.approvalResumeCount, 1);
+  assert.equal(snapshot.providerCallCount, 2);
+  assert.equal(snapshot.providerCallsAfterFirstCompletionRejection, 1);
+  assert.equal(snapshot.changedFileCount, 2);
+  assert.equal(snapshot.inputTokensPerChangedFile, 8.5);
+  assert.equal(snapshot.contextCompressionCount, 1);
+  assert.equal(snapshot.completionRejections[0]?.rejectionCode, "PENDING_APPROVAL");
   assert.deepEqual(snapshot.usage, { inputTokens: 17, outputTokens: 5, reasoningTokens: 1, cachedInputTokens: 2 });
   assert.equal(snapshot.estimatedCostUsd, 0.000074);
   assert.equal(snapshot.context.compressionCount, 1);
@@ -84,6 +110,40 @@ test("按任务聚合六项 Safe Editor 灰度指标", async () => {
   await clearTaskMetricsForTest({ key: taskSessionId });
 });
 
+test("审批前后累计资源消耗在任务级触发保护告警", async () => {
+  const taskSessionId = "task-resource-alert-aggregation";
+  await clearTaskMetricsForTest({ key: taskSessionId });
+  try {
+    for (const runId of ["resource-before", "resource-after"]) {
+      const tracker = new RunMetricsTracker(
+        { runId, taskSessionId, provider: "mock", model: "mock", mode: "act" },
+        async () => {}
+      );
+      tracker.addUsage({ inputTokens: 60_000, outputTokens: 0, reasoningTokens: 0, cachedInputTokens: 0 });
+      tracker.recordChangedFileCount(1);
+      tracker.recordCompletionRejected();
+      tracker.recordProviderCall();
+      tracker.recordProviderCall();
+      tracker.recordContextEstimate(80_000, 60_000, true);
+      tracker.recordContextEstimate(80_000, 60_000, true);
+      await tracker.finish({ status: "awaiting_approval" });
+    }
+
+    const snapshot = await getTaskMetricsSnapshot(taskSessionId);
+    assert.ok(snapshot);
+    assert.equal(snapshot.inputTokensPerChangedFile, 120_000);
+    assert.equal(snapshot.providerCallsAfterFirstCompletionRejection, 4);
+    assert.equal(snapshot.contextCompressionCount, 4);
+    assert.deepEqual(snapshot.completionResourceAlerts.sort(), [
+      "EXCESSIVE_CONTEXT_COMPRESSION",
+      "EXCESSIVE_PROVIDER_CALLS_AFTER_REJECTION",
+      "HIGH_INPUT_TOKENS_PER_CHANGED_FILE"
+    ]);
+  } finally {
+    await clearTaskMetricsForTest({ key: taskSessionId });
+  }
+});
+
 test("服务重启后从磁盘恢复审批前指标并继续聚合", async () => {
   const taskSessionId = "task-metrics-restart-test";
   await clearTaskMetricsForTest({ key: taskSessionId });
@@ -107,6 +167,44 @@ test("服务重启后从磁盘恢复审批前指标并继续聚合", async () =>
   assert.equal(restored.result.patchFileCount, 1);
   await finalizeTaskMetrics(taskSessionId, "completed", async () => {});
   await clearTaskMetricsForTest({ key: taskSessionId });
+});
+
+test("旧任务指标快照缺少阶段四字段时按零值兼容读取", async () => {
+  const taskSessionId = "task-metrics-legacy-stage4";
+  await clearTaskMetricsForTest({ key: taskSessionId });
+  try {
+    const tracker = new RunMetricsTracker(
+      { runId: "legacy-source", taskSessionId, provider: "mock", model: "mock", mode: "act" },
+      async () => {}
+    );
+    await tracker.finish({ status: "awaiting_approval" });
+
+    const fileName = `${crypto.createHash("sha256").update(taskSessionId).digest("hex")}.json`;
+    const filePath = path.join(appStatePath("task-metrics"), fileName);
+    const legacy = JSON.parse(await fs.readFile(filePath, "utf8")) as Record<string, unknown>;
+    for (const field of [
+      "approvalResumeCount",
+      "mutationEvidenceRestoreFailureCount",
+      "providerCallCount",
+      "providerCallsAfterFirstCompletionRejection",
+      "changedFileCount",
+      "inputTokensPerChangedFile",
+      "contextCompressionCount",
+      "completionResourceAlerts",
+      "completionRejections"
+    ]) delete legacy[field];
+    await fs.writeFile(filePath, `${JSON.stringify(legacy, null, 2)}\n`, "utf8");
+
+    await clearTaskMetricsForTest({ memoryOnly: true });
+    const restored = await getTaskMetricsSnapshot(taskSessionId);
+    assert.ok(restored);
+    assert.equal(restored.approvalResumeCount, 0);
+    assert.equal(restored.providerCallCount, 0);
+    assert.equal(restored.inputTokensPerChangedFile, null);
+    assert.deepEqual(restored.completionRejections, []);
+  } finally {
+    await clearTaskMetricsForTest({ key: taskSessionId });
+  }
 });
 
 test("聚合任务会话逻辑更新、物理写入、跳过、合并和 rename 重试指标", async () => {
