@@ -21,7 +21,9 @@ test("阶段 5 验收覆盖默认启用、显式回退和十类集成场景", as
 
 test("完成度低于 90% 时拒绝通过阶段 5 验收", async () => {
   const evaluation = await runEvaluationSuite();
-  const failedCaseCount = 3;
+  const totalCheckCount = Object.keys(defaultFeatureFlags).length * 2 + evaluation.cases.length;
+  // 随功能矩阵扩展动态制造足够的失败项，确保样本完成度始终严格低于验收阈值。
+  const failedCaseCount = Math.floor(totalCheckCount * (1 - stage5MinimumCompletionRate / 100)) + 1;
   const failedEvaluation = {
     ...evaluation,
     summary: { ...evaluation.summary, passed: evaluation.summary.total - failedCaseCount, failed: failedCaseCount, successRate: 70 },

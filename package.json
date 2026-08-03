@@ -17,6 +17,7 @@
     "verify:agent-new-file-stage7": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage7.ps1",
     "verify:task-completion-stage6": "powershell -ExecutionPolicy Bypass -File scripts/check-task-completion-stage6.ps1",
     "verify:task-completion-stage7": "powershell -ExecutionPolicy Bypass -File scripts/check-task-completion-stage7.ps1",
+    "verify:task-completion-stage8": "powershell -ExecutionPolicy Bypass -File scripts/check-task-completion-stage8.ps1",
     "verify:complete-task-convergence": "powershell -ExecutionPolicy Bypass -File scripts/check-complete-task-convergence.ps1",
     "verify:completion-status-presentation": "powershell -ExecutionPolicy Bypass -File scripts/check-completion-status-presentation.ps1",
     "verify:task-completion-observability": "powershell -ExecutionPolicy Bypass -File scripts/check-task-completion-observability.ps1",

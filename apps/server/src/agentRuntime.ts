@@ -49,7 +49,7 @@ import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "
 import { getPendingPatch } from "./patchStore.js";
 import { ConservativeTokenEstimator, prepareContextBudget } from "./contextBudget/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
-import { implementedFeatures, recordFeatureDecisionDifference, resolveExplicitCompletionRollout, type ExplicitCompletionRolloutConfig } from "./featureFlags.js";
+import { implementedFeatures, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, type CompletionPolicyFeatureFlags, type CompletionPolicyRolloutConfig, type ExplicitCompletionRolloutConfig } from "./featureFlags.js";
 import { getTaskSessionContextState, recordTaskSessionContextBudget, setTaskSessionRuntimeEvidence } from "./taskSessionStore.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
@@ -98,6 +98,10 @@ export type AgentRuntimeOptions = {
   contextBudgetEnabled?: boolean;
   /** 仅供离线验收覆盖灰度阶段；生产默认读取集中配置。 */
   explicitCompletionRollout?: ExplicitCompletionRolloutConfig;
+  /** 仅供验收覆盖独立回滚开关，生产环境默认读取集中配置。 */
+  completionPolicyFlags?: CompletionPolicyFeatureFlags;
+  /** 仅供验收覆盖灰度阶段，生产环境默认读取集中配置。 */
+  completionPolicyRollout?: CompletionPolicyRolloutConfig;
   contextWindowTokens?: number;
   maxOutputTokens?: number;
   contextSafetyMarginTokens?: number;
@@ -797,22 +801,23 @@ function createBlockedToolMessage(toolCall: ModelToolCall, reason: string): Mode
   };
 }
 
-function createCompletionToolErrorMessage(toolCall: ModelToolCall, decision: CompletionDecision): ModelMessage {
+function createCompletionToolErrorMessage(toolCall: ModelToolCall, decision: CompletionDecision, structured = true): ModelMessage {
   return {
     role: "tool",
     toolCallId: toolCall.id,
-    content: JSON.stringify({
+    content: structured ? JSON.stringify({
       error: "completion_rejected",
       completionRequested: true,
       completionStatus: decision.status,
       rejectionCode: decision.code,
       message: decision.reason,
       suggestedAction: decision.suggestedAction
-    })
+    }) : JSON.stringify({ error: decision.reason })
   };
 }
 
-function createCompletionRejectedStep(decision: CompletionDecision): AgentStep {
+function createCompletionRejectedStep(decision: CompletionDecision, structured = true): AgentStep {
+  if (!structured) return createAgentStep({ type: "error", message: decision.reason });
   return createAgentStep({
     type: "completion_rejected",
     completionStatus: decision.status === "completed" ? "incomplete" : decision.status,
@@ -889,12 +894,19 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
   const mode = normalizeAgentMode(options.mode);
   const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
   const runId = options.runId || createAiRunId("agent-resume");
+  const completionPolicyFlags = resolveCompletionPolicyRollout({
+    taskKey: options.taskSessionId || options.runtimeEvidence?.taskRunId || runId,
+    flags: options.completionPolicyFlags ?? config.featureFlags,
+    config: options.completionPolicyRollout ?? config.completionPolicyRollout
+  });
   const persistedMessages = options.persistedMessages || (options.taskSessionId ? await listAgentMessages(options.taskSessionId) : []);
   const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt(options.userRequest, options.agentContext));
   const messages = restoreRuntimeMessages(options.userRequest, mode, persistedMessages, options.workflow, projectMemoryPrompt);
   const agentContext = options.agentContext || options.pendingToolCall.agentContext || createDefaultAgentContext(options.userRequest);
   const taskContextState = options.runtimeEvidence ? null : await loadRuntimeContextState(options.taskSessionId);
-  const persistedRuntimeEvidence = options.runtimeEvidence ?? taskContextState?.runtimeEvidence;
+  const persistedRuntimeEvidence = completionPolicyFlags.taskRuntimeEvidencePersistence
+    ? options.runtimeEvidence ?? taskContextState?.runtimeEvidence
+    : undefined;
   const generatedPatchIds = [...new Set([
     ...(persistedRuntimeEvidence?.generatedPatchIds ?? []),
     ...(options.generatedPatchIds ?? [])
@@ -949,6 +961,8 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     generatedPatchIds,
     appliedFilePaths: mergedAppliedFilePaths,
     runtimeEvidence,
+    completionPolicyFlags,
+    completionPolicyRollout: { mode: "all" },
     approvalResume: true
   });
 }
@@ -960,6 +974,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const runId = options.runId || createAiRunId("agent-runtime");
   const mode = normalizeAgentMode(options.mode);
   const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
+  const completionPolicyFlags = resolveCompletionPolicyRollout({
+    taskKey: options.taskSessionId || options.runtimeEvidence?.taskRunId || runId,
+    flags: options.completionPolicyFlags ?? config.featureFlags,
+    config: options.completionPolicyRollout ?? config.completionPolicyRollout
+  });
   const explicitCompletionRollout = resolveExplicitCompletionRollout({
     taskKey: options.taskSessionId || runId,
     featureEnabled: config.featureFlags.explicitCompletionTool,
@@ -1009,7 +1028,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     for (const message of messages) await persistAgentMessage(options.taskSessionId, message);
   }
   const taskContextState = options.runtimeEvidence ? null : await loadRuntimeContextState(options.taskSessionId);
-  const restoredRuntimeEvidence = options.runtimeEvidence ?? taskContextState?.runtimeEvidence;
+  const restoredRuntimeEvidence = completionPolicyFlags.taskRuntimeEvidencePersistence
+    ? options.runtimeEvidence ?? taskContextState?.runtimeEvidence
+    : undefined;
   const taskRunId = restoredRuntimeEvidence?.taskRunId ?? runId;
   const generatedPatchIds = [...new Set([
     ...(restoredRuntimeEvidence?.generatedPatchIds ?? []),
@@ -1045,7 +1066,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     lastMutationAt,
     lastValidationAt
   });
-  const persistRuntimeEvidence = () => setTaskSessionRuntimeEvidence(options.taskSessionId, snapshotRuntimeEvidence());
+  const persistRuntimeEvidence = () => completionPolicyFlags.taskRuntimeEvidencePersistence
+    ? setTaskSessionRuntimeEvidence(options.taskSessionId, snapshotRuntimeEvidence())
+    : Promise.resolve(undefined);
   const workflowType = options.workflow?.type ?? classifyTaskWorkflow(options.userRequest).type;
   const mutationExpected = mode === "act" && workflowType !== "analysis-only";
   const workspaceMutationAuthorized = options.workflow?.authorization?.workspaceMutation ?? mutationExpected;
@@ -1400,13 +1423,13 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           shouldRecover: true
         };
         for (const toolCall of toolCalls) {
-          const errorMessage = createCompletionToolErrorMessage(toolCall, rejection);
+          const errorMessage = createCompletionToolErrorMessage(toolCall, rejection, completionPolicyFlags.structuredCompletionRejection);
           messages.push(errorMessage);
           await persistAgentMessage(options.taskSessionId, errorMessage);
           metrics.recordToolFailure({ completionEvidence: false });
           metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
         }
-        options.onAgentStep?.(createCompletionRejectedStep(rejection));
+        options.onAgentStep?.(createCompletionRejectedStep(rejection, completionPolicyFlags.structuredCompletionRejection));
         logAi(runId, "runtime.completeTaskRejected", { reason, toolNames: toolCalls.map((toolCall) => toolCall.name) });
         metrics.recordCompletionRejected({ diagnostic: createRejectionDiagnostic(
           rejection.code === "COMPLETED" ? "INCOMPLETE_CLAIM" : rejection.code
@@ -1427,12 +1450,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           suggestedAction: "修正完成声明参数后，将 completeTask 作为唯一工具调用重试。",
           shouldRecover: true
         };
-        const errorMessage = createCompletionToolErrorMessage(completionCall, rejection);
+        const errorMessage = createCompletionToolErrorMessage(completionCall, rejection, completionPolicyFlags.structuredCompletionRejection);
         messages.push(errorMessage);
         await persistAgentMessage(options.taskSessionId, errorMessage);
         metrics.recordToolFailure({ completionEvidence: false });
         metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
-        options.onAgentStep?.(createCompletionRejectedStep(rejection));
+        options.onAgentStep?.(createCompletionRejectedStep(rejection, completionPolicyFlags.structuredCompletionRejection));
         logAi(runId, "runtime.completeTaskRejected", { reason });
         metrics.recordCompletionRejected({ diagnostic: createRejectionDiagnostic(
           rejection.code === "COMPLETED" ? "INCOMPLETE_CLAIM" : rejection.code
@@ -1514,38 +1537,38 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         };
       }
 
-      completionRejectionState = advanceCompletionRejectionState(
-        completionRejectionState,
-        evidence,
-        requestedDecision.code
-      );
-      const sameEvidence = completionRejectionState.consecutiveCount > 1;
-      const loopStopped = completionRejectionState.consecutiveCount >= 3;
-      const guidance = createCompletionRejectionGuidance(requestedDecision, completionRejectionState.consecutiveCount);
+      completionRejectionState = completionPolicyFlags.completionRejectionConvergence
+        ? advanceCompletionRejectionState(completionRejectionState, evidence, requestedDecision.code)
+        : undefined;
+      const sameEvidence = (completionRejectionState?.consecutiveCount ?? 0) > 1;
+      const loopStopped = (completionRejectionState?.consecutiveCount ?? 0) >= 3;
+      const guidance = completionRejectionState
+        ? createCompletionRejectionGuidance(requestedDecision, completionRejectionState.consecutiveCount)
+        : requestedDecision.suggestedAction;
       const rejectionDecision: CompletionDecision = {
         ...requestedDecision,
         code: sameEvidence ? "UNCHANGED_COMPLETION_EVIDENCE" : requestedDecision.code,
         reason: requestedDecision.reason,
         suggestedAction: guidance
       };
-      const errorMessage = createCompletionToolErrorMessage(completionCall, rejectionDecision);
+      const errorMessage = createCompletionToolErrorMessage(completionCall, rejectionDecision, completionPolicyFlags.structuredCompletionRejection);
       messages.push(errorMessage);
       await persistAgentMessage(options.taskSessionId, errorMessage);
       metrics.recordToolFailure({ completionEvidence: false });
       metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
-      options.onAgentStep?.(createCompletionRejectedStep(rejectionDecision));
+      options.onAgentStep?.(createCompletionRejectedStep(rejectionDecision, completionPolicyFlags.structuredCompletionRejection));
       const diagnosticCode = rejectionDecision.code === "COMPLETED" ? "INCOMPLETE_CLAIM" : rejectionDecision.code;
       metrics.recordCompletionRejected({
         sameEvidence,
         loopStopped,
-        diagnostic: createRejectionDiagnostic(diagnosticCode, evidence, completionRejectionState.fingerprint)
+        diagnostic: createRejectionDiagnostic(diagnosticCode, evidence, completionRejectionState?.fingerprint)
       });
       logAi(runId, "runtime.completeTaskRejected", {
         reason: requestedDecision.reason,
         rejectionCode: rejectionDecision.code,
         evidence,
-        evidenceFingerprint: completionRejectionState.fingerprint,
-        consecutiveCount: completionRejectionState.consecutiveCount,
+        evidenceFingerprint: completionRejectionState?.fingerprint,
+        consecutiveCount: completionRejectionState?.consecutiveCount ?? 0,
         loopStopped
       });
       if (loopStopped) {

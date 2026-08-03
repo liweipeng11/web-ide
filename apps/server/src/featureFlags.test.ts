@@ -3,19 +3,19 @@ import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
 import { createCapabilityRouter } from "./capabilityRoutes.js";
-import { createServerCapabilities, defaultFeatureFlags, getStableRolloutBucket, readExplicitCompletionRollout, readFeatureFlags, recordFeatureDecisionDifference, resolveExplicitCompletionRollout, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
+import { createServerCapabilities, defaultFeatureFlags, getStableRolloutBucket, readCompletionPolicyRollout, readExplicitCompletionRollout, readFeatureFlags, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
 import { buildSafeEditRecommendation, evaluateSafeEditRollout } from "./safeEditor/index.js";
 
 test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {
   assert.deepEqual(readFeatureFlags({}), defaultFeatureFlags);
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true", AGENT_PLANNED_FILE_RESOLUTION: "true", AGENT_SEMANTIC_COMPLETION_CHECK: "true", SAFE_EDIT_EVIDENCE_V2_ENABLED: "true", AGENT_EXPLICIT_COMPLETION_TOOL: "true" }), { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true, safeEditEvidenceV2: true, explicitCompletionTool: true });
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0", AGENT_PLANNED_FILE_RESOLUTION: "false", AGENT_SEMANTIC_COMPLETION_CHECK: "off", SAFE_EDIT_EVIDENCE_V2_ENABLED: "false", AGENT_EXPLICIT_COMPLETION_TOOL: "false" }), { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false, safeEditEvidenceV2: false, explicitCompletionTool: false });
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true", AGENT_PLANNED_FILE_RESOLUTION: "true", AGENT_SEMANTIC_COMPLETION_CHECK: "true", SAFE_EDIT_EVIDENCE_V2_ENABLED: "true", AGENT_EXPLICIT_COMPLETION_TOOL: "true", AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE: "true", AGENT_COMPLETION_REJECTION_CONVERGENCE: "true", AGENT_STRUCTURED_COMPLETION_REJECTION: "true" }), defaultFeatureFlags);
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0", AGENT_PLANNED_FILE_RESOLUTION: "false", AGENT_SEMANTIC_COMPLETION_CHECK: "off", SAFE_EDIT_EVIDENCE_V2_ENABLED: "false", AGENT_EXPLICIT_COMPLETION_TOOL: "false", AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE: "false", AGENT_COMPLETION_REJECTION_CONVERGENCE: "false", AGENT_STRUCTURED_COMPLETION_REJECTION: "false" }), Object.fromEntries(Object.keys(defaultFeatureFlags).map((key) => [key, false])));
   assert.deepEqual(readFeatureFlags({ LSP_ENABLED: "invalid-value" }), defaultFeatureFlags);
 });
 
 test("Capability API 返回脱敏能力快照", async () => {
   const app = express();
-  app.use("/api", createCapabilityRouter({ flags: { contextBudgetV2: true, modelProviderGateway: true, lsp: false, inlineEdit: false, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true, safeEditEvidenceV2: true, explicitCompletionTool: true }, implementations: { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false, safeEditEvidenceV2: false, explicitCompletionTool: false }, aiConfigured: true, defaultModel: "mock-model" }));
+  app.use("/api", createCapabilityRouter({ flags: { ...defaultFeatureFlags, lsp: false, inlineEdit: false }, implementations: Object.fromEntries(Object.keys(defaultFeatureFlags).map((key) => [key, false])) as typeof defaultFeatureFlags, aiConfigured: true, defaultModel: "mock-model" }));
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
@@ -41,10 +41,10 @@ test("Feature Flag 仅在实现可用时切换新路径，否则保持旧路径"
 });
 
 test("各项 Feature Flag 分别裁决 legacy 和 next 路径", () => {
-  const names = ["contextBudgetV2", "modelProviderGateway", "lsp", "inlineEdit", "commandExecutionV2", "plannedFileResolution", "semanticCompletionCheck", "safeEditEvidenceV2", "explicitCompletionTool"] as const;
-  const allAvailable = { contextBudgetV2: true, modelProviderGateway: true, lsp: true, inlineEdit: true, commandExecutionV2: true, plannedFileResolution: true, semanticCompletionCheck: true, safeEditEvidenceV2: true, explicitCompletionTool: true };
+  const names = Object.keys(defaultFeatureFlags) as Array<keyof FeatureFlags>;
+  const allAvailable = { ...defaultFeatureFlags };
   for (const name of names) {
-    const disabled = { contextBudgetV2: false, modelProviderGateway: false, lsp: false, inlineEdit: false, commandExecutionV2: false, plannedFileResolution: false, semanticCompletionCheck: false, safeEditEvidenceV2: false, explicitCompletionTool: false } satisfies FeatureFlags;
+    const disabled = Object.fromEntries(names.map((item) => [item, false])) as FeatureFlags;
     assert.equal(resolveFeaturePath(name, disabled, allAvailable), "legacy");
 
     const enabled = { ...disabled, [name]: true };
@@ -126,4 +126,31 @@ test("百分比灰度使用稳定任务分桶且覆盖率符合配置", () => {
   const fiftyRate = decisions.filter((item) => item.fifty).length / decisions.length;
   assert.ok(tenRate >= 0.08 && tenRate <= 0.12, `10% 灰度实际比例为 ${tenRate}`);
   assert.ok(fiftyRate >= 0.47 && fiftyRate <= 0.53, `50% 灰度实际比例为 ${fiftyRate}`);
+});
+
+test("任务完成策略支持独立回滚与稳定的 10%、50%、全量灰度", () => {
+  assert.deepEqual(readCompletionPolicyRollout({}), { mode: "all" });
+  assert.deepEqual(readCompletionPolicyRollout({ AGENT_TASK_COMPLETION_ROLLOUT: "invalid" }), { mode: "off" });
+  const flags = {
+    taskRuntimeEvidencePersistence: true,
+    completionRejectionConvergence: true,
+    structuredCompletionRejection: true
+  };
+  assert.deepEqual(resolveCompletionPolicyRollout({ taskKey: "task-a", flags, config: { mode: "off" } }), {
+    taskRuntimeEvidencePersistence: false,
+    completionRejectionConvergence: false,
+    structuredCompletionRejection: false
+  });
+  assert.deepEqual(resolveCompletionPolicyRollout({ taskKey: "task-a", flags: { ...flags, structuredCompletionRejection: false }, config: { mode: "all" } }), {
+    taskRuntimeEvidencePersistence: true,
+    completionRejectionConvergence: true,
+    structuredCompletionRejection: false
+  });
+
+  const decisions = Array.from({ length: 1_000 }, (_, index) => ({
+    ten: resolveCompletionPolicyRollout({ taskKey: `completion-${index}`, flags, config: { mode: "10" } }).completionRejectionConvergence,
+    fifty: resolveCompletionPolicyRollout({ taskKey: `completion-${index}`, flags, config: { mode: "50" } }).completionRejectionConvergence
+  }));
+  assert.ok(decisions.filter((item) => item.ten).length >= 80 && decisions.filter((item) => item.ten).length <= 120);
+  assert.ok(decisions.filter((item) => item.fifty).length >= 470 && decisions.filter((item) => item.fifty).length <= 530);
 });

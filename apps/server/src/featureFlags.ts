@@ -8,6 +8,9 @@ export type FeatureFlags = {
   semanticCompletionCheck: boolean;
   safeEditEvidenceV2: boolean;
   explicitCompletionTool: boolean;
+  taskRuntimeEvidencePersistence: boolean;
+  completionRejectionConvergence: boolean;
+  structuredCompletionRejection: boolean;
 };
 
 export type FeatureImplementations = Record<keyof FeatureFlags, boolean>;
@@ -23,7 +26,10 @@ const featureFlagEnvironmentNames: Record<keyof FeatureFlags, string> = {
   plannedFileResolution: "AGENT_PLANNED_FILE_RESOLUTION",
   semanticCompletionCheck: "AGENT_SEMANTIC_COMPLETION_CHECK",
   safeEditEvidenceV2: "SAFE_EDIT_EVIDENCE_V2_ENABLED",
-  explicitCompletionTool: "AGENT_EXPLICIT_COMPLETION_TOOL"
+  explicitCompletionTool: "AGENT_EXPLICIT_COMPLETION_TOOL",
+  taskRuntimeEvidencePersistence: "AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE",
+  completionRejectionConvergence: "AGENT_COMPLETION_REJECTION_CONVERGENCE",
+  structuredCompletionRejection: "AGENT_STRUCTURED_COMPLETION_REJECTION"
 };
 
 export const defaultFeatureFlags: FeatureFlags = {
@@ -35,16 +41,28 @@ export const defaultFeatureFlags: FeatureFlags = {
   plannedFileResolution: true,
   semanticCompletionCheck: true,
   safeEditEvidenceV2: true,
-  explicitCompletionTool: true
+  explicitCompletionTool: true,
+  taskRuntimeEvidencePersistence: true,
+  completionRejectionConvergence: true,
+  structuredCompletionRejection: true
 };
 
 export type FeatureDecisionDifference = {
-  feature: "plannedFileResolution" | "semanticCompletionCheck" | "safeEditEvidenceV2" | "explicitCompletionTool";
+  feature: "plannedFileResolution" | "semanticCompletionCheck" | "safeEditEvidenceV2" | "explicitCompletionTool" | CompletionPolicyFeature;
   legacyDecision: unknown;
   nextDecision: unknown;
 };
 
 export type ExplicitCompletionRolloutMode = "shadow" | "10" | "50" | "all" | "strict";
+
+export type CompletionPolicyFeature =
+  | "taskRuntimeEvidencePersistence"
+  | "completionRejectionConvergence"
+  | "structuredCompletionRejection";
+
+export type CompletionPolicyFeatureFlags = Pick<FeatureFlags, CompletionPolicyFeature>;
+export type CompletionPolicyRolloutMode = "off" | "10" | "50" | "all";
+export type CompletionPolicyRolloutConfig = { mode: CompletionPolicyRolloutMode };
 
 export type ExplicitCompletionRolloutConfig = {
   mode: ExplicitCompletionRolloutMode;
@@ -59,6 +77,29 @@ export type ExplicitCompletionRolloutDecision = {
 };
 
 const explicitCompletionRolloutModes = new Set<ExplicitCompletionRolloutMode>(["shadow", "10", "50", "all", "strict"]);
+const completionPolicyRolloutModes = new Set<CompletionPolicyRolloutMode>(["off", "10", "50", "all"]);
+
+/** 读取任务完成策略灰度阶段；默认全量保持现有行为，非法配置则安全关闭。 */
+export function readCompletionPolicyRollout(environment: NodeJS.ProcessEnv = process.env): CompletionPolicyRolloutConfig {
+  const value = environment.AGENT_TASK_COMPLETION_ROLLOUT?.trim().toLowerCase() as CompletionPolicyRolloutMode | undefined;
+  if (!value) return { mode: "all" };
+  return { mode: completionPolicyRolloutModes.has(value) ? value : "off" };
+}
+
+/** 对三项完成策略使用同一稳定任务桶，保证审批恢复与服务重启后的路径一致。 */
+export function resolveCompletionPolicyRollout(input: {
+  taskKey: string;
+  flags: CompletionPolicyFeatureFlags;
+  config: CompletionPolicyRolloutConfig;
+}): CompletionPolicyFeatureFlags {
+  const threshold = input.config.mode === "10" ? 10 : input.config.mode === "50" ? 50 : input.config.mode === "all" ? 100 : 0;
+  const selected = getStableRolloutBucket(input.taskKey) < threshold;
+  return {
+    taskRuntimeEvidencePersistence: selected && input.flags.taskRuntimeEvidencePersistence,
+    completionRejectionConvergence: selected && input.flags.completionRejectionConvergence,
+    structuredCompletionRejection: selected && input.flags.structuredCompletionRejection
+  };
+}
 
 /** 读取显式完成协议灰度阶段；非法配置安全回退到只观测影子模式。 */
 export function readExplicitCompletionRollout(environment: NodeJS.ProcessEnv = process.env): ExplicitCompletionRolloutConfig {
@@ -176,5 +217,8 @@ export const implementedFeatures: FeatureImplementations = {
   plannedFileResolution: true,
   semanticCompletionCheck: true,
   safeEditEvidenceV2: true,
-  explicitCompletionTool: true
+  explicitCompletionTool: true,
+  taskRuntimeEvidencePersistence: true,
+  completionRejectionConvergence: true,
+  structuredCompletionRejection: true
 };

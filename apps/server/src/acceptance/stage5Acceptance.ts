@@ -36,7 +36,10 @@ const featureLabels: Record<keyof FeatureFlags, string> = {
   plannedFileResolution: "Agent Planned File Resolution",
   semanticCompletionCheck: "Agent Semantic Completion Check",
   safeEditEvidenceV2: "Safe Edit Evidence V2",
-  explicitCompletionTool: "Agent Explicit Completion Tool"
+  explicitCompletionTool: "Agent Explicit Completion Tool",
+  taskRuntimeEvidencePersistence: "Task Runtime Evidence Persistence",
+  completionRejectionConvergence: "Completion Rejection Convergence",
+  structuredCompletionRejection: "Structured Completion Rejection"
 };
 
 const disabledEnvironment: NodeJS.ProcessEnv = {
@@ -48,7 +51,10 @@ const disabledEnvironment: NodeJS.ProcessEnv = {
   AGENT_PLANNED_FILE_RESOLUTION: "0",
   AGENT_SEMANTIC_COMPLETION_CHECK: "0",
   SAFE_EDIT_EVIDENCE_V2_ENABLED: "0",
-  AGENT_EXPLICIT_COMPLETION_TOOL: "0"
+  AGENT_EXPLICIT_COMPLETION_TOOL: "0",
+  AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE: "0",
+  AGENT_COMPLETION_REJECTION_CONVERGENCE: "0",
+  AGENT_STRUCTURED_COMPLETION_REJECTION: "0"
 };
 
 /**

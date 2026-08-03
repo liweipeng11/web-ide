@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 import path from "node:path";
 import { resolveAgentBudgetPolicy } from "./agentBudgetPolicy.js";
-import { readExplicitCompletionRollout, readFeatureFlags } from "./featureFlags.js";
+import { readCompletionPolicyRollout, readExplicitCompletionRollout, readFeatureFlags } from "./featureFlags.js";
 import { readProjectMemoryFeatureFlags } from "./projectMemory/projectMemoryFeatureFlags.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), "../../.env") });
@@ -184,5 +184,6 @@ export const config = {
   commandExecutionMaxWorkspaceLogBytes: numberFromEnv("COMMAND_EXECUTION_MAX_WORKSPACE_LOG_BYTES", 50 * 1024 * 1024),
   featureFlags: readFeatureFlags(),
   explicitCompletionRollout: readExplicitCompletionRollout(),
+  completionPolicyRollout: readCompletionPolicyRollout(),
   projectMemoryFeatureFlags: readProjectMemoryFeatureFlags()
 };

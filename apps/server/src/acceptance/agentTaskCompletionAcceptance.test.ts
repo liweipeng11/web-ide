@@ -339,3 +339,78 @@ test("阶段七场景 12：Windows rename 暂时 EPERM 时恢复且无临时文�
     await clearTaskMetricsForTest({ key: session.id });
   });
 });
+
+test("阶段六验收：只读分析任务无需文件变更即可完成", async () => {
+  const steps: Array<{ type: string }> = [];
+  const result = await runAgentRuntime({
+    userRequest: "分析当前完成策略", mode: "plan", registry: createAgentToolRegistry(completionAgentToolDefinitions), maxSteps: 2,
+    contextBudgetEnabled: false, explicitCompletionRollout: strictRollout, metricsRecorder: async () => undefined,
+    onAgentStep: (step) => steps.push(step),
+    requestCompletion: async () => response(completion("analysis-complete", "只读分析完成"))
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(result.completionEvidence?.changedFileCount, 0);
+  assert.equal(steps.some((step) => step.type === "completion_rejected"), false);
+});
+
+test("阶段六验收：修改后未验证与验证后再次修改均不得完成", async () => {
+  for (const staleValidation of [false, true]) {
+    let round = 0;
+    const rejectionCodes: string[] = [];
+    const registry = createAgentToolRegistry([
+      tool("replaceInFile", async () => ({ changed: true, filePath: "src/stale.ts" })),
+      tool("runCommand", async () => ({ exitCode: 0 })),
+      tool("recordValidation", async (_args, runtime) => {
+        runtime.agentContext.commandsRun = [{ command: "pnpm test", status: "success", exitCode: 0, validation: true, finishedAt: Date.now() - 1_000 }];
+        return { exitCode: 0 };
+      }),
+      ...completionAgentToolDefinitions
+    ]);
+    const result = await runAgentRuntime({
+      userRequest: "修改并验证 src/stale.ts", mode: "act", registry, maxSteps: staleValidation ? 6 : 4,
+      contextBudgetEnabled: false, explicitCompletionRollout: strictRollout, metricsRecorder: async () => undefined,
+      onAgentStep: (step) => { if (step.type === "completion_rejected") rejectionCodes.push(step.rejectionCode); },
+      requestCompletion: async () => {
+        round += 1;
+        if (round === 1) return response(call("edit-1", "replaceInFile", { filePath: "src/stale.ts" }));
+        if (staleValidation && round === 2) return response(call("validate", "recordValidation"));
+        if (staleValidation && round === 3) return response(call("edit-2", "replaceInFile", { filePath: "src/stale.ts" }));
+        return response(completion(`reject-${round}`));
+      }
+    });
+    assert.equal(result.status, "incomplete");
+    assert.equal(result.completionEvidence?.validationStatus, staleValidation ? "passed" : "not_run");
+    assert.equal(rejectionCodes[0], staleValidation ? "VALIDATION_STALE" : "VALIDATION_NOT_RUN");
+  }
+});
+
+test("阶段六验收：无文件变化时返回结构化拒绝并在第三次相同请求后熔断", async () => {
+  const steps: Array<{ type: string; rejectionCode?: string }> = [];
+  let providerCallCount = 0;
+  const result = await runAgentRuntime({
+    userRequest: "修改 src/no-change.ts", mode: "act",
+    registry: createAgentToolRegistry([tool("replaceInFile", async () => ({ changed: false, filePath: "src/no-change.ts" })), ...completionAgentToolDefinitions]),
+    maxSteps: 5, contextBudgetEnabled: false, explicitCompletionRollout: strictRollout, metricsRecorder: async () => undefined,
+    onAgentStep: (step) => steps.push(step),
+    requestCompletion: async () => { providerCallCount += 1; return response(completion(`unchanged-${providerCallCount}`)); }
+  });
+  assert.equal(result.status, "incomplete");
+  assert.equal(providerCallCount, 3);
+  assert.equal(steps[0]?.type, "completion_rejected");
+  assert.equal(steps[0]?.rejectionCode, "NO_MUTATION_EVIDENCE");
+  assert.equal(steps.at(-1)?.rejectionCode, "UNCHANGED_COMPLETION_EVIDENCE");
+});
+
+test("阶段六验收：结构化拒绝开关关闭后回退为旧 Tool failed 步骤", async () => {
+  const steps: Array<{ type: string }> = [];
+  await runAgentRuntime({
+    userRequest: "修改 src/legacy.ts", mode: "act",
+    registry: createAgentToolRegistry([tool("replaceInFile", async () => ({ changed: false })), ...completionAgentToolDefinitions]),
+    maxSteps: 1, contextBudgetEnabled: false, explicitCompletionRollout: strictRollout, metricsRecorder: async () => undefined,
+    completionPolicyFlags: { taskRuntimeEvidencePersistence: true, completionRejectionConvergence: true, structuredCompletionRejection: false },
+    completionPolicyRollout: { mode: "all" }, onAgentStep: (step) => steps.push(step),
+    requestCompletion: async () => response(completion("legacy-rejection"))
+  });
+  assert.equal(steps.some((step) => step.type === "error"), true);
+  assert.equal(steps.some((step) => step.type === "completion_rejected"), false);
+});
