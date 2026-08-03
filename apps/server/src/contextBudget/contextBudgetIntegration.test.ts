@@ -105,7 +105,8 @@ test("压缩后保留验证失败证据并继续完成修复", async () => {
       description: "返回结构化验证失败",
       parameters: { type: "object", properties: {} },
       async execute() {
-        return { exitCode: 1, error: "TypeError TS2322 at src/value.ts:1", output: "noise\n".repeat(12_000) };
+        // 工具调用本身成功返回验证诊断；避免把业务验证失败误记为工具执行异常。
+        return { exitCode: 1, validationError: "TypeError TS2322 at src/value.ts:1", output: "noise\n".repeat(12_000) };
       },
       summarize(result) { return result; }
     },

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { RunMetricsTracker, type RunMetrics } from "../observability/index.js";
+import { clearTaskMetricsForTest, RunMetricsTracker, type RunMetrics } from "../observability/index.js";
 import { runAgentRuntime, resumeAgentRuntimeAfterApproval } from "../agentRuntime.js";
 import { createAgentToolRegistry } from "../agentToolRegistry.js";
 import type { AgentToolDefinition } from "../agentToolTypes.js";
@@ -17,6 +17,32 @@ import type { CommandResult, PatchFileChange } from "../types.js";
 import type { VerificationReport } from "../verifier/types.js";
 import { evaluationScenarios } from "./scenarios.js";
 import type { EvaluationAgentResult, EvaluationCaseReport, EvaluationReport, EvaluationScenario } from "./types.js";
+import { resolveExplicitCompletionRollout, type ExplicitCompletionRolloutMode } from "../featureFlags.js";
+
+export type CompletionRolloutEvaluation = {
+  sampleSize: number;
+  stages: Array<{ mode: ExplicitCompletionRolloutMode; enforcedCount: number; enforcedRate: number; legacyComparisonEnabled: boolean }>;
+};
+
+/** 离线评估灰度分桶，报告可用于上线前核对 10%/50% 实际覆盖率。 */
+export function runCompletionRolloutEvaluation(sampleSize = 1_000): CompletionRolloutEvaluation {
+  if (!Number.isInteger(sampleSize) || sampleSize <= 0) throw new Error("sampleSize must be a positive integer");
+  const modes: ExplicitCompletionRolloutMode[] = ["shadow", "10", "50", "all", "strict"];
+  return {
+    sampleSize,
+    stages: modes.map((mode) => {
+      const decisions = Array.from({ length: sampleSize }, (_, index) => resolveExplicitCompletionRollout({
+        taskKey: `evaluation-task-${index}`,
+        featureEnabled: true,
+        implementationAvailable: true,
+        toolRegistered: true,
+        config: { mode }
+      }));
+      const enforcedCount = decisions.filter((decision) => decision.enforceExplicitCompletion).length;
+      return { mode, enforcedCount, enforcedRate: enforcedCount / sampleSize, legacyComparisonEnabled: decisions[0].compareLegacyDecision };
+    })
+  };
+}
 
 export type EvaluationAgent = (scenario: EvaluationScenario, workspaceRoot: string) => Promise<EvaluationAgentResult>;
 
@@ -75,6 +101,8 @@ async function listModifiedFiles(scenario: EvaluationScenario, workspaceRoot: st
 
 async function runValidationRetryEvaluation(scenario: EvaluationScenario, workspaceRoot: string): Promise<EvaluationAgentResult> {
   const aggregateKey = `evaluation-${scenario.id}`;
+  // 评测使用固定关联 ID；启动时清理上次中断遗留快照，保证报告可重复。
+  await clearTaskMetricsForTest({ key: aggregateKey });
   let verificationCalls = 0;
   let capturedMetrics: RunMetrics | undefined;
   const plannedCommand = { name: "test", command: "pnpm test", source: "package.json", reason: "离线评测验证", stage: "test" as const };
@@ -141,6 +169,7 @@ async function runValidationRetryEvaluation(scenario: EvaluationScenario, worksp
     appendTaskSessionPatchEvent: async () => null,
     advanceTaskPlanProgress: async () => null,
     updateTaskSessionStatus: async () => null,
+    finalizeTaskSession: async () => null,
     createMetricsTracker: (taskSessionId: string | null) => {
       const tracker = new RunMetricsTracker({
         runId: `${aggregateKey}-validation-${verificationCalls + 1}`,

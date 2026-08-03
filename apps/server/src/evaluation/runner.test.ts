@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runEvaluationSuite } from "./runner.js";
+import { runCompletionRolloutEvaluation, runEvaluationSuite } from "./runner.js";
 
 test("离线 Mock 评测覆盖十类场景并生成机器可读报告", async () => {
   const report = await runEvaluationSuite();
@@ -18,4 +18,14 @@ test("离线 Mock 评测覆盖十类场景并生成机器可读报告", async ()
   assert.equal(report.cases.find((item) => item.scenarioId === "validation_retry")?.result.metrics.result.validationCommandCount, 2);
   assert.equal(report.cases.find((item) => item.scenarioId === "validation_retry")?.result.metrics.result.validationStatus, "passed");
   assert.doesNotThrow(() => JSON.parse(JSON.stringify(report)));
+});
+
+test("显式完成灰度评估覆盖完整上线顺序", () => {
+  const report = runCompletionRolloutEvaluation();
+  assert.deepEqual(report.stages.map((stage) => stage.mode), ["shadow", "10", "50", "all", "strict"]);
+  assert.equal(report.stages[0].enforcedRate, 0);
+  assert.ok(report.stages[1].enforcedRate >= 0.08 && report.stages[1].enforcedRate <= 0.12);
+  assert.ok(report.stages[2].enforcedRate >= 0.47 && report.stages[2].enforcedRate <= 0.53);
+  assert.equal(report.stages[3].enforcedRate, 1);
+  assert.equal(report.stages[4].legacyComparisonEnabled, false);
 });

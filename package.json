@@ -16,6 +16,7 @@
     "verify:agent-new-file-stage6": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage6.ps1",
     "verify:agent-new-file-stage7": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage7.ps1",
     "verify:task-completion-stage6": "powershell -ExecutionPolicy Bypass -File scripts/check-task-completion-stage6.ps1",
+    "verify:task-completion-stage7": "powershell -ExecutionPolicy Bypass -File scripts/check-task-completion-stage7.ps1",
     "verify:safe-editor-stage0": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage0.ps1",
     "verify:safe-editor-stage1": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage1.ps1",
     "verify:safe-editor-stage2": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage2.ps1",

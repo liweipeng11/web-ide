@@ -44,6 +44,58 @@ export type FeatureDecisionDifference = {
   nextDecision: unknown;
 };
 
+export type ExplicitCompletionRolloutMode = "shadow" | "10" | "50" | "all" | "strict";
+
+export type ExplicitCompletionRolloutConfig = {
+  mode: ExplicitCompletionRolloutMode;
+};
+
+export type ExplicitCompletionRolloutDecision = {
+  mode: ExplicitCompletionRolloutMode;
+  bucket: number;
+  toolAvailable: boolean;
+  enforceExplicitCompletion: boolean;
+  compareLegacyDecision: boolean;
+};
+
+const explicitCompletionRolloutModes = new Set<ExplicitCompletionRolloutMode>(["shadow", "10", "50", "all", "strict"]);
+
+/** 读取显式完成协议灰度阶段；非法配置安全回退到只观测影子模式。 */
+export function readExplicitCompletionRollout(environment: NodeJS.ProcessEnv = process.env): ExplicitCompletionRolloutConfig {
+  const value = environment.AGENT_EXPLICIT_COMPLETION_ROLLOUT?.trim().toLowerCase() as ExplicitCompletionRolloutMode | undefined;
+  return { mode: value && explicitCompletionRolloutModes.has(value) ? value : "shadow" };
+}
+
+/** 使用稳定散列固定任务分桶，确保重试、审批恢复和服务重启后仍走同一路径。 */
+export function getStableRolloutBucket(taskKey: string) {
+  let hash = 0x811c9dc5;
+  for (const character of taskKey || "anonymous-task") {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0) % 100;
+}
+
+export function resolveExplicitCompletionRollout(input: {
+  taskKey: string;
+  featureEnabled: boolean;
+  implementationAvailable: boolean;
+  toolRegistered: boolean;
+  config: ExplicitCompletionRolloutConfig;
+}): ExplicitCompletionRolloutDecision {
+  const bucket = getStableRolloutBucket(input.taskKey);
+  const toolAvailable = input.featureEnabled && input.implementationAvailable && input.toolRegistered;
+  const threshold = input.config.mode === "10" ? 10 : input.config.mode === "50" ? 50 : input.config.mode === "all" || input.config.mode === "strict" ? 100 : 0;
+  return {
+    mode: input.config.mode,
+    bucket,
+    toolAvailable,
+    enforceExplicitCompletion: toolAvailable && bucket < threshold,
+    // strict 表示旧自然完成逻辑已经退出，不再承担线上对照计算。
+    compareLegacyDecision: input.config.mode !== "strict"
+  };
+}
+
 /**
  * 灰度期间只记录脱敏后的新旧决策，不记录源码、Prompt 或文件内容。
  * 调用方仍由 Feature Flag 决定实际采用哪条路径。

@@ -45,7 +45,7 @@ import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "
 import { getPendingPatch } from "./patchStore.js";
 import { ConservativeTokenEstimator, prepareContextBudget } from "./contextBudget/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
-import { implementedFeatures, recordFeatureDecisionDifference } from "./featureFlags.js";
+import { implementedFeatures, recordFeatureDecisionDifference, resolveExplicitCompletionRollout, type ExplicitCompletionRolloutConfig } from "./featureFlags.js";
 import { getTaskSessionContextState, recordTaskSessionContextBudget } from "./taskSessionStore.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
@@ -88,6 +88,8 @@ export type AgentRuntimeOptions = {
   providerId?: string;
   modelId?: string;
   contextBudgetEnabled?: boolean;
+  /** 仅供离线验收覆盖灰度阶段；生产默认读取集中配置。 */
+  explicitCompletionRollout?: ExplicitCompletionRolloutConfig;
   contextWindowTokens?: number;
   maxOutputTokens?: number;
   contextSafetyMarginTokens?: number;
@@ -887,9 +889,15 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const runId = options.runId || createAiRunId("agent-runtime");
   const mode = normalizeAgentMode(options.mode);
   const registry = options.registry || getAgentModeConfig(options.workflow?.type === "analysis-only" ? "plan" : mode).registry;
-  const explicitCompletionToolEnabled = config.featureFlags.explicitCompletionTool
-    && implementedFeatures.explicitCompletionTool
-    && Boolean(registry.get("completeTask"));
+  const explicitCompletionRollout = resolveExplicitCompletionRollout({
+    taskKey: options.taskSessionId || runId,
+    featureEnabled: config.featureFlags.explicitCompletionTool,
+    implementationAvailable: implementedFeatures.explicitCompletionTool,
+    toolRegistered: Boolean(registry.get("completeTask")),
+    config: options.explicitCompletionRollout ?? config.explicitCompletionRollout
+  });
+  const explicitCompletionToolEnabled = explicitCompletionRollout.toolAvailable;
+  const explicitCompletionRequired = explicitCompletionRollout.enforceExplicitCompletion;
   const budgetPolicy = normalizeRuntimeAgentBudgetPolicy({
     maxSteps: options.maxSteps ?? config.aiAgentMaxSteps,
     convergenceRemainingSteps: options.convergenceRemainingSteps ?? config.aiAgentConvergenceRemainingSteps,
@@ -1162,17 +1170,17 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
             shouldRecover: true
           }
         : completionDecision;
-      recordFeatureDecisionDifference({
+      if (explicitCompletionRollout.compareLegacyDecision) recordFeatureDecisionDifference({
         feature: "explicitCompletionTool",
         legacyDecision: { status: completionDecision.status },
         nextDecision: { status: explicitCompletionDecision.status }
       });
-      const effectiveCompletionDecision = explicitCompletionToolEnabled
+      const effectiveCompletionDecision = explicitCompletionRequired
         ? explicitCompletionDecision
         : completionDecision;
 
       if (effectiveCompletionDecision.shouldRecover && step + 1 < maxSteps) {
-        const recoveryMessage = explicitCompletionToolEnabled && completionDecision.status === "completed"
+        const recoveryMessage = explicitCompletionRequired && completionDecision.status === "completed"
           ? createExplicitCompletionReminder(effectiveCompletionDecision.reason)
           : createCompletionRecoveryMessage(effectiveCompletionDecision, evidence);
         messages.push(recoveryMessage);
@@ -1187,7 +1195,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           maxSteps,
           facts: buildRecoveryFacts(agentContext, generatedPatchIds)
         }));
-        logAi(runId, "runtime.completionRecovery", { step, status: effectiveCompletionDecision.status, evidence, explicitCompletionToolEnabled });
+        logAi(runId, "runtime.completionRecovery", { step, status: effectiveCompletionDecision.status, evidence, explicitCompletionToolEnabled, explicitCompletionRequired, rolloutMode: explicitCompletionRollout.mode, rolloutBucket: explicitCompletionRollout.bucket });
         continue;
       }
 

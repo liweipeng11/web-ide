@@ -45,6 +45,7 @@ test("启用显式完成协议后，自然停止不能直接 completed", async (
     mode: "plan",
     maxSteps: 2,
     contextBudgetEnabled: false,
+    explicitCompletionRollout: { mode: "all" },
     registry: createAgentToolRegistry(completionAgentToolDefinitions),
     requestCompletion: async () => {
       completionCount += 1;

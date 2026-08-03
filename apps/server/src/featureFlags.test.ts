@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
 import { createCapabilityRouter } from "./capabilityRoutes.js";
-import { createServerCapabilities, defaultFeatureFlags, readFeatureFlags, recordFeatureDecisionDifference, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
+import { createServerCapabilities, defaultFeatureFlags, getStableRolloutBucket, readExplicitCompletionRollout, readFeatureFlags, recordFeatureDecisionDifference, resolveExplicitCompletionRollout, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
 import { buildSafeEditRecommendation, evaluateSafeEditRollout } from "./safeEditor/index.js";
 
 test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {
@@ -99,4 +99,31 @@ test("显式完成工具默认启用并支持环境变量回滚", () => {
   assert.equal(readFeatureFlags({}).explicitCompletionTool, true);
   assert.equal(readFeatureFlags({ AGENT_EXPLICIT_COMPLETION_TOOL: "0" }).explicitCompletionTool, false);
   assert.equal(readFeatureFlags({ AGENT_EXPLICIT_COMPLETION_TOOL: "1" }).explicitCompletionTool, true);
+});
+
+test("显式完成协议支持影子、10%、50%、全量与严格灰度", () => {
+  assert.deepEqual(readExplicitCompletionRollout({}), { mode: "shadow" });
+  assert.deepEqual(readExplicitCompletionRollout({ AGENT_EXPLICIT_COMPLETION_ROLLOUT: "50" }), { mode: "50" });
+  assert.deepEqual(readExplicitCompletionRollout({ AGENT_EXPLICIT_COMPLETION_ROLLOUT: "invalid" }), { mode: "shadow" });
+
+  const common = { taskKey: "stable-task", featureEnabled: true, implementationAvailable: true, toolRegistered: true };
+  assert.equal(resolveExplicitCompletionRollout({ ...common, config: { mode: "shadow" } }).enforceExplicitCompletion, false);
+  assert.equal(resolveExplicitCompletionRollout({ ...common, config: { mode: "all" } }).enforceExplicitCompletion, true);
+  assert.equal(resolveExplicitCompletionRollout({ ...common, config: { mode: "strict" } }).compareLegacyDecision, false);
+  assert.equal(resolveExplicitCompletionRollout({ ...common, featureEnabled: false, config: { mode: "all" } }).toolAvailable, false);
+  assert.equal(getStableRolloutBucket("stable-task"), getStableRolloutBucket("stable-task"));
+});
+
+test("百分比灰度使用稳定任务分桶且覆盖率符合配置", () => {
+  const decisions = Array.from({ length: 1_000 }, (_, index) => {
+    const common = { taskKey: `task-${index}`, featureEnabled: true, implementationAvailable: true, toolRegistered: true };
+    return {
+      ten: resolveExplicitCompletionRollout({ ...common, config: { mode: "10" } }).enforceExplicitCompletion,
+      fifty: resolveExplicitCompletionRollout({ ...common, config: { mode: "50" } }).enforceExplicitCompletion
+    };
+  });
+  const tenRate = decisions.filter((item) => item.ten).length / decisions.length;
+  const fiftyRate = decisions.filter((item) => item.fifty).length / decisions.length;
+  assert.ok(tenRate >= 0.08 && tenRate <= 0.12, `10% 灰度实际比例为 ${tenRate}`);
+  assert.ok(fiftyRate >= 0.47 && fiftyRate <= 0.53, `50% 灰度实际比例为 ${fiftyRate}`);
 });
