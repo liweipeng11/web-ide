@@ -13,7 +13,7 @@ import type { AgentContext, AgentToolCall, AgentToolDefinition, AgentToolMessage
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { externalContextReadonlyToolDefinitions } from "./externalContext/index.js";
 import { recoverStoredContextArtifact, storeContextArtifact } from "./contextBudget/index.js";
-import { createReferenceCheckKey } from "./taskWorkflow/referenceChecks.js";
+import { createReferenceCheckKey, parseReferenceCheckKey } from "./taskWorkflow/referenceChecks.js";
 
 export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
@@ -73,6 +73,49 @@ function removeNegativeEvidence(agentContext: AgentContext, evidence: Pick<Negat
   agentContext.negativeEvidence = agentContext.negativeEvidence.filter(
     (item) => item.query !== evidence.query || item.scope !== evidence.scope || item.sourceTool !== evidence.sourceTool
   );
+}
+
+function normalizeEvidenceTarget(value: string) {
+  return value.trim().replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
+}
+
+function correctContradictoryExistenceEvidence(agentContext: AgentContext, target: ExistenceCheckTarget, correctedStatus: string, runId: string) {
+  const normalizedTarget = normalizeEvidenceTarget(target.value);
+  const authoritative = correctedStatus === "existing" || correctedStatus === "dependency_installed" || correctedStatus === "dependency_declared";
+  if (!authoritative) return;
+
+  const correctedStatuses: string[] = [];
+  for (const [key, resolution] of Object.entries(agentContext.referenceChecks || {})) {
+    const parsed = parseReferenceCheckKey(key);
+    const oldKind = parsed?.kind || "unknown";
+    const oldValue = normalizeEvidenceTarget(parsed?.value || "");
+    if (oldValue !== normalizedTarget || !resolution.blocking) continue;
+    // package 权威检查可以纠正此前把依赖名误当 symbol/import 的缺失结论。
+    if (target.kind !== "package" && oldKind !== target.kind) continue;
+    correctedStatuses.push(resolution.status);
+    delete agentContext.referenceChecks?.[key];
+  }
+
+  const oldNegativeEvidence = agentContext.negativeEvidence || [];
+  const retainedNegativeEvidence = oldNegativeEvidence.filter((item) => normalizeEvidenceTarget(item.query) !== normalizedTarget);
+  if (retainedNegativeEvidence.length !== oldNegativeEvidence.length) {
+    correctedStatuses.push("negative_evidence");
+    agentContext.negativeEvidence = retainedNegativeEvidence;
+  }
+
+  for (const previousStatus of [...new Set(correctedStatuses)]) {
+    const event = {
+      targetKind: target.kind,
+      targetValue: target.value.trim(),
+      previousStatus,
+      correctedStatus,
+      sourceTool: "checkExistence" as const,
+      createdAt: Date.now()
+    };
+    agentContext.evidenceCorrections ??= [];
+    agentContext.evidenceCorrections.push(event);
+    logAi(runId, "runtime.existenceEvidenceCorrected", event);
+  }
 }
 
 function createSearchToolResult<T>(options: {
@@ -332,7 +375,7 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
   },
   {
     name: "checkExistence",
-    description: "Verify that imports, symbols, package scripts, environment-variable sources, and directories actually exist. Returns exists, missing, or ambiguous; resolve missing and ambiguous results before editing or claiming a command ran.",
+    description: "Verify that imports, packages, symbols, package scripts, environment-variable sources, and directories actually exist. Returns exists, missing, or ambiguous; resolve missing and ambiguous results before editing or claiming a command ran.",
     cacheable: false,
     parameters: {
       type: "object",
@@ -343,9 +386,9 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
           items: {
             type: "object",
             properties: {
-              kind: { type: "string", enum: ["import", "symbol", "script", "environment", "directory"] },
+              kind: { type: "string", enum: ["import", "package", "symbol", "script", "environment", "directory"] },
               value: { type: "string" },
-              fromPath: { type: "string", description: "Optional workspace-relative source file for import/symbol lookup or package.json path for script lookup." },
+              fromPath: { type: "string", description: "Optional workspace-relative source file for import/package/symbol lookup or package.json path for script lookup." },
               environmentMode: { type: "string", description: "Optional environment mode used to explain environment-variable lookup." }
             },
             required: ["kind", "value"],
@@ -363,7 +406,7 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Each target must be an object");
         const target = value as Record<string, unknown>;
         const kind = optionalString(target, "kind");
-        const validKinds = new Set(["import", "symbol", "script", "environment", "directory"]);
+        const validKinds = new Set(["import", "package", "symbol", "script", "environment", "directory"]);
         if (!validKinds.has(kind)) throw new Error("target.kind is invalid");
         return { kind: kind as ExistenceCheckTarget["kind"], value: requiredString(target, "value"), ...(optionalString(target, "fromPath") ? { fromPath: optionalString(target, "fromPath") } : {}), ...(optionalString(target, "environmentMode") ? { environmentMode: optionalString(target, "environmentMode") } : {}) };
       });
@@ -373,6 +416,7 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
       runtime.agentContext.existenceCheckPerformed = true;
       runtime.agentContext.referenceChecks ??= {};
       for (const check of result.checks) {
+        correctContradictoryExistenceEvidence(runtime.agentContext, check.target, check.resolution.status, runtime.runId);
         runtime.agentContext.referenceChecks[createReferenceCheckKey(check.target)] = {
           ...check.resolution,
           candidates: check.resolution.candidates.map((candidate) => ({ ...candidate }))

@@ -158,7 +158,7 @@ function formatBlockReason(workflow: TaskWorkflowSnapshot, missing: TaskWorkflow
     return "findSimilarPatterns returned candidate files. Read at least one candidate with readFile before editing.";
   }
   if (missing.includes("existence_check")) {
-    return "Before editing, call checkExistence to verify referenced imports, symbols, scripts, or directories.";
+    return "Before editing, call checkExistence to verify referenced imports, packages, symbols, scripts, or directories.";
   }
   if (missing.includes("references_resolved")) {
     return "Resolve missing or ambiguous references before editing.";

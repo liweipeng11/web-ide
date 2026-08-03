@@ -1,11 +1,11 @@
 /** 检查器支持的引用对象类型。 */
-export type ExistenceCheckKind = "import" | "symbol" | "script" | "environment" | "directory";
+export type ExistenceCheckKind = "import" | "package" | "symbol" | "script" | "environment" | "directory";
 
 /** 单个待确认的项目引用。 */
 export type ExistenceCheckTarget = {
   kind: ExistenceCheckKind;
   value: string;
-  /** import 的发起文件，或 script 所属的 package.json 路径。 */
+  /** import/package 的发起文件，或 script 所属的 package.json 路径。 */
   fromPath?: string;
   /** 环境变量加载模式；未提供时按通用 .env 优先级解析。 */
   environmentMode?: string;

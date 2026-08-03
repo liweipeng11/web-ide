@@ -190,6 +190,40 @@ test("checkExistence records unresolved references for the runtime edit gate", a
   await fs.rm(workspaceRoot, { recursive: true, force: true });
 });
 
+test("package 权威检查清理同名旧缺失证据并记录纠正事件", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  await fs.writeFile(path.join(workspaceRoot, "package.json"), JSON.stringify({ dependencies: { "vue-router": "^4.0.0" } }), "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+  const agentContext = createAgentContext();
+  const runtime = createAgentToolRuntime({ agentContext, runId: "test-package-evidence-correction" });
+
+  await executeAgentToolCall(createToolCall("checkExistence", {
+    targets: [{ kind: "symbol", value: "vue-router" }]
+  }), runtime);
+  agentContext.negativeEvidence = [{
+    kind: "text_absent",
+    query: "vue-router",
+    scope: "src",
+    sourceTool: "searchCode",
+    exhaustive: true,
+    createdAt: Date.now()
+  }];
+
+  const response = await executeAgentToolCall(createToolCall("checkExistence", {
+    targets: [{ kind: "package", value: "vue-router" }]
+  }), runtime);
+  const data = JSON.parse(response.content) as { checks: Array<{ status: string; resolution: { status: string; blocking: boolean } }> };
+
+  assert.equal(data.checks[0]?.status, "exists");
+  assert.equal(data.checks[0]?.resolution.status, "dependency_declared");
+  assert.equal(data.checks[0]?.resolution.blocking, false);
+  assert.deepEqual(agentContext.negativeEvidence, []);
+  assert.deepEqual(agentContext.unresolvedExistenceChecks, []);
+  assert.equal(Object.values(agentContext.referenceChecks || {}).some((resolution) => resolution.status === "truly_missing"), false);
+  assert.deepEqual(agentContext.evidenceCorrections?.map((event) => event.previousStatus).sort(), ["negative_evidence", "truly_missing"]);
+  await fs.rm(workspaceRoot, { recursive: true, force: true });
+});
+
 test("findSimilarPatterns does not reuse stale cached candidates", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   await fs.mkdir(path.join(workspaceRoot, "src", "services"), { recursive: true });

@@ -5,6 +5,11 @@ import type { PatternCandidate, PatternFinderInput, PatternFinderResult } from "
 const SUPPORTED_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".vue", ".py"]);
 const IGNORED_DIRECTORIES = new Set(["node_modules", ".git", "dist", "build", ".next", ".mini-ai", ".ai-agent"]);
 const MAX_INDEXED_FILES = 1_500;
+const MIN_RELEVANCE_SCORE = 36;
+const CROSS_PROJECT_MIN_RELEVANCE_SCORE = 44;
+const GENERIC_PATH_TOKENS = new Set(["app", "apps", "src", "source", "package", "packages", "index", "main", "js", "jsx", "ts", "tsx", "vue", "py"]);
+
+type Framework = "vue" | "react" | "python" | "generic";
 
 type FileFeatures = {
   filePath: string;
@@ -14,8 +19,16 @@ type FileFeatures = {
   responsibilities: string[];
   errorPatterns: string[];
   structurePatterns: string[];
+  framework: Framework;
+  projectRoot: string;
+  extension: string;
   isTest: boolean;
   updatedAt: number;
+};
+
+type ProjectBoundary = {
+  root: string;
+  frameworks: Framework[];
 };
 
 function unique(values: string[]) {
@@ -77,6 +90,24 @@ function detectStructurePatterns(content: string) {
   return checks.filter(([, expression]) => expression.test(content)).map(([name]) => name);
 }
 
+function detectFramework(filePath: string, content: string, projectFrameworks: Framework[]): Framework {
+  const extension = path.posix.extname(filePath).toLowerCase();
+  const source = content.toLowerCase();
+  if (extension === ".vue" || /(?:from\s+|require\()['"](?:vue|vue-router)|<template\b|definecomponent\s*\(/i.test(source)) return "vue";
+  if ([".tsx", ".jsx"].includes(extension) || /(?:from\s+|require\()['"](?:react|react-router)|\buse(?:state|effect|memo|callback)\s*\(/i.test(source)) return "react";
+  if (extension === ".py") return "python";
+  return projectFrameworks.length === 1 ? projectFrameworks[0] : "generic";
+}
+
+function inferRequestedFramework(input: PatternFinderInput, target: FileFeatures | null, boundary?: ProjectBoundary): Framework {
+  if (target?.framework && target.framework !== "generic") return target.framework;
+  const source = `${input.taskDescription} ${input.targetPath || ""} ${input.targetResponsibility || ""}`.toLowerCase();
+  if (/\bvue(?:\.js)?\b|vue-router|\.vue\b/.test(source)) return "vue";
+  if (/\breact(?:\.js)?\b|react-router|\.tsx\b|\.jsx\b/.test(source)) return "react";
+  if (/\bpython\b|\.py\b/.test(source)) return "python";
+  return boundary?.frameworks.length === 1 ? boundary.frameworks[0] : "generic";
+}
+
 function detectResponsibilities(filePath: string, content: string) {
   const source = `${filePath}\n${content.slice(0, 8_000)}`.toLowerCase();
   const checks: Array<[string, RegExp]> = [
@@ -130,11 +161,51 @@ async function collectSourceFiles(workspaceRoot: string) {
   return files.sort((left, right) => left.localeCompare(right));
 }
 
-async function readFeatures(workspaceRoot: string, filePath: string): Promise<FileFeatures | null> {
+async function collectProjectBoundaries(workspaceRoot: string): Promise<ProjectBoundary[]> {
+  const manifestPaths: string[] = [];
+  async function visit(directory: string) {
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory() && !IGNORED_DIRECTORIES.has(entry.name)) await visit(absolutePath);
+      if (entry.isFile() && entry.name === "package.json") manifestPaths.push(absolutePath);
+    }
+  }
+  await visit(workspaceRoot);
+  return (await Promise.all(manifestPaths.map(async (manifestPath) => {
+    const raw = await fs.readFile(manifestPath, "utf8").catch(() => "");
+    try {
+      const manifest = JSON.parse(raw) as Record<string, Record<string, unknown> | undefined>;
+      const dependencies = { ...manifest.dependencies, ...manifest.devDependencies, ...manifest.peerDependencies, ...manifest.optionalDependencies };
+      const frameworks: Framework[] = [];
+      if (dependencies.vue || dependencies["vue-router"]) frameworks.push("vue");
+      if (dependencies.react || dependencies["react-router"] || dependencies["react-router-dom"]) frameworks.push("react");
+      return { root: path.relative(workspaceRoot, path.dirname(manifestPath)).split(path.sep).join("/") || ".", frameworks };
+    } catch {
+      return null;
+    }
+  }))).filter((item): item is ProjectBoundary => Boolean(item))
+    .sort((left, right) => right.root.length - left.root.length);
+}
+
+function resolveProjectBoundary(filePath: string, boundaries: ProjectBoundary[]) {
+  return boundaries.find((boundary) => boundary.root === "." || filePath === boundary.root || filePath.startsWith(`${boundary.root}/`))
+    || { root: ".", frameworks: [] };
+}
+
+function resolveLogicalProjectRoot(filePath: string, boundary: ProjectBoundary) {
+  if (boundary.root !== ".") return boundary.root;
+  const segments = filePath.split("/");
+  return ["apps", "packages"].includes(segments[0]) && segments[1] ? `${segments[0]}/${segments[1]}` : ".";
+}
+
+async function readFeatures(workspaceRoot: string, filePath: string, boundaries: ProjectBoundary[]): Promise<FileFeatures | null> {
   const absolutePath = path.join(workspaceRoot, filePath);
   const [content, stat] = await Promise.all([fs.readFile(absolutePath, "utf8").catch(() => ""), fs.stat(absolutePath).catch(() => null)]);
   if (!content || !stat) return null;
 
+  const boundary = resolveProjectBoundary(filePath, boundaries);
   return {
     filePath,
     content,
@@ -143,6 +214,9 @@ async function readFeatures(workspaceRoot: string, filePath: string): Promise<Fi
     responsibilities: detectResponsibilities(filePath, content),
     errorPatterns: detectErrorPatterns(content),
     structurePatterns: detectStructurePatterns(content),
+    framework: detectFramework(filePath, content, boundary.frameworks),
+    projectRoot: resolveLogicalProjectRoot(filePath, boundary),
+    extension: path.posix.extname(filePath).toLowerCase(),
     isTest: isTestFile(filePath),
     updatedAt: stat.mtimeMs
   };
@@ -167,7 +241,7 @@ function buildReusableElements(candidate: FileFeatures, relatedTests: string[]) 
   return elements;
 }
 
-function scoreCandidate(candidate: FileFeatures, target: FileFeatures | null, input: PatternFinderInput, allFiles: FileFeatures[]) {
+function scoreCandidate(candidate: FileFeatures, target: FileFeatures | null, input: PatternFinderInput, allFiles: FileFeatures[], targetProjectRoot: string, targetFramework: Framework) {
   const reasons: string[] = [];
   let score = 0;
   const targetTokens = unique([...
@@ -175,11 +249,35 @@ function scoreCandidate(candidate: FileFeatures, target: FileFeatures | null, in
     ...tokenize(input.targetPath || ""),
     ...tokenize(input.targetResponsibility || "")
   ]);
-  const candidatePathTokens = tokenize(candidate.filePath);
-  const keywordMatches = intersectionSize(targetTokens, candidatePathTokens);
+  // 通用目录名和扩展名由专门边界分处理，不能重复伪装成业务关键词。
+  const candidatePathTokens = tokenize(candidate.filePath).filter((token) => !GENERIC_PATH_TOKENS.has(token));
+  const semanticTargetTokens = targetTokens.filter((token) => !GENERIC_PATH_TOKENS.has(token));
+  const keywordMatches = intersectionSize(semanticTargetTokens, candidatePathTokens);
   if (keywordMatches) {
     score += Math.min(keywordMatches * 7, 21);
     reasons.push(`路径或命名命中 ${keywordMatches} 个任务关键词`);
+  }
+
+  if (input.targetPath && candidate.projectRoot === targetProjectRoot) {
+    score += 22;
+    reasons.push("与目标位于同一子项目");
+  } else if (input.targetPath) {
+    score -= 12;
+  }
+
+  if (targetFramework !== "generic" && candidate.framework === targetFramework) {
+    score += 22;
+    reasons.push(`与目标使用相同 ${targetFramework} 技术栈`);
+  } else if (targetFramework !== "generic" && candidate.framework !== "generic" && candidate.framework !== targetFramework) {
+    // 明确跨 Vue/React 的候选会制造错误上下文，必须显著降权。
+    score -= 48;
+    reasons.push(`与目标技术栈不一致（${candidate.framework}）`);
+  }
+
+  const targetExtension = path.posix.extname(input.targetPath || "").toLowerCase();
+  if (targetExtension && candidate.extension === targetExtension) {
+    score += 10;
+    reasons.push("与目标文件类型一致");
   }
 
   const targetDirectory = input.targetPath ? path.posix.dirname(input.targetPath) : "";
@@ -246,16 +344,20 @@ export async function findSimilarPatterns(workspaceRoot: string, input: PatternF
 
   const limit = Math.min(Math.max(input.limit || 3, 1), 3);
   const filePaths = await collectSourceFiles(workspaceRoot);
-  const features = (await Promise.all(filePaths.map((filePath) => readFeatures(workspaceRoot, filePath)))).filter((item): item is FileFeatures => Boolean(item));
+  const boundaries = await collectProjectBoundaries(workspaceRoot);
+  const features = (await Promise.all(filePaths.map((filePath) => readFeatures(workspaceRoot, filePath, boundaries)))).filter((item): item is FileFeatures => Boolean(item));
   const targetPath = input.targetPath?.replaceAll("\\", "/");
   const target = targetPath ? features.find((file) => file.filePath === targetPath) || null : null;
+  const targetBoundary = targetPath ? resolveProjectBoundary(targetPath, boundaries) : undefined;
+  const targetProjectRoot = target?.projectRoot || (targetPath && targetBoundary ? resolveLogicalProjectRoot(targetPath, targetBoundary) : ".");
+  const targetFramework = inferRequestedFramework({ ...input, targetPath }, target, targetBoundary);
   // 只奖励最近 20% 的文件，避免直接比较时间戳量级导致所有文件都被误判为“近期”。
   const recentThreshold = [...features.map((file) => file.updatedAt)].sort((left, right) => right - left)[Math.max(0, Math.ceil(features.length * 0.2) - 1)] || 0;
 
   const rankedCandidates: PatternCandidate[] = features
     .filter((file) => file.filePath !== targetPath)
     .map((file) => {
-      const ranked = scoreCandidate(file, target, { ...input, targetPath }, features);
+      const ranked = scoreCandidate(file, target, { ...input, targetPath }, features, targetProjectRoot, targetFramework);
       // 近期维护只能作为已有相似信号的加分项，不能把无关文件变成候选。
       const recencyBonus = ranked.score > 0 && recentThreshold > 0 && file.updatedAt >= recentThreshold ? 2 : 0;
       const reasons = recencyBonus ? [...ranked.reasons, "属于近期维护的实现"] : ranked.reasons;
@@ -269,7 +371,11 @@ export async function findSimilarPatterns(workspaceRoot: string, input: PatternF
       };
     })
     .sort((left, right) => right.score - left.score || left.filePath.localeCompare(right.filePath));
-  const candidates = rankedCandidates.filter((candidate) => candidate.score > 0).slice(0, limit);
+  const candidates = rankedCandidates.filter((candidate) => {
+    const candidateFeature = features.find((file) => file.filePath === candidate.filePath);
+    const minimumScore = candidateFeature?.projectRoot === targetProjectRoot ? MIN_RELEVANCE_SCORE : CROSS_PROJECT_MIN_RELEVANCE_SCORE;
+    return candidate.score >= minimumScore;
+  }).slice(0, limit);
   const noMatchReason = candidates.length ? undefined : features.length ? "未找到与任务或目标职责足够相关的现有实现。" : "工作区中没有可索引的受支持源码文件。";
 
   return { query: { ...input, taskDescription, limit }, candidates, indexedFileCount: features.length, ...(noMatchReason ? { noMatchReason } : {}) };

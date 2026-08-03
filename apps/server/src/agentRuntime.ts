@@ -146,6 +146,7 @@ function createDefaultAgentContext(userRequest: string): AgentContext {
     searchResultFiles: [],
     relevantFiles: [],
     negativeEvidence: [],
+    evidenceCorrections: [],
     createIntents: [],
     patternSearchPerformed: false,
     patternCandidateFiles: [],
@@ -170,6 +171,7 @@ function snapshotAgentContext(agentContext: AgentContext): AgentContext {
     searchResultFiles: [...agentContext.searchResultFiles],
     relevantFiles: [...agentContext.relevantFiles],
     negativeEvidence: agentContext.negativeEvidence ? agentContext.negativeEvidence.map((evidence) => ({ ...evidence })) : undefined,
+    evidenceCorrections: agentContext.evidenceCorrections ? agentContext.evidenceCorrections.map((event) => ({ ...event })) : undefined,
     createIntents: agentContext.createIntents ? agentContext.createIntents.map((intent) => ({ ...intent })) : undefined,
     patternCandidateFiles: agentContext.patternCandidateFiles ? [...agentContext.patternCandidateFiles] : undefined,
     unresolvedExistenceChecks: agentContext.unresolvedExistenceChecks ? [...agentContext.unresolvedExistenceChecks] : undefined,
@@ -227,7 +229,7 @@ function getExistenceCheckBlockReason(
 ) {
   const editingTools = new Set(["proposePatch", "replaceInFile", "writeFile"]);
   if (!editingTools.has(toolName) || !registry.get("checkExistence")) return null;
-  if (agentContext.existenceCheckPerformed !== true) return "Before editing, call checkExistence to verify referenced imports, symbols, scripts, or directories.";
+  if (agentContext.existenceCheckPerformed !== true) return "Before editing, call checkExistence to verify referenced imports, packages, symbols, scripts, or directories.";
   const intent = resolveWorkflowEditIntent(toolName, toolArguments);
   if (intent && agentContext.referenceChecks) {
     return evaluateWorkflowEditGate({

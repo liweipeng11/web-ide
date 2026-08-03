@@ -129,3 +129,22 @@ test("检查器识别 Python、Vue 符号，并忽略示例环境文件造成的
   const result = await checkExistence(workspaceRoot, [{ kind: "symbol", value: "Worker" }, { kind: "symbol", value: "UserCard" }, { kind: "environment", value: "API_TOKEN" }]);
   assert.deepEqual(result.checks.map((check) => check.status), ["exists", "exists", "exists"]);
 });
+
+test("package 检查覆盖四类依赖声明并保留安装状态", async (context) => {
+  const workspaceRoot = await createWorkspace();
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(workspaceRoot, "node_modules", "runtime-lib"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "node_modules", "runtime-lib", "package.json"), JSON.stringify({ name: "runtime-lib" }), "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "package.json"), JSON.stringify({
+    dependencies: { "runtime-lib": "^1" },
+    devDependencies: { "dev-lib": "^1" },
+    peerDependencies: { "peer-lib": "^1" },
+    optionalDependencies: { "optional-lib": "^1" }
+  }), "utf8");
+
+  const result = await checkExistence(workspaceRoot, ["runtime-lib", "dev-lib", "peer-lib", "optional-lib"].map((value) => ({ kind: "package" as const, value })));
+
+  assert.deepEqual(result.checks.map((check) => check.status), ["exists", "exists", "exists", "exists"]);
+  assert.deepEqual(result.checks.map((check) => check.resolution.status), ["dependency_installed", "dependency_declared", "dependency_declared", "dependency_declared"]);
+  assert.equal(result.checks.every((check) => check.resolution.blocking === false), true);
+});

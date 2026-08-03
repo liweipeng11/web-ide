@@ -78,3 +78,40 @@ test("findSimilarPatterns returns an explicit fallback when no related implement
   assert.deepEqual(result.candidates, []);
   assert.match(result.noMatchReason || "", /未找到/);
 });
+
+test("findSimilarPatterns keeps Vue routing candidates inside the matching project and framework", async (context) => {
+  const workspaceRoot = await createWorkspace();
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(workspaceRoot, "apps", "vue-app", "src", "router"), { recursive: true });
+  await fs.mkdir(path.join(workspaceRoot, "apps", "react-app", "src", "pages"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "apps", "vue-app", "package.json"), JSON.stringify({ dependencies: { vue: "^3", "vue-router": "^4" } }), "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "apps", "react-app", "package.json"), JSON.stringify({ dependencies: { react: "^19", "react-router-dom": "^7" } }), "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "apps", "vue-app", "src", "router", "userRoute.ts"), "import type { RouteRecordRaw } from 'vue-router';\nexport const userRoute: RouteRecordRaw = { path: '/user', component: () => import('../views/User.vue') };\n", "utf8");
+  await fs.writeFile(path.join(workspaceRoot, "apps", "react-app", "src", "pages", "orderRoute.tsx"), "import React from 'react';\nexport function OrderRoute() { return <main>order</main>; }\n", "utf8");
+
+  const result = await findSimilarPatterns(workspaceRoot, {
+    taskDescription: "为 Vue Router 新增订单路由配置",
+    targetPath: "apps/vue-app/src/router/orderRoute.ts",
+    targetResponsibility: "route"
+  });
+
+  assert.equal(result.candidates[0]?.filePath, "apps/vue-app/src/router/userRoute.ts");
+  assert.equal(result.candidates.some((candidate) => candidate.filePath.includes("react-app")), false);
+  assert.ok(result.candidates[0]?.reasons.some((reason) => reason.includes("相同 vue 技术栈")));
+});
+
+test("findSimilarPatterns filters candidates that only share a project and file extension", async (context) => {
+  const workspaceRoot = await createWorkspace();
+  context.after(() => fs.rm(workspaceRoot, { recursive: true, force: true }));
+  await fs.mkdir(path.join(workspaceRoot, "src", "misc"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "misc", "unrelated.ts"), "export const color = 'blue';\n", "utf8");
+
+  const result = await findSimilarPatterns(workspaceRoot, {
+    taskDescription: "新增支付网关路由",
+    targetPath: "src/routes/paymentRoute.ts",
+    targetResponsibility: "route"
+  });
+
+  assert.deepEqual(result.candidates, []);
+  assert.match(result.noMatchReason || "", /足够相关/);
+});

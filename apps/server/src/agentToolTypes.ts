@@ -28,6 +28,15 @@ export type NegativeEvidence = {
   createdAt: number;
 };
 
+export type EvidenceCorrection = {
+  targetKind: string;
+  targetValue: string;
+  previousStatus: string;
+  correctedStatus: string;
+  sourceTool: "checkExistence";
+  createdAt: number;
+};
+
 export type CreateIntentFact = {
   target: string;
   scope: string;
@@ -80,6 +89,8 @@ export type AgentContext = {
   relevantFiles: string[];
   /** 完整搜索得到的未命中事实；Runtime 会把它作为后续决策依据，避免重复搜索。 */
   negativeEvidence?: NegativeEvidence[];
+  /** 权威存在性检查对旧缺失结论的纠正记录，供日志和恢复诊断使用。 */
+  evidenceCorrections?: EvidenceCorrection[];
   /** 编辑型任务中由完整路径未命中推导出的创建事实，用于停止无效搜索并推进文件计划。 */
   createIntents?: CreateIntentFact[];
   /** 记录本轮是否已经执行过相似实现检索，供编辑门禁判断。 */

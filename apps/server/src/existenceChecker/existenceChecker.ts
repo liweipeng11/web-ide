@@ -31,6 +31,12 @@ function toLegacyStatus(status: ReferenceResolutionStatus): ExistenceStatus {
   return "missing";
 }
 
+function toPackageStatus(status: ReferenceResolutionStatus): ExistenceStatus {
+  // package 检查关注依赖是否已声明；实际安装状态仍由结构化 resolution.status 精确表达。
+  if (status === "dependency_declared") return "exists";
+  return toLegacyStatus(status);
+}
+
 function createResult(
   target: ExistenceCheckTarget,
   status: ReferenceResolutionStatus,
@@ -48,7 +54,7 @@ function createResult(
   };
   return {
     target: { ...target, value: target.value.trim(), ...(target.fromPath ? { fromPath: normalizeRelativePath(target.fromPath) } : {}) },
-    status: toLegacyStatus(status),
+    status: target.kind === "package" ? toPackageStatus(status) : toLegacyStatus(status),
     candidates,
     reason,
     resolution
@@ -192,6 +198,18 @@ async function checkImport(workspaceRoot: string, target: ExistenceCheckTarget, 
   return createResultFromResolution(target, packageResolution);
 }
 
+async function checkPackage(workspaceRoot: string, target: ExistenceCheckTarget) {
+  const resolution = await resolvePackageImport({
+    workspaceRoot,
+    specifier: target.value,
+    ...(target.fromPath ? { fromPath: target.fromPath } : {})
+  });
+  // package 类型用于确认 package.json 声明，声明存在即不应阻塞后续实现。
+  return createResultFromResolution(target, resolution.status === "dependency_declared"
+    ? { ...resolution, blocking: false }
+    : resolution);
+}
+
 function symbolExpression(symbol: string) {
   const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?(?:function|class|interface|type|enum|const|let|var)\\s+${escaped}\\b|export\\s*\\{[^}]*\\b${escaped}\\b`, "m");
@@ -258,6 +276,7 @@ export async function checkExistence(workspaceRoot: string, targets: ExistenceCh
   const checks = await Promise.all(
     targets.map(async (target) => {
       if (target.kind === "import") return checkImport(workspaceRoot, target, options);
+      if (target.kind === "package") return checkPackage(workspaceRoot, target);
       if (target.kind === "symbol") return checkSymbol(workspaceRoot, target);
       if (target.kind === "script") return checkScript(workspaceRoot, target);
       if (target.kind === "environment") return checkEnvironment(workspaceRoot, target);
