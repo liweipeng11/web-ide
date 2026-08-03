@@ -780,6 +780,7 @@ app.post(
       providerId: sessionBeforeDecision.modelSelection?.providerId,
       modelId: sessionBeforeDecision.modelSelection?.modelId,
       persistedMessages: sessionBeforeDecision.agentMessages || [],
+      runtimeEvidence: sessionBeforeDecision.runtimeEvidence,
       pendingToolCall,
       decision,
       onAgentStep(step) {
@@ -1040,6 +1041,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         modelId: modelSelection.modelId,
         signal: controller.signal,
         workflow: plannedTaskSession?.workflow || taskSession.workflow,
+        runtimeEvidence: taskSession.runtimeEvidence,
         onAgentStep: pushAgentStep,
         onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
       });
@@ -1092,6 +1094,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         modelId: modelSelection.modelId,
         signal: controller.signal,
         workflow: plannedTaskSession?.workflow || taskSession.workflow,
+        runtimeEvidence: taskSession.runtimeEvidence,
         onAgentStep: pushAgentStep,
         onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
       });

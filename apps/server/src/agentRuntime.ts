@@ -26,7 +26,7 @@ import { createAgentToolRuntime, executeAgentToolCall } from "./agentTools.js";
 import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
 import { createAgentStep } from "./routeAgentSteps.js";
-import type { AgentMessage as PersistedAgentMessage, AgentRuntimeStatus, AgentStep, PendingAgentToolCall, TaskPlanItem } from "./types.js";
+import type { AgentMessage as PersistedAgentMessage, AgentRuntimeStatus, AgentStep, PendingAgentToolCall, TaskPlanItem, TaskRuntimeEvidence } from "./types.js";
 import {
   buildTaskWorkflowProgressPrompt,
   buildTaskWorkflowRuntimePrompt,
@@ -46,7 +46,7 @@ import { getPendingPatch } from "./patchStore.js";
 import { ConservativeTokenEstimator, prepareContextBudget } from "./contextBudget/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { implementedFeatures, recordFeatureDecisionDifference, resolveExplicitCompletionRollout, type ExplicitCompletionRolloutConfig } from "./featureFlags.js";
-import { getTaskSessionContextState, recordTaskSessionContextBudget } from "./taskSessionStore.js";
+import { getTaskSessionContextState, recordTaskSessionContextBudget, setTaskSessionRuntimeEvidence } from "./taskSessionStore.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
 import { parseCompleteTaskInput, type CompleteTaskInput } from "./agentCompletionTools.js";
@@ -58,6 +58,7 @@ export type AgentRuntimeResult = {
   messages: ModelMessage[];
   agentContext: AgentContext;
   generatedPatchIds: string[];
+  runtimeEvidence: TaskRuntimeEvidence;
   pendingToolCall?: PendingAgentToolCall | null;
   contextBudgetSnapshot?: ContextBudgetSnapshot;
   contextSummary?: StructuredContextSummary | null;
@@ -77,6 +78,7 @@ export type AgentRuntimeOptions = {
   runId?: string;
   generatedPatchIds?: string[];
   appliedFilePaths?: string[];
+  runtimeEvidence?: TaskRuntimeEvidence;
   taskSessionId?: string | null;
   mode?: AgentMode;
   workflow?: TaskWorkflowSnapshot;
@@ -102,7 +104,7 @@ export type AgentRuntimeOptions = {
 };
 
 async function loadRuntimeContextState(taskSessionId: string | null | undefined) {
-  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null };
+  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined };
   try {
     const session = await getTaskSessionContextState(taskSessionId);
     return {
@@ -114,11 +116,12 @@ async function loadRuntimeContextState(taskSessionId: string | null | undefined)
       filesModified: [...session.filesChanged],
       unresolvedQuestions: (session.planItems ?? []).filter((item) => item.status === "blocked").map((item) => item.note || item.title),
       contextSummary: session.contextSummary ?? null,
-      pendingToolCall: session.pendingToolCall ?? null
+      pendingToolCall: session.pendingToolCall ?? null,
+      runtimeEvidence: session.runtimeEvidence
     };
   } catch {
     // 无持久化任务的单元调用继续使用 Runtime 内存状态。
-    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null };
+    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined };
   }
 }
 
@@ -321,6 +324,29 @@ function countGeneratedPatchFiles(patchIds: string[]) {
   return patchIds.reduce((count, patchId) => count + (getPendingPatch(patchId)?.files.length ?? 0), 0);
 }
 
+function getLatestValidationAt(agentContext: AgentContext) {
+  const finishedAt = (agentContext.commandsRun ?? [])
+    .filter((command) => command.validation === true && typeof command.finishedAt === "number")
+    .map((command) => command.finishedAt as number);
+  return finishedAt.length ? Math.max(...finishedAt) : undefined;
+}
+
+function createTaskRuntimeEvidence(input: {
+  taskRunId: string;
+  generatedPatchIds: string[];
+  directAppliedFiles: ReadonlySet<string>;
+  lastMutationAt?: number;
+  lastValidationAt?: number;
+}): TaskRuntimeEvidence {
+  return {
+    taskRunId: input.taskRunId,
+    appliedFilePaths: [...input.directAppliedFiles],
+    generatedPatchIds: [...new Set(input.generatedPatchIds)],
+    lastMutationAt: input.lastMutationAt,
+    lastValidationAt: input.lastValidationAt
+  };
+}
+
 const completionRelevantWorkflowSteps = new Set([
   "implement",
   "validate",
@@ -342,6 +368,7 @@ async function collectCompletionEvidence(input: {
   validationAvailable: boolean;
   failedToolCallCount: number;
   lastMutationAt?: number;
+  lastValidationAt?: number;
   pendingApprovalCount?: number;
 }): Promise<CompletionEvidence> {
   const taskState = await loadRuntimeContextState(input.taskSessionId);
@@ -377,7 +404,7 @@ async function collectCompletionEvidence(input: {
     activeCommandCount: commands.filter((command) => command.status === "running").length,
     failedToolCallCount: input.failedToolCallCount,
     lastMutationAt: input.lastMutationAt,
-    lastValidationAt: latestValidation?.finishedAt
+    lastValidationAt: Math.max(input.lastValidationAt ?? 0, latestValidation?.finishedAt ?? 0) || undefined
   };
 }
 
@@ -842,7 +869,12 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
   const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt(options.userRequest, options.agentContext));
   const messages = restoreRuntimeMessages(options.userRequest, mode, persistedMessages, options.workflow, projectMemoryPrompt);
   const agentContext = options.agentContext || options.pendingToolCall.agentContext || createDefaultAgentContext(options.userRequest);
-  const generatedPatchIds: string[] = [];
+  const taskContextState = options.runtimeEvidence ? null : await loadRuntimeContextState(options.taskSessionId);
+  const persistedRuntimeEvidence = options.runtimeEvidence ?? taskContextState?.runtimeEvidence;
+  const generatedPatchIds = [...new Set([
+    ...(persistedRuntimeEvidence?.generatedPatchIds ?? []),
+    ...(options.generatedPatchIds ?? [])
+  ])];
   const toolRuntime = createAgentToolRuntime({
     agentContext,
     runId,
@@ -865,6 +897,19 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
   const appliedFilePaths = options.decision === "approved"
     ? getConfirmedAppliedFilePaths(options.pendingToolCall.toolName, toolMessage.content, pendingArguments)
     : [];
+  const mergedAppliedFilePaths = [...new Set([
+    ...(persistedRuntimeEvidence?.appliedFilePaths ?? []),
+    ...(options.appliedFilePaths ?? []),
+    ...appliedFilePaths
+  ])];
+  const approvalMutationAt = appliedFilePaths.length ? Date.now() : undefined;
+  const runtimeEvidence = createTaskRuntimeEvidence({
+    taskRunId: persistedRuntimeEvidence?.taskRunId ?? runId,
+    generatedPatchIds,
+    directAppliedFiles: new Set(mergedAppliedFilePaths),
+    lastMutationAt: Math.max(persistedRuntimeEvidence?.lastMutationAt ?? 0, approvalMutationAt ?? 0) || undefined,
+    lastValidationAt: Math.max(persistedRuntimeEvidence?.lastValidationAt ?? 0, getLatestValidationAt(agentContext) ?? 0) || undefined
+  });
 
   messages.push(toolMessage);
   await persistAgentMessage(options.taskSessionId, toolMessage);
@@ -878,7 +923,8 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     messages,
     agentContext,
     generatedPatchIds,
-    appliedFilePaths: [...new Set([...(options.appliedFilePaths || []), ...appliedFilePaths])]
+    appliedFilePaths: mergedAppliedFilePaths,
+    runtimeEvidence
   });
 }
 
@@ -937,7 +983,13 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     // 初始系统规则和用户目标也进入原始审计链；压缩只改变发送视图，不删除这些记录。
     for (const message of messages) await persistAgentMessage(options.taskSessionId, message);
   }
-  const generatedPatchIds = options.generatedPatchIds || [];
+  const taskContextState = options.runtimeEvidence ? null : await loadRuntimeContextState(options.taskSessionId);
+  const restoredRuntimeEvidence = options.runtimeEvidence ?? taskContextState?.runtimeEvidence;
+  const taskRunId = restoredRuntimeEvidence?.taskRunId ?? runId;
+  const generatedPatchIds = [...new Set([
+    ...(restoredRuntimeEvidence?.generatedPatchIds ?? []),
+    ...(options.generatedPatchIds ?? [])
+  ])];
   const maxNoProgressSteps = Number.isInteger(options.maxNoProgressSteps) && (options.maxNoProgressSteps ?? 0) > 0
     ? options.maxNoProgressSteps as number
     : config.aiAgentMaxNoProgressSteps;
@@ -953,8 +1005,21 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let consecutiveNoProgressSteps = 0;
   let recoveryAttempts = 0;
   let completionRecoveryAttempted = false;
-  const directAppliedFiles = new Set(options.appliedFilePaths || []);
-  let lastMutationAt = directAppliedFiles.size ? Date.now() : undefined;
+  const directAppliedFiles = new Set([
+    ...(restoredRuntimeEvidence?.appliedFilePaths ?? []),
+    ...(options.appliedFilePaths ?? [])
+  ]);
+  let lastMutationAt = restoredRuntimeEvidence?.lastMutationAt
+    ?? (options.appliedFilePaths?.length ? Date.now() : undefined);
+  let lastValidationAt = Math.max(restoredRuntimeEvidence?.lastValidationAt ?? 0, getLatestValidationAt(agentContext) ?? 0) || undefined;
+  const snapshotRuntimeEvidence = () => createTaskRuntimeEvidence({
+    taskRunId,
+    generatedPatchIds,
+    directAppliedFiles,
+    lastMutationAt,
+    lastValidationAt
+  });
+  const persistRuntimeEvidence = () => setTaskSessionRuntimeEvidence(options.taskSessionId, snapshotRuntimeEvidence());
   const workflowType = options.workflow?.type ?? classifyTaskWorkflow(options.userRequest).type;
   const mutationExpected = mode === "act" && workflowType !== "analysis-only";
   const workspaceMutationAuthorized = options.workflow?.authorization?.workspaceMutation ?? mutationExpected;
@@ -1114,6 +1179,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
       logAi(runId, "runtime.forceFinalToolCallBlocked", { step, toolNames: toolCalls.map((toolCall) => toolCall.name) });
       await metrics.finish({ status: "step_limit_reached", stopReason: "step_limit", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+      await persistRuntimeEvidence();
       return {
         status: "step_limit_reached",
         runId,
@@ -1121,6 +1187,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         messages,
         agentContext,
         generatedPatchIds,
+        runtimeEvidence: snapshotRuntimeEvidence(),
         pendingToolCall: null,
         contextBudgetSnapshot: latestContextBudgetSnapshot,
         contextSummary: latestContextSummary
@@ -1141,7 +1208,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         agentContext,
         validationAvailable: Boolean(registry.get("runCommand")),
         failedToolCallCount: metrics.getCompletionEvidenceSnapshot().failedToolCallCount,
-        lastMutationAt
+        lastMutationAt,
+        lastValidationAt
       });
       const semanticCompletionDecision = evaluateAgentCompletion({
         evidence,
@@ -1209,6 +1277,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         validationCommandCount: agentContext.commandsRun?.filter((command) => command.validation === true).length ?? 0,
         validationStatus: evidence.validationStatus
       });
+      await persistRuntimeEvidence();
       return {
         status: effectiveCompletionDecision.status,
         runId,
@@ -1216,6 +1285,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         messages,
         agentContext,
         generatedPatchIds,
+        runtimeEvidence: snapshotRuntimeEvidence(),
         pendingToolCall: null,
         contextBudgetSnapshot: latestContextBudgetSnapshot,
         contextSummary: latestContextSummary,
@@ -1300,7 +1370,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         agentContext,
         validationAvailable: Boolean(registry.get("runCommand")),
         failedToolCallCount: metrics.getCompletionEvidenceSnapshot().failedToolCallCount,
-        lastMutationAt
+        lastMutationAt,
+        lastValidationAt
       });
       const completionContent = [
         completionInput.summary,
@@ -1340,6 +1411,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           validationCommandCount: agentContext.commandsRun?.filter((command) => command.validation === true).length ?? 0,
           validationStatus: evidence.validationStatus
         });
+        await persistRuntimeEvidence();
         return {
           status: "completed",
           runId,
@@ -1347,6 +1419,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           messages,
           agentContext,
           generatedPatchIds,
+          runtimeEvidence: snapshotRuntimeEvidence(),
           pendingToolCall: null,
           contextBudgetSnapshot: latestContextBudgetSnapshot,
           contextSummary: latestContextSummary,
@@ -1548,8 +1621,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           validationAvailable: Boolean(registry.get("runCommand")),
           failedToolCallCount: metrics.getCompletionEvidenceSnapshot().failedToolCallCount,
           lastMutationAt,
+          lastValidationAt,
           pendingApprovalCount: 1
         });
+        await persistRuntimeEvidence();
         await metrics.finish({
           status: "awaiting_approval",
           patchFileCount: countGeneratedPatchFiles(generatedPatchIds),
@@ -1564,6 +1639,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           messages,
           agentContext,
           generatedPatchIds,
+          runtimeEvidence: snapshotRuntimeEvidence(),
           pendingToolCall,
           contextBudgetSnapshot: latestContextBudgetSnapshot,
           contextSummary: latestContextSummary,
@@ -1583,6 +1659,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           for (const filePath of appliedFilePaths) directAppliedFiles.add(filePath);
           if (appliedFilePaths.length) lastMutationAt = Date.now();
         }
+        // 验证命令可能由工具更新 AgentContext；暂停到下一次审批前必须保留完成时间。
+        lastValidationAt = Math.max(lastValidationAt ?? 0, getLatestValidationAt(agentContext) ?? 0) || undefined;
         const readScope = getSuccessfulReadScope(toolCall);
         if (!resultMetrics.cached && !resultMetrics.failed && readScope) readScopes.add(readScope);
         const newCreateIntents = promoteCreateIntentFacts(agentContext, {
@@ -1714,6 +1792,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           failureCategory: "tool_error",
           patchFileCount: countGeneratedPatchFiles(generatedPatchIds)
         });
+        await persistRuntimeEvidence();
         return {
           status: "no_progress",
           runId,
@@ -1721,6 +1800,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           messages,
           agentContext,
           generatedPatchIds,
+          runtimeEvidence: snapshotRuntimeEvidence(),
           pendingToolCall: null,
           contextBudgetSnapshot: latestContextBudgetSnapshot,
           contextSummary: latestContextSummary
@@ -1746,6 +1826,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
   logAi(runId, "runtime.stepLimitReached", { mode, maxSteps });
   await metrics.finish({ status: "step_limit_reached", stopReason: "step_limit", failureCategory: "step_limit", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+  await persistRuntimeEvidence();
 
   return {
     status: "step_limit_reached",
@@ -1754,6 +1835,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     messages,
     agentContext,
     generatedPatchIds,
+    runtimeEvidence: snapshotRuntimeEvidence(),
     pendingToolCall: null,
     contextBudgetSnapshot: latestContextBudgetSnapshot,
     contextSummary: latestContextSummary

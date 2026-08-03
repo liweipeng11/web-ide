@@ -1870,6 +1870,56 @@ test("审批恢复后保留 applyPatch 的已落盘文件证据", async () => {
   assert.equal(result.status, "completed");
 });
 
+test("审批恢复会合并此前文件证据与本次验证时间", async () => {
+  const validationFinishedAt = 300;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("runCommand", { exitCode: 0 }, (runtime) => {
+      runtime.agentContext.commandsRun = [{
+        command: "pnpm test",
+        status: "success",
+        exitCode: 0,
+        validation: true,
+        finishedAt: validationFinishedAt
+      }];
+    }),
+    ...completionAgentToolDefinitions
+  ]);
+  const result = await resumeAgentRuntimeAfterApproval({
+    userRequest: "修改 src/a.ts 并验证",
+    mode: "act",
+    registry,
+    runtimeEvidence: {
+      taskRunId: "task-run-evidence",
+      appliedFilePaths: ["src/a.ts"],
+      generatedPatchIds: [],
+      lastMutationAt: 100
+    },
+    pendingToolCall: {
+      actionId: "run_command:evidence",
+      toolCallId: "tool-validation-evidence",
+      toolName: "runCommand",
+      arguments: { command: "pnpm test" },
+      riskLevel: "medium",
+      status: "pending",
+      createdAt: Date.now()
+    },
+    decision: "approved",
+    contextBudgetEnabled: false,
+    explicitCompletionRollout: { mode: "all" },
+    requestCompletion: async () => ({ choices: [{ message: { role: "assistant", content: null, tool_calls: [
+      createModelToolCall("complete-after-validation", "completeTask", { summary: "修改与验证完成", verified: true, validationSummary: "测试通过" })
+    ] } }] }),
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.completionEvidence?.changedFileCount, 1);
+  assert.equal(result.completionEvidence?.validationStatus, "passed");
+  assert.equal(result.runtimeEvidence.taskRunId, "task-run-evidence");
+  assert.deepEqual(result.runtimeEvidence.generatedPatchIds, []);
+  assert.equal(result.runtimeEvidence.lastValidationAt, validationFinishedAt);
+});
+
 test("agent runtime emits a visible budget warning step before exhausting tool budget", async () => {
   const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
   const steps: AgentStep[] = [];

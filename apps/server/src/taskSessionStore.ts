@@ -4,7 +4,7 @@ import path from "node:path";
 import { getCheckpoint } from "./checkpointStore.js";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
-import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskSession, TaskSessionFinalizationSource, TaskSessionTerminalStatus } from "./types.js";
+import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskRuntimeEvidence, TaskSession, TaskSessionFinalizationSource, TaskSessionTerminalStatus } from "./types.js";
 import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
@@ -36,6 +36,20 @@ function legacyTaskSessionPath(taskSessionId: string) {
 
 function unique(values: string[]) {
   return [...new Set(values.filter((value) => value.trim()))];
+}
+
+function normalizeTaskRuntimeEvidence(value: unknown): TaskRuntimeEvidence | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Partial<TaskRuntimeEvidence>;
+  if (typeof record.taskRunId !== "string" || !record.taskRunId.trim()) return undefined;
+
+  return {
+    taskRunId: record.taskRunId.trim(),
+    appliedFilePaths: unique(Array.isArray(record.appliedFilePaths) ? record.appliedFilePaths.filter((item): item is string => typeof item === "string") : []),
+    generatedPatchIds: unique(Array.isArray(record.generatedPatchIds) ? record.generatedPatchIds.filter((item): item is string => typeof item === "string") : []),
+    lastMutationAt: typeof record.lastMutationAt === "number" && Number.isFinite(record.lastMutationAt) ? record.lastMutationAt : undefined,
+    lastValidationAt: typeof record.lastValidationAt === "number" && Number.isFinite(record.lastValidationAt) ? record.lastValidationAt : undefined
+  };
 }
 
 function withoutValues(values: string[], excluded: string[]) {
@@ -633,6 +647,7 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     runtimeStatus: isAgentRuntimeStatus(session.runtimeStatus) ? session.runtimeStatus : undefined,
     runtimeStatusReason: typeof session.runtimeStatusReason === "string" ? session.runtimeStatusReason : undefined,
     completionEvidence: session.completionEvidence && typeof session.completionEvidence === "object" ? session.completionEvidence : undefined,
+    runtimeEvidence: normalizeTaskRuntimeEvidence(session.runtimeEvidence),
     runtimeOutcome: session.runtimeOutcome
       && typeof session.runtimeOutcome === "object"
       && isAgentRuntimeStatus(session.runtimeOutcome.requestedStatus)
@@ -778,6 +793,11 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     chatId: options.chatId,
     messageIds: options.messageIds,
     status: "running",
+    runtimeEvidence: {
+      taskRunId: crypto.randomUUID(),
+      appliedFilePaths: [],
+      generatedPatchIds: []
+    },
     filesRead: [],
     filesChanged: [],
     commandsRun: [],
@@ -1187,8 +1207,22 @@ export async function getTaskSessionContextState(taskSessionId: string) {
     planApproval: session.planApproval,
     filesChanged: session.filesChanged,
     contextSummary: session.contextSummary,
-    pendingToolCall: session.pendingToolCall
+    pendingToolCall: session.pendingToolCall,
+    runtimeEvidence: session.runtimeEvidence
   };
+}
+
+export async function setTaskSessionRuntimeEvidence(taskSessionId: string | null | undefined, runtimeEvidence: TaskRuntimeEvidence) {
+  if (!taskSessionId) return null;
+  const normalized = normalizeTaskRuntimeEvidence(runtimeEvidence);
+  if (!normalized) throw new Error("runtimeEvidence.taskRunId is required");
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    // 审批暂停前立即保存，服务重启后仍可恢复同一任务运行的完成证据。
+    runtimeEvidence: normalized,
+    updatedAt: Date.now()
+  }), { flushImmediately: true });
 }
 
 export async function listTaskSessions(options: { includeDiffView?: boolean } = {}) {

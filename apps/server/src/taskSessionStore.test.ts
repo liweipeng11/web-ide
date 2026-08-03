@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics, RunMetricsTracker } from "./observability/index.js";
@@ -22,6 +22,36 @@ async function createIsolatedTaskSession(userGoal = "实现任务计划器") {
     session: await createTaskSession(userGoal)
   };
 }
+
+test("任务运行证据持久化后可恢复且新任务不会继承旧证据", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("跨审批保存完成证据");
+  try {
+    assert.ok(session.runtimeEvidence?.taskRunId);
+    await setTaskSessionRuntimeEvidence(session.id, {
+      taskRunId: session.runtimeEvidence!.taskRunId,
+      appliedFilePaths: ["src/a.ts", "src/a.ts"],
+      generatedPatchIds: ["patch-1"],
+      lastMutationAt: 100,
+      lastValidationAt: 200
+    });
+
+    const restored = await getTaskSession(session.id);
+    assert.deepEqual(restored.runtimeEvidence, {
+      taskRunId: session.runtimeEvidence!.taskRunId,
+      appliedFilePaths: ["src/a.ts"],
+      generatedPatchIds: ["patch-1"],
+      lastMutationAt: 100,
+      lastValidationAt: 200
+    });
+
+    const next = await createTaskSession("全新任务");
+    assert.notEqual(next.runtimeEvidence?.taskRunId, restored.runtimeEvidence?.taskRunId);
+    assert.deepEqual(next.runtimeEvidence?.appliedFilePaths, []);
+    assert.deepEqual(next.runtimeEvidence?.generatedPatchIds, []);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
 
 test("adds, updates, and deletes task plan items", async () => {
   const { session } = await createIsolatedTaskSession();

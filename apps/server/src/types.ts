@@ -429,6 +429,15 @@ export type TaskSessionStatus =
 
 export type TaskSessionTerminalStatus = Extract<TaskSessionStatus, "success" | "incomplete" | "blocked" | "failed" | "cancelled">;
 
+// 仅记录当前任务运行产生的完成证据，避免会话历史 filesChanged 污染新任务。
+export type TaskRuntimeEvidence = {
+  taskRunId: string;
+  appliedFilePaths: string[];
+  generatedPatchIds: string[];
+  lastMutationAt?: number;
+  lastValidationAt?: number;
+};
+
 export type TaskSessionFinalizationSource =
   | "agent_runtime"
   | "plan_runtime"
@@ -456,6 +465,7 @@ export type TaskSession = {
   runtimeStatus?: AgentRuntimeStatus;
   runtimeStatusReason?: string;
   completionEvidence?: import("./agentCompletionPolicy.js").CompletionEvidence;
+  runtimeEvidence?: TaskRuntimeEvidence;
   runtimeOutcome?: {
     requestedStatus: AgentRuntimeStatus;
     effectiveStatus: AgentRuntimeStatus;

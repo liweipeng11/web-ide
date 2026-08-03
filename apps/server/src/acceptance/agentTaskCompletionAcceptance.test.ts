@@ -9,7 +9,7 @@ import { createAgentToolRegistry } from "../agentToolRegistry.js";
 import type { AgentToolDefinition, AgentToolRuntime } from "../agentToolTypes.js";
 import { writeFile as writeWorkspaceContent } from "../fileEditService.js";
 import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics } from "../observability/index.js";
-import { createTaskSession, getTaskSession } from "../taskSessionStore.js";
+import { appendTaskSessionStep, createTaskSession, decideTaskSessionApproval, getTaskSession } from "../taskSessionStore.js";
 import { finalizeTaskSession } from "../taskSessionFinalizer.js";
 import { setWorkspaceRoot } from "../workspaceStore.js";
 
@@ -147,6 +147,71 @@ test("阶段七场景 5：用户拒绝 Patch 后不会执行被拒绝的变更",
   // 用户拒绝后模型可以结束当前任务，但拒绝的 Patch 绝不能被执行。
   assert.equal(rejected.status, "completed");
   assert.equal(executions.count, 0);
+});
+
+test("阶段一验收：writeFile 与 runCommand 跨两次审批后仍可完成", async () => {
+  await withWorkspace(async () => {
+    const session = await createTaskSession("创建 src/evidence.ts 并验证");
+    const registry = createAgentToolRegistry([
+      tool("writeFile", async () => ({ changed: true, filePath: "src/evidence.ts" })),
+      tool("runCommand", async (_args, runtime) => {
+        runtime.agentContext.commandsRun = [{
+          command: "pnpm test",
+          status: "success",
+          exitCode: 0,
+          validation: true,
+          // 验证发生在文件落盘之后，完成策略应允许结束任务。
+          finishedAt: Date.now() + 10
+        }];
+        return { exitCode: 0, status: "success" };
+      }),
+      ...completionAgentToolDefinitions
+    ]);
+    const common: AgentRuntimeOptions = {
+      taskSessionId: session.id,
+      userRequest: session.userGoal,
+      mode: "act",
+      registry,
+      maxSteps: 3,
+      contextBudgetEnabled: false,
+      explicitCompletionRollout: strictRollout,
+      metricsRecorder: async () => undefined,
+      onAgentStep: (step) => { void appendTaskSessionStep(session.id, step); }
+    };
+
+    const waitingForWrite = await runAgentRuntime({
+      ...common,
+      runtimeEvidence: session.runtimeEvidence,
+      requestCompletion: async () => response(call("write-evidence", "writeFile", { filePath: "src/evidence.ts", content: "export const evidence = true;\n" }))
+    });
+    assert.equal(waitingForWrite.status, "awaiting_approval");
+    await decideTaskSessionApproval(session.id, waitingForWrite.pendingToolCall!.actionId, "approved");
+
+    const waitingForValidation = await resumeAgentRuntimeAfterApproval({
+      ...common,
+      pendingToolCall: waitingForWrite.pendingToolCall!,
+      decision: "approved",
+      requestCompletion: async () => response(call("validate-evidence", "runCommand", { command: "pnpm test" }))
+    });
+    assert.equal(waitingForValidation.status, "awaiting_approval");
+    const afterWrite = await getTaskSession(session.id);
+    assert.deepEqual(afterWrite.runtimeEvidence?.appliedFilePaths, ["src/evidence.ts"]);
+    await decideTaskSessionApproval(session.id, waitingForValidation.pendingToolCall!.actionId, "approved");
+
+    const completed = await resumeAgentRuntimeAfterApproval({
+      ...common,
+      pendingToolCall: waitingForValidation.pendingToolCall!,
+      decision: "approved",
+      requestCompletion: async () => response(completion("complete-evidence", "跨审批修改与验证完成"))
+    });
+    const persisted = await getTaskSession(session.id);
+
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.completionEvidence?.changedFileCount, 1);
+    assert.equal(completed.completionEvidence?.validationStatus, "passed");
+    assert.equal((completed.runtimeEvidence.lastValidationAt ?? 0) >= (completed.runtimeEvidence.lastMutationAt ?? 0), true);
+    assert.deepEqual(persisted.runtimeEvidence, completed.runtimeEvidence);
+  });
 });
 
 test("阶段七场景 6：验证失败的编辑任务不得 success", async () => {
