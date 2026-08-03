@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { readJsonStateFile, writeJsonStateFile } from "../stateFileStorage.js";
 import type { CommandExecution } from "./types.js";
 
 type StoredDocument = { version: 1; executions: CommandExecution[] };
@@ -37,14 +38,19 @@ export class CommandExecutionStore {
   }
 
   async load(): Promise<CommandExecution[]> {
-    const raw = await fs.readFile(this.stateFilePath, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
+    const document = await readJsonStateFile<StoredDocument>(this.stateFilePath, {
+      allowMissing: true,
+      recover: true,
+      validate(value) {
+        const candidate = value as Partial<StoredDocument> | null;
+        if (!candidate || candidate.version !== 1 || !Array.isArray(candidate.executions)) {
+          throw new Error("unsupported command execution state");
+        }
+        return candidate as StoredDocument;
+      }
     });
-    if (!raw) return [];
-
-    const document = JSON.parse(raw) as Partial<StoredDocument>;
-    const executions = Array.isArray(document.executions) ? document.executions : [];
+    if (!document) return [];
+    const executions = document.executions;
     let recovered = false;
     for (const execution of executions) {
       const copy = normalizeExecution(execution);
@@ -161,11 +167,8 @@ export class CommandExecutionStore {
   }
 
   private async persistMetadata() {
-    await fs.mkdir(path.dirname(this.stateFilePath), { recursive: true });
-    const temporaryPath = `${this.stateFilePath}.tmp`;
     const document: StoredDocument = { version: 1, executions: [...this.executions.values()] };
-    await fs.writeFile(temporaryPath, JSON.stringify(document, null, 2), "utf8");
-    await fs.rename(temporaryPath, this.stateFilePath);
+    await writeJsonStateFile(this.stateFilePath, document);
   }
 }
 

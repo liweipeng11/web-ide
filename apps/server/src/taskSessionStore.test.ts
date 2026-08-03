@@ -166,6 +166,38 @@ test("任务会话以 UTF-8 原子 JSON 保存 Runtime 六态和完成证据", a
   }
 });
 
+test("任务会话损坏后从有效备份恢复审批和完成证据且保留原文件", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("创建用户页面");
+  const sessionPath = path.join(projectRuntimeDirectory("task-sessions"), `${session.id}.json`);
+  try {
+    await setTaskSessionRuntimeEvidence(session.id, {
+      taskRunId: session.runtimeEvidence!.taskRunId,
+      appliedFilePaths: ["src/UserPage.tsx"],
+      generatedPatchIds: ["patch-user-page"],
+      lastMutationAt: 100,
+      lastValidationAt: 200
+    });
+    await setTaskSessionPendingToolCall(session.id, {
+      actionId: "approval-build",
+      toolCallId: "tool-build",
+      toolName: "runCommand",
+      arguments: { command: "pnpm build" },
+      riskLevel: "medium"
+    });
+
+    // 第二次写入前的有效快照已进入 .bak；模拟进程崩溃留下半截正式文件。
+    await fs.writeFile(sessionPath, "{\"userGoal\":\"乱码", "utf8");
+    const restored = await getTaskSession(session.id);
+    assert.equal(restored.userGoal, "创建用户页面");
+    assert.deepEqual(restored.runtimeEvidence?.appliedFilePaths, ["src/UserPage.tsx"]);
+    assert.equal(restored.runtimeEvidence?.lastValidationAt, 200);
+    assert.equal((await fs.readdir(path.dirname(sessionPath))).some((name) => name.startsWith(`${session.id}.json.corrupt-`)), true);
+    assert.equal(await fs.readFile(sessionPath, "utf8"), "{\"userGoal\":\"乱码");
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("任务会话原子替换遇到短暂文件占用时会重试", async (t) => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-task-rename-retry-"));
   await setWorkspaceRoot(workspaceRoot, { persist: false });

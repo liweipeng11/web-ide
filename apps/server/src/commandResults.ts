@@ -1,6 +1,5 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { appStatePath, legacyAppStatePath, readTextWithLegacyFallback } from "./statePaths.js";
+import { appStatePath, legacyAppStatePath } from "./statePaths.js";
+import { readJsonStateFile, writeJsonStateFile } from "./stateFileStorage.js";
 import type { CommandResult } from "./types.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 
@@ -11,43 +10,44 @@ type CommandResultStore = {
 const commandResultStorePath = appStatePath("command-results.json");
 const legacyCommandResultStorePath = legacyAppStatePath("command-results.json");
 const maxStoredResultsPerWorkspace = 20;
+let commandResultUpdateQueue: Promise<unknown> = Promise.resolve();
 
 function workspaceKey(workspaceRoot = getWorkspaceRoot()) {
   return workspaceRoot || "none";
 }
 
 async function readCommandResultStore(): Promise<CommandResultStore> {
-  const raw = await readTextWithLegacyFallback(commandResultStorePath, legacyCommandResultStorePath);
-
-  if (!raw) {
-    return { results: {} };
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as CommandResultStore;
-    return parsed && typeof parsed === "object" && parsed.results ? parsed : { results: {} };
-  } catch {
-    return { results: {} };
-  }
+  const validate = (value: unknown) => {
+    const results = value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Partial<CommandResultStore>).results
+      : null;
+    if (!results || typeof results !== "object" || Array.isArray(results)) throw new Error("command result state is invalid");
+    return { results };
+  };
+  return await readJsonStateFile<CommandResultStore>(commandResultStorePath, { allowMissing: true, recover: true, validate })
+    ?? await readJsonStateFile<CommandResultStore>(legacyCommandResultStorePath, { allowMissing: true, recover: true, validate })
+    ?? { results: {} };
 }
 
-async function writeCommandResultStore(store: CommandResultStore) {
-  await fs.mkdir(path.dirname(commandResultStorePath), { recursive: true });
-  await fs.writeFile(commandResultStorePath, JSON.stringify(store, null, 2), "utf8");
+function enqueueCommandResultUpdate<T>(update: () => Promise<T>) {
+  const next = commandResultUpdateQueue.catch(() => undefined).then(update);
+  commandResultUpdateQueue = next;
+  return next;
 }
 
 export async function saveCommandResult(result: CommandResult) {
-  const store = await readCommandResultStore();
-  const key = workspaceKey(result.cwd);
-  const results = store.results[key] || [];
-
-  store.results[key] = [result, ...results].slice(0, maxStoredResultsPerWorkspace);
-  await writeCommandResultStore(store);
-
-  return result;
+  return enqueueCommandResultUpdate(async () => {
+    const store = await readCommandResultStore();
+    const key = workspaceKey(result.cwd);
+    const results = store.results[key] || [];
+    store.results[key] = [result, ...results].slice(0, maxStoredResultsPerWorkspace);
+    await writeJsonStateFile(commandResultStorePath, store);
+    return result;
+  });
 }
 
 export async function getRecentCommandResults() {
+  await commandResultUpdateQueue.catch(() => undefined);
   const store = await readCommandResultStore();
   return store.results[workspaceKey()] || [];
 }

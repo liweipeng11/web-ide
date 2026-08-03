@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
-import { readTextWithLegacyFallback } from "./statePaths.js";
+import { readJsonStateFile, writeJsonStateFile } from "./stateFileStorage.js";
 
 type PersistedState = {
   workspaceRoot?: string | null;
@@ -15,23 +15,17 @@ export function getWorkspaceRoot() {
 }
 
 async function readPersistedState(): Promise<PersistedState> {
-  const raw = await readTextWithLegacyFallback(config.stateFilePath, config.legacyStateFilePath);
-
-  if (!raw) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as PersistedState;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+  const validate = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("workspace state must be an object");
+    return value as PersistedState;
+  };
+  return await readJsonStateFile<PersistedState>(config.stateFilePath, { allowMissing: true, recover: true, validate })
+    ?? await readJsonStateFile<PersistedState>(config.legacyStateFilePath, { allowMissing: true, recover: true, validate })
+    ?? {};
 }
 
 async function persistWorkspaceRoot(nextWorkspaceRoot: string | null) {
-  await fs.mkdir(path.dirname(config.stateFilePath), { recursive: true });
-  await fs.writeFile(config.stateFilePath, JSON.stringify({ workspaceRoot: nextWorkspaceRoot }, null, 2), "utf8");
+  await writeJsonStateFile(config.stateFilePath, { workspaceRoot: nextWorkspaceRoot });
 }
 
 export async function initializeWorkspaceRoot() {

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { appStatePath } from "../statePaths.js";
+import { readJsonStateFile, writeJsonStateFile } from "../stateFileStorage.js";
 import { appendRunMetrics, COMPLETION_RESOURCE_LIMITS, createEmptyTaskSessionPersistenceMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta, type TaskSessionPersistenceMetrics } from "./runMetrics.js";
 
 const taskMetrics = new Map<string, RunMetrics>();
@@ -101,21 +102,21 @@ function refreshCompletionResourceAlerts(metrics: RunMetrics) {
 }
 
 async function readSnapshot(key: string) {
-  const content = await fs.readFile(snapshotPath(key), "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
+  const metrics = await readJsonStateFile<RunMetrics>(snapshotPath(key), {
+    allowMissing: true,
+    recover: true,
+    validate(value) {
+      const candidate = value as Partial<RunMetrics> | null;
+      if (!candidate || candidate.schemaVersion !== 1 || candidate.scope !== "task_run") {
+        throw new Error("unsupported task metrics snapshot");
+      }
+      return candidate as RunMetrics;
+    }
   });
-  if (!content) return null;
-
-  try {
-    const metrics = JSON.parse(content) as RunMetrics;
-    if (metrics?.schemaVersion !== 1 || metrics.scope !== "task_run") return null;
-    // 兼容首 token 来源字段加入前生成的阶段 0 快照。
-    metrics.firstTokenLatencySource ??= metrics.firstTokenLatencyMs === null ? "unavailable" : "completion_upper_bound";
-    return normalizeMetricFields(metrics);
-  } catch {
-    return null;
-  }
+  if (!metrics) return null;
+  // 兼容首 token 来源字段加入前生成的阶段 0 快照。
+  metrics.firstTokenLatencySource ??= metrics.firstTokenLatencyMs === null ? "unavailable" : "completion_upper_bound";
+  return normalizeMetricFields(metrics);
 }
 
 async function writeSnapshot(key: string, metrics: RunMetrics) {
@@ -123,14 +124,15 @@ async function writeSnapshot(key: string, metrics: RunMetrics) {
   if (!metrics.taskSessionId) return;
   const directory = snapshotDirectory();
   const targetPath = snapshotPath(key);
-  const temporaryPath = `${targetPath}.${process.pid}.tmp`;
   await fs.mkdir(directory, { recursive: true });
-  await fs.writeFile(temporaryPath, `${JSON.stringify(metrics, null, 2)}\n`, "utf8");
-  await fs.rename(temporaryPath, targetPath);
+  await writeJsonStateFile(targetPath, metrics);
 }
 
 async function deleteSnapshot(key: string) {
-  await fs.rm(snapshotPath(key), { force: true });
+  await Promise.all([
+    fs.rm(snapshotPath(key), { force: true }),
+    fs.rm(`${snapshotPath(key)}.bak`, { force: true })
+  ]);
 }
 
 async function enqueueTaskMetricUpdate<T>(key: string, update: () => Promise<T>) {

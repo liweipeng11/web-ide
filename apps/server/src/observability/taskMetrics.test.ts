@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { appStatePath } from "../statePaths.js";
+import { StateFileError } from "../stateFileStorage.js";
 import { RunMetricsTracker } from "./runMetrics.js";
 import { clearTaskMetricsForTest, finalizeTaskMetrics, getTaskMetricsSnapshot, getTaskSessionPersistenceMetrics, recordTaskPatchMetrics, recordTaskSafeEditorMetrics, recordTaskSessionPersistenceMetrics } from "./taskMetrics.js";
 
@@ -167,6 +168,36 @@ test("服务重启后从磁盘恢复审批前指标并继续聚合", async () =>
   assert.equal(restored.result.patchFileCount, 1);
   await finalizeTaskMetrics(taskSessionId, "completed", async () => {});
   await clearTaskMetricsForTest({ key: taskSessionId });
+});
+
+test("任务指标损坏时从备份恢复且没有备份时明确报错", async () => {
+  const taskSessionId = "task-metrics-corrupt-recovery";
+  await clearTaskMetricsForTest({ key: taskSessionId });
+  const fileName = `${crypto.createHash("sha256").update(taskSessionId).digest("hex")}.json`;
+  const filePath = path.join(appStatePath("task-metrics"), fileName);
+  try {
+    const tracker = new RunMetricsTracker({ runId: "metrics-before-corrupt", taskSessionId, provider: "mock", model: "mock", mode: "act" }, async () => {});
+    tracker.addUsage({ inputTokens: 9, outputTokens: 1, reasoningTokens: 0, cachedInputTokens: 0 });
+    await tracker.finish({ status: "awaiting_approval" });
+    await recordTaskPatchMetrics(taskSessionId, 1); // 生成上一份有效 .bak 快照
+    await clearTaskMetricsForTest({ memoryOnly: true });
+    await fs.writeFile(filePath, "{broken", "utf8");
+
+    const restored = await getTaskMetricsSnapshot(taskSessionId);
+    assert.ok(restored);
+    assert.equal(restored.usage.inputTokens, 9);
+    assert.equal((await fs.readdir(path.dirname(filePath))).some((name) => name.startsWith(`${fileName}.corrupt-`)), true);
+
+    await clearTaskMetricsForTest({ key: taskSessionId });
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, "{still-broken", "utf8");
+    await assert.rejects(
+      () => getTaskMetricsSnapshot(taskSessionId),
+      (error: unknown) => error instanceof StateFileError && error.code === "STATE_FILE_INVALID_JSON"
+    );
+  } finally {
+    await clearTaskMetricsForTest({ key: taskSessionId });
+  }
 });
 
 test("旧任务指标快照缺少阶段四字段时按零值兼容读取", async () => {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { getCheckpoint } from "./checkpointStore.js";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
+import { readJsonStateFile, writeJsonStateFile } from "./stateFileStorage.js";
 import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskRuntimeEvidence, TaskSession, TaskSessionFinalizationSource, TaskSessionTerminalStatus } from "./types.js";
 import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
@@ -730,20 +731,11 @@ async function attachTaskSessionDiffView(session: TaskSession): Promise<TaskSess
 }
 
 async function readTaskSessionRecord(taskSessionId: string): Promise<TaskSession> {
-  const content = await fs.readFile(taskSessionPath(taskSessionId), "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") {
-      return fs.readFile(legacyTaskSessionPath(taskSessionId), "utf8").catch((legacyError: NodeJS.ErrnoException) => {
-        if (legacyError.code === "ENOENT") {
-          throw new HttpError(404, "Task session not found");
-        }
-        throw legacyError;
-      });
-    }
-
-    throw error;
-  });
-
-  const session = normalizeTaskSession(JSON.parse(content) as TaskSession);
+  const primaryPath = taskSessionPath(taskSessionId);
+  const persisted = await readJsonStateFile<TaskSession>(primaryPath, { allowMissing: true, recover: true })
+    ?? await readJsonStateFile<TaskSession>(legacyTaskSessionPath(taskSessionId), { allowMissing: true, recover: true });
+  if (!persisted) throw new HttpError(404, "Task session not found");
+  const session = normalizeTaskSession(persisted);
   lastPersistedTaskSessionHashes.set(taskSessionPath(taskSessionId), hashTaskSessionContent(serializeTaskSession(session)));
   return session;
 }
@@ -761,26 +753,20 @@ function hashTaskSessionContent(content: string) {
 }
 
 async function writeTaskSession(session: TaskSession) {
-  const directory = taskSessionDirectory();
   const destination = taskSessionPath(session.id);
-  const temporary = path.join(directory, `.${session.id}.${crypto.randomUUID()}.tmp`);
   const content = serializeTaskSession(session);
   const contentHash = hashTaskSessionContent(content);
   if (lastPersistedTaskSessionHashes.get(destination) === contentHash) {
     recordTaskSessionPersistenceMetrics(session.id, { taskSessionWriteSkippedCount: 1 });
     return false;
   }
-  await fs.mkdir(directory, { recursive: true });
-  try {
-    // 同目录临时文件 + rename 保证读者只会看到旧版本或完整新版本，且显式使用 UTF-8 保存中文。
-    await fs.writeFile(temporary, content, "utf8");
-    await renameTaskSessionFileWithRetry(session.id, temporary, destination);
-    lastPersistedTaskSessionHashes.set(destination, contentHash);
-    recordTaskSessionPersistenceMetrics(session.id, { taskSessionPhysicalWriteCount: 1 });
-    return true;
-  } finally {
-    await fs.rm(temporary, { force: true }).catch(() => undefined);
-  }
+  // 通用状态存储会先验证可序列化性，再以 UTF-8 临时文件原子替换并保留上一份有效备份。
+  await writeJsonStateFile(destination, session, {
+    rename: (source, target) => renameTaskSessionFileWithRetry(session.id, source, target)
+  });
+  lastPersistedTaskSessionHashes.set(destination, contentHash);
+  recordTaskSessionPersistenceMetrics(session.id, { taskSessionPhysicalWriteCount: 1 });
+  return true;
 }
 
 export async function createTaskSession(userGoal: string, options: { chatId?: string; messageIds?: string[]; agentMode?: AgentMode; modelSelection?: import("./contracts/model.js").ModelSelection } = {}): Promise<TaskSession> {
@@ -1230,8 +1216,8 @@ export async function listTaskSessions(options: { includeDiffView?: boolean } = 
 
   const sessions = await Promise.all(
     files.map(async (filePath) => {
-      const content = await fs.readFile(filePath, "utf8");
-      const session = normalizeTaskSession(JSON.parse(content) as TaskSession);
+      const persisted = await readJsonStateFile<TaskSession>(filePath, { recover: true });
+      const session = normalizeTaskSession(persisted!);
       // Project Memory 等摘要消费者不需要逐个读取 checkpoint，可跳过较重的历史 diff 组装。
       return options.includeDiffView === false ? session : attachTaskSessionDiffView(session);
     })
