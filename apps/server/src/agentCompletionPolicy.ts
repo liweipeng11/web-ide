@@ -1,4 +1,4 @@
-import type { AgentRuntimeStatus, CompletionRejectionCode } from "./types.js";
+import type { AgentRuntimeStatus, CompletionRejectionCode, PendingPlanItemSummary } from "./types.js";
 import type { TaskWorkflowType } from "./taskWorkflow/index.js";
 
 export type CompletionEvidence = {
@@ -8,6 +8,7 @@ export type CompletionEvidence = {
   generatedPatchCount: number;
   pendingPlanCount: number;
   blockedPlanCount: number;
+  pendingPlanItems?: PendingPlanItemSummary[];
   validationStatus: "not_required" | "not_run" | "passed" | "failed" | "unavailable";
   pendingApprovalCount: number;
   activeCommandCount: number;
@@ -21,6 +22,7 @@ export type CompletionDecision = {
   code: CompletionRejectionCode | "COMPLETED";
   reason: string;
   suggestedAction?: string;
+  pendingPlanItems?: PendingPlanItemSummary[];
   shouldRecover: boolean;
 };
 
@@ -41,6 +43,7 @@ export type CompletionEvidenceFingerprintInput = Pick<CompletionEvidence,
   | "activeCommandCount"
   | "lastMutationAt"
   | "lastValidationAt"
+  | "pendingPlanItems"
 >;
 
 export type CompletionRejectionState = {
@@ -48,6 +51,21 @@ export type CompletionRejectionState = {
   rejectionCode: string;
   consecutiveCount: number;
 };
+
+/**
+ * 统一生成面向模型和 UI 的结构化拒绝契约，避免不同 Runtime 路径遗漏关键恢复信息。
+ */
+export function createCompletionRejectionPayload(decision: CompletionDecision) {
+  return {
+    error: "completion_rejected" as const,
+    completionRequested: true,
+    completionStatus: decision.status,
+    rejectionCode: decision.code,
+    message: decision.reason,
+    suggestedAction: decision.suggestedAction,
+    pendingPlanItems: decision.pendingPlanItems ?? []
+  };
+}
 
 /**
  * 只序列化会影响完成裁决的稳定字段，模型改写 summary 不能改变该指纹。
@@ -61,6 +79,8 @@ export function createCompletionEvidenceFingerprint(evidence: CompletionEvidence
     evidence.blockedPlanCount,
     evidence.pendingApprovalCount,
     evidence.activeCommandCount,
+    // 展示标题可能包含业务文本且不影响完成裁决，指纹只保留稳定步骤与状态。
+    (evidence.pendingPlanItems ?? []).map((item) => [item.workflowStepId ?? null, item.status]),
     evidence.lastMutationAt ?? null,
     evidence.lastValidationAt ?? null
   ]);
@@ -85,7 +105,10 @@ export function createCompletionRejectionGuidance(decision: CompletionDecision, 
   if (consecutiveCount >= 2) {
     return `完成证据没有变化（连续第 ${consecutiveCount} 次拒绝）。禁止再次直接调用 completeTask；必须先执行能改变文件、验证、计划、审批或命令状态的动作。`;
   }
-  return `下一步必须先处理该条件：${decision.reason} 完成实际修改或必要验证后，再调用 completeTask。`;
+  const pendingItems = decision.pendingPlanItems?.length
+    ? ` 具体计划项：${decision.pendingPlanItems.map((item) => `${item.title}（${item.status}）`).join("、")}。`
+    : "";
+  return `下一步必须先处理该条件：${decision.reason}${pendingItems} ${decision.suggestedAction ?? "完成实际修改或必要验证后，再调用 completeTask。"}`;
 }
 
 const incompleteClaimPatterns = [
@@ -125,6 +148,7 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
       code: "PENDING_APPROVAL",
       reason: "已生成待审核补丁，任务等待用户审批。",
       suggestedAction: "审核并应用待处理补丁后，再请求完成任务。",
+      pendingPlanItems: evidence.pendingPlanItems ?? [],
       shouldRecover: false
     };
   }
@@ -152,6 +176,7 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
       code: "PENDING_APPROVAL",
       reason: "仍有工具调用等待用户审批。",
       suggestedAction: "批准或拒绝待处理工具调用，Runtime 将在审批后继续。",
+      pendingPlanItems: evidence.pendingPlanItems ?? [],
       shouldRecover: false
     };
   }
@@ -162,6 +187,7 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
       code: "PENDING_PLAN",
       reason: "任务缺少必须由用户或外部条件解除的阻塞条件。",
       suggestedAction: "处理被阻塞的计划项，或提供所需的选择、权限和外部信息。",
+      pendingPlanItems: evidence.pendingPlanItems ?? [],
       shouldRecover: false
     };
   }
@@ -213,13 +239,13 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
             ? {
                 code: "VALIDATION_FAILED" as const,
                 reason: "验证命令执行失败。",
-                suggestedAction: "修复验证错误并重新运行验证命令。"
+                suggestedAction: "复用最近一次失败命令的结果定位问题，修复对应文件，再使用 runCommand 重新运行验证。"
               }
             : evidence.validationStatus === "not_run" || evidence.validationStatus === "not_required"
               ? {
                   code: "VALIDATION_NOT_RUN" as const,
                   reason: "编辑任务尚未运行必要验证。",
-                  suggestedAction: "运行与本次变更相关的类型检查、测试或构建。"
+                  suggestedAction: "使用 runCommand 运行与本次变更相关的类型检查、测试或构建。"
                 }
               : !validationIsCurrent
                 ? {
@@ -230,12 +256,15 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
                 : {
                     code: "PENDING_PLAN" as const,
                     reason: "编辑任务仍有未完成的计划步骤。",
-                    suggestedAction: "完成或明确阻塞剩余计划步骤。"
+                    suggestedAction: (evidence.pendingPlanItems ?? []).some((item) => item.workflowStepId)
+                      ? "Runtime 已先执行系统计划校准；请完成上述系统步骤对应的实际工作。"
+                      : "逐项完成上述自定义计划，或明确记录其阻塞原因。"
                   };
 
   return {
     status: "incomplete",
     ...rejection,
+    pendingPlanItems: evidence.pendingPlanItems ?? [],
     shouldRecover: !input.recoveryAttempted && input.editingToolsAvailable
   };
 }
@@ -249,6 +278,9 @@ export function createCompletionRecoveryMessage(decision: CompletionDecision, ev
       `原因：${decision.reason}`,
       `当前证据：待审核补丁 ${evidence.generatedPatchCount} 个，已变更文件 ${evidence.changedFileCount} 个，验证状态 ${evidence.validationStatus}，未完成计划 ${evidence.pendingPlanCount} 项，阻塞计划 ${evidence.blockedPlanCount} 项，待审批 ${evidence.pendingApprovalCount} 项，运行中命令 ${evidence.activeCommandCount} 个，失败工具 ${evidence.failedToolCallCount} 次。`,
       `建议动作：${decision.suggestedAction ?? "根据当前证据补齐未完成条件。"}`,
+      ...(decision.pendingPlanItems?.length
+        ? [`具体未完成计划：${decision.pendingPlanItems.map((item) => `${item.workflowStepId ?? "custom"}:${item.title}（${item.status}）`).join("；")}`]
+        : []),
       "请立即复用已有上下文继续处理；不要重复宽泛搜索。若确实需要用户选择、权限、外部状态或受到安全策略限制，请明确说明该不可自动恢复的阻塞条件。"
     ].join("\n")
   };

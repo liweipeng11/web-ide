@@ -164,7 +164,7 @@ test("completeTask 证据不足时继续运行，真实编辑后才能完成", a
   assert.equal(steps.some((step) => step.type === "completion_rejected" && step.rejectionCode === "NO_MUTATION_EVIDENCE"), true);
 });
 
-test("相同完成证据第三次拒绝后终止循环，修改 summary 不能绕过", async () => {
+test("完成拒绝后无效读取不算进展，最多进行一次恢复调用", async () => {
   let providerCallCount = 0;
   let capturedMetrics: RunMetrics | undefined;
   const result = await runAgentRuntime({
@@ -174,35 +174,38 @@ test("相同完成证据第三次拒绝后终止循环，修改 summary 不能�
     contextBudgetEnabled: false,
     registry: createAgentToolRegistry([
       createRuntimeTestTool("writeFile", { success: true }),
+      createRuntimeTestTool("readFile", { filePath: "src/a.ts", content: "const a = 1;" }),
       ...completionAgentToolDefinitions
     ]),
     requestCompletion: async () => {
       providerCallCount += 1;
-      return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
-        createModelToolCall(`same-evidence-${providerCallCount}`, "completeTask", {
-          summary: `第 ${providerCallCount} 版完成说明`,
-          verified: true
-        })
-      ] } }] };
+      return providerCallCount === 1
+        ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+            createModelToolCall("premature-complete", "completeTask", { summary: "修改完成", verified: true })
+          ] } }] }
+        : providerCallCount === 2
+          ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+              createModelToolCall("ineffective-read", "readFile", { filePath: "src/a.ts" })
+            ] } }] }
+          : { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+              createModelToolCall("must-not-run", "completeTask", { summary: "再次声明完成", verified: true })
+            ] } }] };
     },
     metricsRecorder: async (metrics) => { capturedMetrics = metrics; }
   });
 
-  assert.equal(providerCallCount, 3);
+  assert.equal(providerCallCount, 2);
   assert.equal(result.status, "incomplete");
-  assert.match(result.statusReason ?? "", /完成证据没有变化/);
-  assert.equal(result.messages.filter((message) => message.role === "tool").length, 3);
-  assert.equal(result.messages.some((message) => message.role === "tool" && String(message.content).includes("禁止再次直接调用 completeTask")), true);
-  assert.equal(capturedMetrics?.completionRequestCount, 3);
-  assert.equal(capturedMetrics?.completionRejectedCount, 3);
-  assert.equal(capturedMetrics?.sameEvidenceRejectionCount, 2);
+  assert.match(result.statusReason ?? "", /恢复动作没有改变/);
+  assert.equal(result.messages.filter((message) => message.role === "tool").length, 2);
+  assert.equal(capturedMetrics?.completionRequestCount, 1);
+  assert.equal(capturedMetrics?.completionRejectedCount, 1);
+  assert.equal(capturedMetrics?.sameEvidenceRejectionCount, 0);
   assert.equal(capturedMetrics?.completionLoopStoppedCount, 1);
-  assert.equal(capturedMetrics?.providerCallCount, 3);
-  assert.equal(capturedMetrics?.providerCallsAfterFirstCompletionRejection, 2);
+  assert.equal(capturedMetrics?.providerCallCount, 2);
+  assert.equal(capturedMetrics?.providerCallsAfterFirstCompletionRejection, 1);
   assert.deepEqual(capturedMetrics?.completionRejections.map((item) => item.rejectionCode), [
-    "NO_MUTATION_EVIDENCE",
-    "UNCHANGED_COMPLETION_EVIDENCE",
-    "UNCHANGED_COMPLETION_EVIDENCE"
+    "NO_MUTATION_EVIDENCE"
   ]);
 });
 

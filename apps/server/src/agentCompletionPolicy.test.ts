@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   advanceCompletionRejectionState,
   createCompletionEvidenceFingerprint,
+  createCompletionRejectionPayload,
   createCompletionRejectionGuidance,
   evaluateAgentCompletion,
   finalContentClaimsIncomplete,
@@ -18,6 +19,7 @@ function createEvidence(overrides: Partial<CompletionEvidence> = {}): Completion
     changedFileCount: 0,
     pendingPlanCount: 0,
     blockedPlanCount: 0,
+    pendingPlanItems: [],
     validationStatus: "not_run",
     pendingApprovalCount: 0,
     activeCommandCount: 0,
@@ -184,6 +186,57 @@ test("每类未完成证据都返回稳定拒绝码和建议动作", () => {
     assert.ok(decision.reason);
     assert.ok(decision.suggestedAction);
   }
+});
+
+test("拒绝契约返回具体未完成计划并提供确定性动作", () => {
+  const pendingPlanItems = [
+    { workflowStepId: "validate", title: "验证功能实现", status: "pending" as const }
+  ];
+  const decision = evaluateAgentCompletion({
+    evidence: createEvidence({
+      changedFileCount: 1,
+      validationStatus: "not_run",
+      pendingPlanCount: 1,
+      pendingPlanItems
+    }),
+    finalContent: "实现已经写入。",
+    recoveryAttempted: false,
+    editingToolsAvailable: true
+  });
+  const payload = createCompletionRejectionPayload(decision);
+
+  assert.equal(payload.rejectionCode, "VALIDATION_NOT_RUN");
+  assert.match(payload.suggestedAction ?? "", /runCommand/);
+  assert.deepEqual(payload.pendingPlanItems, pendingPlanItems);
+});
+
+test("系统计划与自定义计划分别给出可执行的收敛提示", () => {
+  const systemDecision = evaluateAgentCompletion({
+    evidence: createEvidence({
+      changedFileCount: 1,
+      validationStatus: "passed",
+      pendingPlanCount: 1,
+      pendingPlanItems: [{ workflowStepId: "validate", title: "验证功能实现", status: "pending" }]
+    }),
+    finalContent: "修改完成。",
+    recoveryAttempted: false,
+    editingToolsAvailable: true
+  });
+  const customDecision = evaluateAgentCompletion({
+    evidence: createEvidence({
+      changedFileCount: 1,
+      validationStatus: "passed",
+      pendingPlanCount: 1,
+      pendingPlanItems: [{ title: "确认兼容性", status: "in_progress" }]
+    }),
+    finalContent: "修改完成。",
+    recoveryAttempted: false,
+    editingToolsAvailable: true
+  });
+
+  assert.match(systemDecision.suggestedAction ?? "", /系统计划校准/);
+  assert.match(customDecision.suggestedAction ?? "", /自定义计划/);
+  assert.match(createCompletionRejectionGuidance(customDecision, 1), /确认兼容性/);
 });
 
 test("构建通过但恢复证据丢失时返回面向用户的根因说明", () => {

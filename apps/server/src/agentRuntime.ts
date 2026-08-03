@@ -16,6 +16,8 @@ import {
 import { getAgentModeConfig, normalizeAgentMode, type AgentMode } from "./agentModes.js";
 import {
   advanceCompletionRejectionState,
+  createCompletionEvidenceFingerprint,
+  createCompletionRejectionPayload,
   createCompletionRejectionGuidance,
   createCompletionRecoveryMessage,
   evaluateAgentCompletion,
@@ -484,6 +486,9 @@ async function collectCompletionEvidence(input: {
     changedFileCount: new Set(input.directAppliedFiles).size,
     pendingPlanCount: relevantPlanItems.filter((item) => item.status === "pending" || item.status === "in_progress").length,
     blockedPlanCount: relevantPlanItems.filter((item) => item.status === "blocked").length,
+    pendingPlanItems: relevantPlanItems
+      .filter((item) => item.status !== "completed")
+      .map(({ workflowStepId, title, status }) => ({ workflowStepId, title, status })),
     validationStatus,
     pendingApprovalCount: Math.max(input.pendingApprovalCount ?? 0, taskState.pendingToolCall ? 1 : 0),
     activeCommandCount: commands.filter((command) => command.status === "running").length,
@@ -880,14 +885,9 @@ function createCompletionToolErrorMessage(toolCall: ModelToolCall, decision: Com
   return {
     role: "tool",
     toolCallId: toolCall.id,
-    content: structured ? JSON.stringify({
-      error: "completion_rejected",
-      completionRequested: true,
-      completionStatus: decision.status,
-      rejectionCode: decision.code,
-      message: decision.reason,
-      suggestedAction: decision.suggestedAction
-    }) : JSON.stringify({ error: decision.reason })
+    content: structured
+      ? JSON.stringify(createCompletionRejectionPayload(decision))
+      : JSON.stringify({ error: decision.reason })
   };
 }
 
@@ -899,6 +899,7 @@ function createCompletionRejectedStep(decision: CompletionDecision, structured =
     rejectionCode: decision.code === "COMPLETED" ? "INCOMPLETE_CLAIM" : decision.code,
     message: decision.reason,
     suggestedAction: decision.suggestedAction,
+    pendingPlanItems: decision.pendingPlanItems,
     shouldRecover: decision.shouldRecover
   });
 }
@@ -1657,7 +1658,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         ? advanceCompletionRejectionState(completionRejectionState, evidence, requestedDecision.code)
         : undefined;
       const sameEvidence = (completionRejectionState?.consecutiveCount ?? 0) > 1;
-      const loopStopped = (completionRejectionState?.consecutiveCount ?? 0) >= 3;
+      // 首次拒绝后只允许模型进行一次恢复；若再次提交时证据仍相同，立即收敛。
+      // 三次相同证据熔断继续作为最终保护，防止未来新增恢复路径绕过此处的快速收敛。
+      const recoveryExhausted = sameEvidence;
+      const hardLoopStopped = (completionRejectionState?.consecutiveCount ?? 0) >= 3;
+      const loopStopped = recoveryExhausted || hardLoopStopped;
       const guidance = completionRejectionState
         ? createCompletionRejectionGuidance(requestedDecision, completionRejectionState.consecutiveCount)
         : requestedDecision.suggestedAction;
@@ -1688,7 +1693,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         loopStopped
       });
       if (loopStopped) {
-        const statusReason = `完成证据没有变化，completeTask 已连续 3 次被拒绝：${requestedDecision.reason}`;
+        const statusReason = recoveryExhausted && !hardLoopStopped
+          ? `完成拒绝后的唯一恢复尝试没有改变证据，Runtime 已停止重复提交：${requestedDecision.reason}`
+          : `完成证据没有变化，completeTask 已连续 3 次被拒绝：${requestedDecision.reason}`;
         await metrics.finish({
           status: "incomplete",
           stopReason: "incomplete",
@@ -2000,6 +2007,57 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolFailure();
         throw error;
       }
+    }
+
+    if (completionRejectionState && completionPolicyFlags.completionRejectionConvergence) {
+      await persistAndReconcileRuntimeEvidence();
+      const evidenceAfterRecovery = await collectCompletionEvidence({
+        taskSessionId: options.taskSessionId,
+        workflowType,
+        mutationExpected,
+        generatedPatchIds,
+        directAppliedFiles,
+        agentContext,
+        validationAvailable: Boolean(registry.get("runCommand")),
+        failedToolCallCount: metrics.getCompletionEvidenceSnapshot().failedToolCallCount,
+        lastMutationAt,
+        lastValidationAt
+      });
+      const recoveryChangedEvidence = createCompletionEvidenceFingerprint(evidenceAfterRecovery)
+        !== completionRejectionState.fingerprint;
+
+      if (!recoveryChangedEvidence) {
+        // 读取、列目录和重复存在性检查不会改变完成证据；一次无效恢复后直接收敛。
+        const statusReason = "完成拒绝后的恢复动作没有改变文件、验证、计划、审批或命令证据，Runtime 已停止继续消耗模型调用。";
+        metrics.recordCompletionConvergenceStopped();
+        await metrics.finish({
+          status: "incomplete",
+          stopReason: "incomplete",
+          failureCategory: "none",
+          patchFileCount: countGeneratedPatchFiles(generatedPatchIds),
+          validationCommandCount: agentContext.commandsRun?.filter((command) => command.validation === true).length ?? 0,
+          validationStatus: evidenceAfterRecovery.validationStatus
+        });
+        await persistRuntimeEvidence();
+        return {
+          status: "incomplete",
+          runId,
+          content: statusReason,
+          messages,
+          agentContext,
+          generatedPatchIds,
+          runtimeEvidence: snapshotRuntimeEvidence(),
+          pendingToolCall: null,
+          contextBudgetSnapshot: latestContextBudgetSnapshot,
+          contextSummary: latestContextSummary,
+          completionEvidence: evidenceAfterRecovery,
+          statusReason,
+          requestedStatus: "completed"
+        };
+      }
+
+      // 真正证据发生变化后重置拒绝连续性，允许模型基于新状态重新提交完成。
+      completionRejectionState = undefined;
     }
 
     if (repeatedToolNames.length) {

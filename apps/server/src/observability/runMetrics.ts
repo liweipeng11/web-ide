@@ -358,6 +358,11 @@ export class RunMetricsTracker {
     }
   }
 
+  /** 无效恢复在再次提交 completeTask 前就被拦截时，单独记录收敛停止。 */
+  recordCompletionConvergenceStopped() {
+    this.completionLoopStoppedCount += 1;
+  }
+
   /** Provider 调用与拒绝后的额外调用分开统计，用于识别收敛保护是否生效。 */
   recordProviderCall() {
     this.providerCallCount += 1;

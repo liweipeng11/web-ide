@@ -229,6 +229,8 @@ export type CompletionRejectionCode =
   | "INCOMPLETE_CLAIM"
   | "UNCHANGED_COMPLETION_EVIDENCE";
 
+export type PendingPlanItemSummary = Pick<TaskPlanItem, "workflowStepId" | "title" | "status">;
+
 export type AgentStep = {
   id: string;
   createdAt: number;
@@ -326,6 +328,7 @@ export type AgentStep = {
       rejectionCode: CompletionRejectionCode;
       message: string;
       suggestedAction?: string;
+      pendingPlanItems?: PendingPlanItemSummary[];
       shouldRecover: boolean;
     }
   | {
