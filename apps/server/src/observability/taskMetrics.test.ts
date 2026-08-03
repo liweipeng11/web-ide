@@ -11,6 +11,8 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   first.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8 });
   first.addUsage({ inputTokens: 10, outputTokens: 2, reasoningTokens: 1, cachedInputTokens: 0 });
   first.recordToolCall();
+  first.recordCompletionRequest();
+  first.recordCompletionRejected();
   first.recordContextEstimate(100, 80, true);
   await first.finish({ status: "awaiting_approval" });
 
@@ -18,6 +20,8 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   resumed.setPrice({ currency: "USD", inputPerMillionTokens: 2, outputPerMillionTokens: 8 });
   resumed.addUsage({ inputTokens: 7, outputTokens: 3, reasoningTokens: 0, cachedInputTokens: 2 });
   resumed.recordToolCall({ failed: true });
+  resumed.recordCompletionRequest();
+  resumed.recordCompletionAccepted();
   await resumed.finish({ status: "completed" });
 
   const validation = new RunMetricsTracker({ runId: "validation-run", taskSessionId, provider: "local", model: "none", mode: "validation", scope: "validation_run" }, async () => {});
@@ -29,6 +33,9 @@ test("按任务聚合审批前后模型片段、补丁和验证指标", async ()
   assert.equal(snapshot.scope, "task_run");
   assert.equal(snapshot.tools.calls, 2);
   assert.equal(snapshot.tools.failedCalls, 1);
+  assert.equal(snapshot.completionRequestCount, 2);
+  assert.equal(snapshot.completionAcceptedCount, 1);
+  assert.equal(snapshot.completionRejectedCount, 1);
   assert.deepEqual(snapshot.usage, { inputTokens: 17, outputTokens: 5, reasoningTokens: 1, cachedInputTokens: 2 });
   assert.equal(snapshot.estimatedCostUsd, 0.000074);
   assert.equal(snapshot.context.compressionCount, 1);

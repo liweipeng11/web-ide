@@ -157,6 +157,41 @@ test("completeTask 证据不足时继续运行，真实编辑后才能完成", a
   assert.equal(steps.filter((step) => step.type === "message" && step.content === "修改完成").length, 1);
 });
 
+test("相同完成证据第三次拒绝后终止循环，修改 summary 不能绕过", async () => {
+  let providerCallCount = 0;
+  let capturedMetrics: RunMetrics | undefined;
+  const result = await runAgentRuntime({
+    userRequest: "修改 src/a.ts",
+    mode: "act",
+    maxSteps: 8,
+    contextBudgetEnabled: false,
+    registry: createAgentToolRegistry([
+      createRuntimeTestTool("writeFile", { success: true }),
+      ...completionAgentToolDefinitions
+    ]),
+    requestCompletion: async () => {
+      providerCallCount += 1;
+      return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+        createModelToolCall(`same-evidence-${providerCallCount}`, "completeTask", {
+          summary: `第 ${providerCallCount} 版完成说明`,
+          verified: true
+        })
+      ] } }] };
+    },
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; }
+  });
+
+  assert.equal(providerCallCount, 3);
+  assert.equal(result.status, "incomplete");
+  assert.match(result.statusReason ?? "", /完成证据没有变化/);
+  assert.equal(result.messages.filter((message) => message.role === "tool").length, 3);
+  assert.equal(result.messages.some((message) => message.role === "tool" && String(message.content).includes("禁止再次直接调用 completeTask")), true);
+  assert.equal(capturedMetrics?.completionRequestCount, 3);
+  assert.equal(capturedMetrics?.completionRejectedCount, 3);
+  assert.equal(capturedMetrics?.sameEvidenceRejectionCount, 2);
+  assert.equal(capturedMetrics?.completionLoopStoppedCount, 1);
+});
+
 test("编辑任务必须在最后变更后获得成功验证才能 completeTask", async () => {
   let completionCount = 0;
   let validationAttempt = 0;

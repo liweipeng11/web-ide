@@ -88,6 +88,11 @@ export type RunMetrics = {
   safeEditorConfirmedExpansionCount: number;
   safeEditorRiskAcknowledgementCount: number;
   safeEditorFalseExpansionRegressionCount: number;
+  completionRequestCount: number;
+  completionAcceptedCount: number;
+  completionRejectedCount: number;
+  sameEvidenceRejectionCount: number;
+  completionLoopStoppedCount: number;
   taskSessionPersistence: TaskSessionPersistenceMetrics;
   tools: ToolRuntimeMetrics;
   context: { compressionCount: number; estimatedTokensBefore: number | null; estimatedTokensAfter: number | null; estimator: "conservative" | "unavailable" };
@@ -167,6 +172,11 @@ export class RunMetricsTracker {
   private consecutiveNoProgressSteps = 0;
   private maxConsecutiveNoProgressSteps = 0;
   private recoveryAttempts = 0;
+  private completionRequestCount = 0;
+  private completionAcceptedCount = 0;
+  private completionRejectedCount = 0;
+  private sameEvidenceRejectionCount = 0;
+  private completionLoopStoppedCount = 0;
   private readonly toolCallDiagnostics = new Map<string, {
     toolName: string;
     calls: number;
@@ -277,6 +287,21 @@ export class RunMetricsTracker {
     if (input.completionEvidence !== false) this.completionEvidenceFailedToolCalls += 1;
   }
 
+  /** 为显式完成协议补充独立统计，便于从普通工具指标中识别拒绝循环。 */
+  recordCompletionRequest() {
+    this.completionRequestCount += 1;
+  }
+
+  recordCompletionAccepted() {
+    this.completionAcceptedCount += 1;
+  }
+
+  recordCompletionRejected(input: { sameEvidence?: boolean; loopStopped?: boolean } = {}) {
+    this.completionRejectedCount += 1;
+    if (input.sameEvidence) this.sameEvidenceRejectionCount += 1;
+    if (input.loopStopped) this.completionLoopStoppedCount += 1;
+  }
+
   /** 向完成策略提供只读快照，避免策略直接依赖指标对象的内部计数。 */
   getCompletionEvidenceSnapshot() {
     return { failedToolCallCount: this.completionEvidenceFailedToolCalls };
@@ -338,6 +363,11 @@ export class RunMetricsTracker {
       usage: { ...this.usage },
       estimatedCostUsd: this.estimateCostUsd(),
       ...this.safeEditorMetrics,
+      completionRequestCount: this.completionRequestCount,
+      completionAcceptedCount: this.completionAcceptedCount,
+      completionRejectedCount: this.completionRejectedCount,
+      sameEvidenceRejectionCount: this.sameEvidenceRejectionCount,
+      completionLoopStoppedCount: this.completionLoopStoppedCount,
       taskSessionPersistence: createEmptyTaskSessionPersistenceMetrics(),
       tools: {
         calls: this.toolCalls,

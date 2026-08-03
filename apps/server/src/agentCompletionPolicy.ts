@@ -29,6 +29,63 @@ export type CompletionPolicyInput = {
   editingToolsAvailable: boolean;
 };
 
+export type CompletionEvidenceFingerprintInput = Pick<CompletionEvidence,
+  | "changedFileCount"
+  | "generatedPatchCount"
+  | "validationStatus"
+  | "pendingPlanCount"
+  | "blockedPlanCount"
+  | "pendingApprovalCount"
+  | "activeCommandCount"
+  | "lastMutationAt"
+  | "lastValidationAt"
+>;
+
+export type CompletionRejectionState = {
+  fingerprint: string;
+  rejectionCode: string;
+  consecutiveCount: number;
+};
+
+/**
+ * 只序列化会影响完成裁决的稳定字段，模型改写 summary 不能改变该指纹。
+ */
+export function createCompletionEvidenceFingerprint(evidence: CompletionEvidenceFingerprintInput) {
+  return JSON.stringify([
+    evidence.changedFileCount,
+    evidence.generatedPatchCount,
+    evidence.validationStatus,
+    evidence.pendingPlanCount,
+    evidence.blockedPlanCount,
+    evidence.pendingApprovalCount,
+    evidence.activeCommandCount,
+    evidence.lastMutationAt ?? null,
+    evidence.lastValidationAt ?? null
+  ]);
+}
+
+/**
+ * 证据指纹是连续性的唯一依据；拒绝代码仅用于诊断，避免模型改写 summary 后重置计数。
+ */
+export function advanceCompletionRejectionState(
+  previous: CompletionRejectionState | undefined,
+  evidence: CompletionEvidenceFingerprintInput,
+  rejectionCode: string
+): CompletionRejectionState {
+  const fingerprint = createCompletionEvidenceFingerprint(evidence);
+  const consecutiveCount = previous?.fingerprint === fingerprint
+    ? previous.consecutiveCount + 1
+    : 1;
+  return { fingerprint, rejectionCode, consecutiveCount };
+}
+
+export function createCompletionRejectionGuidance(decision: CompletionDecision, consecutiveCount: number) {
+  if (consecutiveCount >= 2) {
+    return `完成证据没有变化（连续第 ${consecutiveCount} 次拒绝）。禁止再次直接调用 completeTask；必须先执行能改变文件、验证、计划、审批或命令状态的动作。`;
+  }
+  return `下一步必须先处理该条件：${decision.reason} 完成实际修改或必要验证后，再调用 completeTask。`;
+}
+
 const incompleteClaimPatterns = [
   /(?:尚未|还未|未能|没有|无法)(?:完成|实现|修改|创建|生成|应用|验证)/i,
   /(?:任务|修改|实现).{0,12}(?:未完成|无法完成)/i,

@@ -23,6 +23,12 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
     tracker.recordToolResult({ signature, cached: true, empty: true });
     tracker.recordToolFailure();
     assert.deepEqual(tracker.getCompletionEvidenceSnapshot(), { failedToolCallCount: 1 });
+    tracker.recordCompletionRequest();
+    tracker.recordCompletionRejected();
+    tracker.recordCompletionRequest();
+    tracker.recordCompletionRejected({ sameEvidence: true, loopStopped: true });
+    tracker.recordCompletionRequest();
+    tracker.recordCompletionAccepted();
     tracker.recordSafeEditorMetrics({
       safeEditorNeedsAnalysisCount: 1,
       safeEditorAutoAnalysisAttemptCount: 1,
@@ -67,6 +73,11 @@ test("运行指标包含完整基线字段且日志不接收敏感正文", async
     assert.equal(metrics.safeEditorConfirmedExpansionCount, 1);
     assert.equal(metrics.safeEditorRiskAcknowledgementCount, 1);
     assert.equal(metrics.safeEditorFalseExpansionRegressionCount, 2);
+    assert.equal(metrics.completionRequestCount, 3);
+    assert.equal(metrics.completionAcceptedCount, 1);
+    assert.equal(metrics.completionRejectedCount, 2);
+    assert.equal(metrics.sameEvidenceRejectionCount, 1);
+    assert.equal(metrics.completionLoopStoppedCount, 1);
     assert.equal(log.includes("Authorization"), false);
     assert.equal(log.includes("API_KEY"), false);
   } finally {
@@ -99,6 +110,11 @@ test("并发指标写入保持 UTF-8 JSONL 行完整", async () => {
       safeEditorConfirmedExpansionCount: 0,
       safeEditorRiskAcknowledgementCount: 0,
       safeEditorFalseExpansionRegressionCount: 0,
+      completionRequestCount: 0,
+      completionAcceptedCount: 0,
+      completionRejectedCount: 0,
+      sameEvidenceRejectionCount: 0,
+      completionLoopStoppedCount: 0,
       taskSessionPersistence: {
         taskSessionUpdateCount: 0,
         taskSessionPhysicalWriteCount: 0,

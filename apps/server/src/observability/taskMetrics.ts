@@ -50,6 +50,11 @@ function normalizeMetricFields(metrics: RunMetrics) {
   metrics.safeEditorConfirmedExpansionCount ??= 0;
   metrics.safeEditorRiskAcknowledgementCount ??= 0;
   metrics.safeEditorFalseExpansionRegressionCount ??= 0;
+  metrics.completionRequestCount ??= 0;
+  metrics.completionAcceptedCount ??= 0;
+  metrics.completionRejectedCount ??= 0;
+  metrics.sameEvidenceRejectionCount ??= 0;
+  metrics.completionLoopStoppedCount ??= 0;
   metrics.taskSessionPersistence ??= createEmptyTaskSessionPersistenceMetrics();
   metrics.taskSessionPersistence.taskSessionUpdateCount ??= 0;
   metrics.taskSessionPersistence.taskSessionPhysicalWriteCount ??= 0;
@@ -209,6 +214,11 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
     current.safeEditorConfirmedExpansionCount += metrics.safeEditorConfirmedExpansionCount;
     current.safeEditorRiskAcknowledgementCount += metrics.safeEditorRiskAcknowledgementCount;
     current.safeEditorFalseExpansionRegressionCount += metrics.safeEditorFalseExpansionRegressionCount;
+    current.completionRequestCount += metrics.completionRequestCount;
+    current.completionAcceptedCount += metrics.completionAcceptedCount;
+    current.completionRejectedCount += metrics.completionRejectedCount;
+    current.sameEvidenceRejectionCount += metrics.sameEvidenceRejectionCount;
+    current.completionLoopStoppedCount += metrics.completionLoopStoppedCount;
     current.tools.calls += metrics.tools.calls;
     current.tools.repeatedCalls += metrics.tools.repeatedCalls;
     current.tools.failedCalls += metrics.tools.failedCalls;

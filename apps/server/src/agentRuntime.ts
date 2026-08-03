@@ -15,9 +15,12 @@ import {
 } from "./agentBudgetPolicy.js";
 import { getAgentModeConfig, normalizeAgentMode, type AgentMode } from "./agentModes.js";
 import {
+  advanceCompletionRejectionState,
+  createCompletionRejectionGuidance,
   createCompletionRecoveryMessage,
   evaluateAgentCompletion,
-  type CompletionEvidence
+  type CompletionEvidence,
+  type CompletionRejectionState
 } from "./agentCompletionPolicy.js";
 import { evaluateAgentToolApproval } from "./agentPermissions.js";
 import type { AgentToolRegistry } from "./agentToolRegistry.js";
@@ -1005,6 +1008,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let consecutiveNoProgressSteps = 0;
   let recoveryAttempts = 0;
   let completionRecoveryAttempted = false;
+  let completionRejectionState: CompletionRejectionState | undefined;
   const directAppliedFiles = new Set([
     ...(restoredRuntimeEvidence?.appliedFilePaths ?? []),
     ...(options.appliedFilePaths ?? [])
@@ -1329,6 +1333,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
     const completionCalls = toolCalls.filter((toolCall) => toolCall.name === "completeTask");
     if (completionCalls.length) {
+      metrics.recordCompletionRequest();
       const exclusive = toolCalls.length === 1 && completionCalls.length === 1;
       if (!explicitCompletionToolEnabled || !exclusive) {
         const reason = !explicitCompletionToolEnabled
@@ -1343,6 +1348,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         }
         options.onAgentStep?.(createAgentStep({ type: "error", message: reason }));
         logAi(runId, "runtime.completeTaskRejected", { reason, toolNames: toolCalls.map((toolCall) => toolCall.name) });
+        metrics.recordCompletionRejected();
         continue;
       }
 
@@ -1358,6 +1364,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolFailure({ completionEvidence: false });
         metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
         logAi(runId, "runtime.completeTaskRejected", { reason });
+        metrics.recordCompletionRejected();
         continue;
       }
 
@@ -1403,6 +1410,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: false });
         options.onAgentStep?.(createAgentStep({ type: "message", content: completionInput.summary }));
         logAi(runId, "runtime.completeTaskAccepted", { step, evidence });
+        metrics.recordCompletionAccepted();
         await metrics.finish({
           status: "completed",
           stopReason: "completed",
@@ -1429,14 +1437,56 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         };
       }
 
-      const rejectionReason = `completeTask was rejected: ${requestedDecision.reason}`;
+      completionRejectionState = advanceCompletionRejectionState(
+        completionRejectionState,
+        evidence,
+        requestedDecision.reason
+      );
+      const sameEvidence = completionRejectionState.consecutiveCount > 1;
+      const loopStopped = completionRejectionState.consecutiveCount >= 3;
+      const guidance = createCompletionRejectionGuidance(requestedDecision, completionRejectionState.consecutiveCount);
+      const rejectionReason = `completeTask was rejected: ${requestedDecision.reason}\n${guidance}`;
       const errorMessage = createCompletionToolErrorMessage(completionCall, rejectionReason, requestedDecision.status);
       messages.push(errorMessage);
       await persistAgentMessage(options.taskSessionId, errorMessage);
       metrics.recordToolFailure({ completionEvidence: false });
       metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
       options.onAgentStep?.(createAgentStep({ type: "error", message: rejectionReason }));
-      logAi(runId, "runtime.completeTaskRejected", { reason: requestedDecision.reason, evidence });
+      metrics.recordCompletionRejected({ sameEvidence, loopStopped });
+      logAi(runId, "runtime.completeTaskRejected", {
+        reason: requestedDecision.reason,
+        evidence,
+        evidenceFingerprint: completionRejectionState.fingerprint,
+        consecutiveCount: completionRejectionState.consecutiveCount,
+        loopStopped
+      });
+      if (loopStopped) {
+        const statusReason = `完成证据没有变化，completeTask 已连续 3 次被拒绝：${requestedDecision.reason}`;
+        await metrics.finish({
+          status: "incomplete",
+          stopReason: "incomplete",
+          failureCategory: "none",
+          patchFileCount: countGeneratedPatchFiles(generatedPatchIds),
+          validationCommandCount: agentContext.commandsRun?.filter((command) => command.validation === true).length ?? 0,
+          validationStatus: evidence.validationStatus
+        });
+        await persistRuntimeEvidence();
+        return {
+          status: "incomplete",
+          runId,
+          content: statusReason,
+          messages,
+          agentContext,
+          generatedPatchIds,
+          runtimeEvidence: snapshotRuntimeEvidence(),
+          pendingToolCall: null,
+          contextBudgetSnapshot: latestContextBudgetSnapshot,
+          contextSummary: latestContextSummary,
+          completionEvidence: evidence,
+          statusReason,
+          requestedStatus: "completed"
+        };
+      }
       continue;
     }
 

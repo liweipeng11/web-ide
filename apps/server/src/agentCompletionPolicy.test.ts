@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  advanceCompletionRejectionState,
+  createCompletionEvidenceFingerprint,
+  createCompletionRejectionGuidance,
   evaluateAgentCompletion,
   finalContentClaimsIncomplete,
   finalContentHasNonRecoverableBlock,
@@ -152,4 +155,33 @@ test("验证早于最后变更时要求重新验证，验证能力不可用时�
 
   assert.equal(stale.status, "incomplete");
   assert.equal(unavailable.status, "completed");
+});
+
+test("完成证据指纹稳定且不依赖模型 summary", () => {
+  const evidence = createEvidence({
+    changedFileCount: 1,
+    validationStatus: "passed",
+    lastMutationAt: 10,
+    lastValidationAt: 20
+  });
+
+  const first = createCompletionEvidenceFingerprint(evidence);
+  const second = createCompletionEvidenceFingerprint({ ...evidence });
+  assert.equal(first, second);
+  assert.equal(first.includes("summary"), false);
+});
+
+test("相同证据连续计数，理由文本不能绕过限制，证据变化会重置", () => {
+  const evidence = createEvidence();
+  const first = advanceCompletionRejectionState(undefined, evidence, "NO_MUTATION_EVIDENCE");
+  const second = advanceCompletionRejectionState(first, evidence, "NO_MUTATION_EVIDENCE");
+  const evidenceChanged = advanceCompletionRejectionState(second, { ...evidence, changedFileCount: 1 }, "VALIDATION_NOT_RUN");
+  const reasonChanged = advanceCompletionRejectionState(second, evidence, "VALIDATION_FAILED");
+
+  assert.equal(first.consecutiveCount, 1);
+  assert.equal(second.consecutiveCount, 2);
+  assert.equal(evidenceChanged.consecutiveCount, 1);
+  assert.equal(reasonChanged.consecutiveCount, 3);
+  assert.equal(reasonChanged.rejectionCode, "VALIDATION_FAILED");
+  assert.match(createCompletionRejectionGuidance({ status: "incomplete", reason: "缺少变更", shouldRecover: true }, 2), /禁止再次直接调用 completeTask/);
 });
