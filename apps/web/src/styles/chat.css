@@ -1415,9 +1415,95 @@
   color: #9a3412;
 }
 
+.agent-step-approval_request.status-pending > span {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+/* 真实工具异常和失败命令使用红色，避免与可恢复的策略警告混淆。 */
+.agent-step-error,
+.agent-step-command.status-failed {
+  border-left: 3px solid #b42318;
+  padding-left: 6px;
+}
+
+.agent-step-error > span,
+.agent-step-command.status-failed > span {
+  background: #fff1f2;
+  color: #b42318;
+}
+
+.agent-step-command.status-blocked {
+  border-left: 3px solid #d97706;
+  padding-left: 6px;
+}
+
+.agent-step-command.status-blocked > span {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
 .agent-step-checkpoint > span {
   background: #ecfdf3;
   color: #17613a;
+}
+
+/* 完成条件拒绝属于可恢复的业务警告，不能与真实工具异常共用红色错误语义。 */
+.agent-step-completion_rejected,
+.agent-step-tool_blocked {
+  border-left: 3px solid #d97706;
+  padding-left: 6px;
+}
+
+.agent-step-completion_rejected > span,
+.agent-step-tool_blocked > span {
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.agent-step-completion_rejected.status-awaiting_approval {
+  border-left-color: #3b82f6;
+}
+
+.agent-step-completion_rejected.status-awaiting_approval > span {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.agent-completion-rejection {
+  background: #fffbeb;
+  border: 1px solid #f4d58d;
+  border-radius: 6px;
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 8px;
+}
+
+.agent-completion-rejection > div {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-completion-rejection strong,
+.agent-completion-rejection code {
+  font-size: 10px;
+}
+
+.agent-completion-rejection code {
+  background: #fef3c7;
+  border-radius: 4px;
+  color: #92400e;
+  padding: 2px 5px;
+}
+
+.agent-completion-rejection p {
+  color: #78350f;
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 0;
 }
 
 .agent-step-strategy {

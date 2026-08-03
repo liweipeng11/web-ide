@@ -1,4 +1,4 @@
-import type { AgentRuntimeStatus } from "./types.js";
+import type { AgentRuntimeStatus, CompletionRejectionCode } from "./types.js";
 import type { TaskWorkflowType } from "./taskWorkflow/index.js";
 
 export type CompletionEvidence = {
@@ -18,7 +18,9 @@ export type CompletionEvidence = {
 
 export type CompletionDecision = {
   status: Extract<AgentRuntimeStatus, "completed" | "awaiting_approval" | "incomplete" | "blocked">;
+  code: CompletionRejectionCode | "COMPLETED";
   reason: string;
+  suggestedAction?: string;
   shouldRecover: boolean;
 };
 
@@ -120,7 +122,9 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
   if (evidence.generatedPatchCount > 0) {
     return {
       status: "awaiting_approval",
+      code: "PENDING_APPROVAL",
       reason: "已生成待审核补丁，任务等待用户审批。",
+      suggestedAction: "审核并应用待处理补丁后，再请求完成任务。",
       shouldRecover: false
     };
   }
@@ -129,6 +133,7 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
   if (!evidence.mutationExpected) {
     return {
       status: "completed",
+      code: "COMPLETED",
       reason: "只读分析任务已返回结论。",
       shouldRecover: false
     };
@@ -144,7 +149,9 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
   if (evidence.pendingApprovalCount > 0) {
     return {
       status: "awaiting_approval",
+      code: "PENDING_APPROVAL",
       reason: "仍有工具调用等待用户审批。",
+      suggestedAction: "批准或拒绝待处理工具调用，Runtime 将在审批后继续。",
       shouldRecover: false
     };
   }
@@ -152,7 +159,9 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
   if (evidence.blockedPlanCount > 0 || finalContentHasNonRecoverableBlock(input.finalContent)) {
     return {
       status: "blocked",
+      code: "PENDING_PLAN",
       reason: "任务缺少必须由用户或外部条件解除的阻塞条件。",
+      suggestedAction: "处理被阻塞的计划项，或提供所需的选择、权限和外部信息。",
       shouldRecover: false
     };
   }
@@ -168,28 +177,65 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
   ) {
     return {
       status: "completed",
+      code: "COMPLETED",
       reason: "文件变更、计划、工具状态与验证证据均满足完成条件。",
       shouldRecover: false
     };
   }
 
+  const rejection = evidence.changedFileCount === 0
+    ? {
+        code: "NO_MUTATION_EVIDENCE" as const,
+        reason: validationPassed
+          ? "构建已经通过，但当前恢复运行缺少文件变更证据。"
+          : "未找到本次任务的文件变更证据。",
+        suggestedAction: "执行文件编辑，或恢复跨审批持久化的文件变更证据。"
+      }
+    : claimsIncomplete
+      ? {
+          code: "INCOMPLETE_CLAIM" as const,
+          reason: "最终回答明确表示任务尚未完成。",
+          suggestedAction: "完成声明中的未解决事项后，再请求完成任务。"
+        }
+      : evidence.activeCommandCount > 0
+        ? {
+            code: "ACTIVE_COMMAND" as const,
+            reason: "仍有命令正在运行，不能确认验证结果。",
+            suggestedAction: "等待运行中的命令结束并记录结果。"
+          }
+        : evidence.failedToolCallCount > 0
+          ? {
+              code: "FAILED_TOOL_CALL" as const,
+              reason: "本轮仍存在失败的工具调用。",
+              suggestedAction: "修复工具调用错误并重新执行必要步骤。"
+            }
+          : evidence.validationStatus === "failed"
+            ? {
+                code: "VALIDATION_FAILED" as const,
+                reason: "验证命令执行失败。",
+                suggestedAction: "修复验证错误并重新运行验证命令。"
+              }
+            : evidence.validationStatus === "not_run" || evidence.validationStatus === "not_required"
+              ? {
+                  code: "VALIDATION_NOT_RUN" as const,
+                  reason: "编辑任务尚未运行必要验证。",
+                  suggestedAction: "运行与本次变更相关的类型检查、测试或构建。"
+                }
+              : !validationIsCurrent
+                ? {
+                    code: "VALIDATION_STALE" as const,
+                    reason: "最近一次验证早于最后一次文件变更，需要重新验证。",
+                    suggestedAction: "在最后一次文件变更后重新运行验证。"
+                  }
+                : {
+                    code: "PENDING_PLAN" as const,
+                    reason: "编辑任务仍有未完成的计划步骤。",
+                    suggestedAction: "完成或明确阻塞剩余计划步骤。"
+                  };
+
   return {
     status: "incomplete",
-    reason: evidence.changedFileCount === 0
-      ? "编辑任务没有生成补丁，也没有产生已应用文件变更。"
-      : claimsIncomplete
-        ? "最终回答明确表示任务尚未完成。"
-        : evidence.activeCommandCount > 0
-          ? "仍有命令正在运行，不能确认验证结果。"
-          : evidence.failedToolCallCount > 0
-            ? "本轮仍存在失败的工具调用。"
-            : evidence.validationStatus === "failed"
-              ? "验证命令执行失败。"
-              : evidence.validationStatus === "not_run" || evidence.validationStatus === "not_required"
-                ? "编辑任务尚未运行必要验证。"
-                : !validationIsCurrent
-                  ? "最近一次验证早于最后一次文件变更，需要重新验证。"
-        : "编辑任务仍有未完成的计划步骤。",
+    ...rejection,
     shouldRecover: !input.recoveryAttempted && input.editingToolsAvailable
   };
 }
@@ -199,9 +245,11 @@ export function createCompletionRecoveryMessage(decision: CompletionDecision, ev
     role: "user" as const,
     content: [
       "Runtime 完成前检查未通过，本轮不能结束。",
+      `拒绝代码：${decision.code}`,
       `原因：${decision.reason}`,
       `当前证据：待审核补丁 ${evidence.generatedPatchCount} 个，已变更文件 ${evidence.changedFileCount} 个，验证状态 ${evidence.validationStatus}，未完成计划 ${evidence.pendingPlanCount} 项，阻塞计划 ${evidence.blockedPlanCount} 项，待审批 ${evidence.pendingApprovalCount} 项，运行中命令 ${evidence.activeCommandCount} 个，失败工具 ${evidence.failedToolCallCount} 次。`,
-      "请立即复用已有上下文生成补丁或完成必要的文件写入；不要重复宽泛搜索。若确实需要用户选择、权限、外部状态或受到安全策略限制，请明确说明该不可自动恢复的阻塞条件。"
+      `建议动作：${decision.suggestedAction ?? "根据当前证据补齐未完成条件。"}`,
+      "请立即复用已有上下文继续处理；不要重复宽泛搜索。若确实需要用户选择、权限、外部状态或受到安全策略限制，请明确说明该不可自动恢复的阻塞条件。"
     ].join("\n")
   };
 }

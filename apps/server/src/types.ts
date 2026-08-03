@@ -217,6 +217,18 @@ export type AutoValidationResponse = {
   agentSteps: AgentStep[];
 };
 
+export type CompletionRejectionCode =
+  | "NO_MUTATION_EVIDENCE"
+  | "VALIDATION_NOT_RUN"
+  | "VALIDATION_FAILED"
+  | "VALIDATION_STALE"
+  | "PENDING_APPROVAL"
+  | "PENDING_PLAN"
+  | "ACTIVE_COMMAND"
+  | "FAILED_TOOL_CALL"
+  | "INCOMPLETE_CLAIM"
+  | "UNCHANGED_COMPLETION_EVIDENCE";
+
 export type AgentStep = {
   id: string;
   createdAt: number;
@@ -306,6 +318,19 @@ export type AgentStep = {
     }
   | {
       type: "error";
+      message: string;
+    }
+  | {
+      type: "completion_rejected";
+      completionStatus: "awaiting_approval" | "incomplete" | "blocked";
+      rejectionCode: CompletionRejectionCode;
+      message: string;
+      suggestedAction?: string;
+      shouldRecover: boolean;
+    }
+  | {
+      type: "tool_blocked";
+      toolName: string;
       message: string;
     }
 );

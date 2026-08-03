@@ -78,6 +78,17 @@ function formatAgentStepDetail(step: AgentStep) {
     detail = { type: step.type, checkpointId: step.checkpointId, files: step.files, source: step.source };
   } else if (step.type === "message") {
     detail = { type: step.type, content: step.content };
+  } else if (step.type === "completion_rejected") {
+    detail = {
+      type: step.type,
+      completionStatus: step.completionStatus,
+      rejectionCode: step.rejectionCode,
+      message: step.message,
+      suggestedAction: step.suggestedAction,
+      shouldRecover: step.shouldRecover
+    };
+  } else if (step.type === "tool_blocked") {
+    detail = { type: step.type, toolName: step.toolName, message: step.message };
   } else {
     detail = { type: step.type, message: step.message };
   }
@@ -142,6 +153,12 @@ function getAgentObservationChips(step: AgentStep) {
   if (step.type === "error" && step.message.includes("Tool budget limit reached")) {
     return ["预算限制停止"];
   }
+
+  if (step.type === "completion_rejected") {
+    return [`拒绝代码：${step.rejectionCode}`, step.shouldRecover ? "可自动恢复" : "需要外部操作"];
+  }
+
+  if (step.type === "tool_blocked") return [`工具：${step.toolName}`, "策略门禁"];
 
   if (step.type !== "tool_result") return [];
 
@@ -322,6 +339,18 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
     return { label: "Result", title: `Received ${step.toolName} result`, detail: summarizeUnknown(step.output) };
   }
 
+  if (step.type === "completion_rejected") {
+    return {
+      label: step.completionStatus === "awaiting_approval" ? "等待审批" : "完成条件未满足",
+      title: step.message,
+      detail: step.suggestedAction ? `下一步：${step.suggestedAction}` : ""
+    };
+  }
+
+  if (step.type === "tool_blocked") {
+    return { label: "工具已阻止", title: step.message, detail: step.toolName };
+  }
+
   if (step.type === "workflow_decision") {
     return {
       label: step.decision === "allowed" ? "门禁放行" : "门禁阻塞",
@@ -469,6 +498,24 @@ function AgentStepObservation({ step }: { step: AgentStep }) {
   );
 }
 
+function CompletionRejectionCard({ step }: { step: Extract<AgentStep, { type: "completion_rejected" }> }) {
+  return (
+    <article className="agent-completion-rejection" role="status">
+      <div>
+        <strong>拒绝原因</strong>
+        <code>{step.rejectionCode}</code>
+      </div>
+      <p>{step.message}</p>
+      {step.suggestedAction && (
+        <div>
+          <strong>建议下一步</strong>
+          <p>{step.suggestedAction}</p>
+        </div>
+      )}
+    </article>
+  );
+}
+
 function WorkflowDecisionCard({ step }: { step: Extract<AgentStep, { type: "workflow_decision" }> }) {
   return (
     <article className={`agent-workflow-decision decision-${step.decision}`}>
@@ -541,14 +588,15 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
           const showApprovalCard = step.type === "approval_request" && (step.status !== "pending" || isRuntimeApprovalStep(step));
 
           return (
-            <li key={step.id} className={`agent-step-${step.type}${step.type === "strategy" ? ` agent-step-strategy-${step.event}` : ""}`}>
+            <li key={step.id} className={`agent-step-${step.type}${step.type === "strategy" ? ` agent-step-strategy-${step.event}` : ""}${step.type === "completion_rejected" ? ` status-${step.completionStatus}` : ""}${step.type === "approval_request" || step.type === "command" ? ` status-${step.status ?? "suggested"}` : ""}`}>
               <span>{view.label}</span>
-              <details open={step.type === "approval_request" && step.status === "pending"}>
+              <details open={(step.type === "approval_request" && step.status === "pending") || step.type === "completion_rejected"}>
                 <summary>
                   <b>{view.title}</b>
                   {view.detail && <small>{view.detail}</small>}
                 </summary>
                 <AgentStepObservation step={step} />
+                {step.type === "completion_rejected" && <CompletionRejectionCard step={step} />}
                 {step.type === "workflow_decision" && <WorkflowDecisionCard step={step} />}
                 {step.type === "approval_request" && showApprovalCard && <ApprovalRequestCard disabled={disabled} pending={pendingActionId === step.actionId} step={step} onDecideApproval={decideApproval} />}
                 {step.type === "checkpoint" && <CheckpointCard disabled={disabled} step={step} onRollbackCheckpoint={onRollbackCheckpoint} />}

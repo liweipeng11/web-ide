@@ -19,6 +19,7 @@ import {
   createCompletionRejectionGuidance,
   createCompletionRecoveryMessage,
   evaluateAgentCompletion,
+  type CompletionDecision,
   type CompletionEvidence,
   type CompletionRejectionState
 } from "./agentCompletionPolicy.js";
@@ -794,12 +795,30 @@ function createBlockedToolMessage(toolCall: ModelToolCall, reason: string): Mode
   };
 }
 
-function createCompletionToolErrorMessage(toolCall: ModelToolCall, reason: string, status: string = "incomplete"): ModelMessage {
+function createCompletionToolErrorMessage(toolCall: ModelToolCall, decision: CompletionDecision): ModelMessage {
   return {
     role: "tool",
     toolCallId: toolCall.id,
-    content: JSON.stringify({ error: reason, completionRequested: true, completionStatus: status })
+    content: JSON.stringify({
+      error: "completion_rejected",
+      completionRequested: true,
+      completionStatus: decision.status,
+      rejectionCode: decision.code,
+      message: decision.reason,
+      suggestedAction: decision.suggestedAction
+    })
   };
+}
+
+function createCompletionRejectedStep(decision: CompletionDecision): AgentStep {
+  return createAgentStep({
+    type: "completion_rejected",
+    completionStatus: decision.status === "completed" ? "incomplete" : decision.status,
+    rejectionCode: decision.code === "COMPLETED" ? "INCOMPLETE_CLAIM" : decision.code,
+    message: decision.reason,
+    suggestedAction: decision.suggestedAction,
+    shouldRecover: decision.shouldRecover
+  });
 }
 
 function createExplicitCompletionReminder(reason: string): ModelMessage {
@@ -1224,8 +1243,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         )
       });
       const legacyCompletionDecision = evidence.generatedPatchCount > 0
-        ? { status: "awaiting_approval" as const, reason: "已生成待审核补丁。", shouldRecover: false }
-        : { status: "completed" as const, reason: "模型已返回最终文本。", shouldRecover: false };
+        ? { status: "awaiting_approval" as const, code: "PENDING_APPROVAL" as const, reason: "已生成待审核补丁。", suggestedAction: "审核待处理补丁。", shouldRecover: false }
+        : { status: "completed" as const, code: "COMPLETED" as const, reason: "模型已返回最终文本。", shouldRecover: false };
       recordFeatureDecisionDifference({
         feature: "semanticCompletionCheck",
         legacyDecision: { status: legacyCompletionDecision.status },
@@ -1238,7 +1257,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const explicitCompletionDecision = completionDecision.status === "completed"
         ? {
             status: "incomplete" as const,
+            code: "INCOMPLETE_CLAIM" as const,
             reason: "模型自然停止，但没有调用 completeTask 请求结束。",
+            suggestedAction: "将 completeTask 作为唯一工具调用显式请求完成。",
             shouldRecover: true
           }
         : completionDecision;
@@ -1339,14 +1360,23 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const reason = !explicitCompletionToolEnabled
           ? "completeTask is not enabled for this runtime."
           : "completeTask must be the only tool call in the assistant response; no other tool was executed.";
+        const rejection: CompletionDecision = {
+          status: "incomplete",
+          code: "INCOMPLETE_CLAIM",
+          reason,
+          suggestedAction: explicitCompletionToolEnabled
+            ? "将 completeTask 作为响应中的唯一工具调用。"
+            : "继续执行任务，不要调用当前 Runtime 未启用的 completeTask。",
+          shouldRecover: true
+        };
         for (const toolCall of toolCalls) {
-          const errorMessage = createCompletionToolErrorMessage(toolCall, reason);
+          const errorMessage = createCompletionToolErrorMessage(toolCall, rejection);
           messages.push(errorMessage);
           await persistAgentMessage(options.taskSessionId, errorMessage);
           metrics.recordToolFailure({ completionEvidence: false });
           metrics.recordToolResult({ signature: getToolCallSignature(toolCall), noProgress: true });
         }
-        options.onAgentStep?.(createAgentStep({ type: "error", message: reason }));
+        options.onAgentStep?.(createCompletionRejectedStep(rejection));
         logAi(runId, "runtime.completeTaskRejected", { reason, toolNames: toolCalls.map((toolCall) => toolCall.name) });
         metrics.recordCompletionRejected();
         continue;
@@ -1358,11 +1388,19 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         completionInput = parseCompleteTaskInput(completionCall.arguments);
       } catch (error) {
         const reason = error instanceof Error ? error.message : "Invalid completeTask arguments.";
-        const errorMessage = createCompletionToolErrorMessage(completionCall, reason);
+        const rejection: CompletionDecision = {
+          status: "incomplete",
+          code: "INCOMPLETE_CLAIM",
+          reason,
+          suggestedAction: "修正完成声明参数后，将 completeTask 作为唯一工具调用重试。",
+          shouldRecover: true
+        };
+        const errorMessage = createCompletionToolErrorMessage(completionCall, rejection);
         messages.push(errorMessage);
         await persistAgentMessage(options.taskSessionId, errorMessage);
         metrics.recordToolFailure({ completionEvidence: false });
         metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
+        options.onAgentStep?.(createCompletionRejectedStep(rejection));
         logAi(runId, "runtime.completeTaskRejected", { reason });
         metrics.recordCompletionRejected();
         continue;
@@ -1397,9 +1435,13 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         ? evidenceDecision
         : {
             status: (evidenceDecision.status === "blocked" || (completionInput.unresolvedItems?.length ?? 0) > 0 ? "blocked" : "incomplete") as "blocked" | "incomplete",
+            code: completionInput.unresolvedItems?.length ? "PENDING_PLAN" as const : "VALIDATION_NOT_RUN" as const,
             reason: completionInput.unresolvedItems?.length
               ? "完成声明仍包含未解决事项。"
               : "完成声明明确标记为尚未验证。",
+            suggestedAction: completionInput.unresolvedItems?.length
+              ? "处理完成声明中的未解决事项。"
+              : "运行必要验证，并在完成声明中提供验证摘要。",
             shouldRecover: true
           };
 
@@ -1440,21 +1482,27 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       completionRejectionState = advanceCompletionRejectionState(
         completionRejectionState,
         evidence,
-        requestedDecision.reason
+        requestedDecision.code
       );
       const sameEvidence = completionRejectionState.consecutiveCount > 1;
       const loopStopped = completionRejectionState.consecutiveCount >= 3;
       const guidance = createCompletionRejectionGuidance(requestedDecision, completionRejectionState.consecutiveCount);
-      const rejectionReason = `completeTask was rejected: ${requestedDecision.reason}\n${guidance}`;
-      const errorMessage = createCompletionToolErrorMessage(completionCall, rejectionReason, requestedDecision.status);
+      const rejectionDecision: CompletionDecision = {
+        ...requestedDecision,
+        code: sameEvidence ? "UNCHANGED_COMPLETION_EVIDENCE" : requestedDecision.code,
+        reason: requestedDecision.reason,
+        suggestedAction: guidance
+      };
+      const errorMessage = createCompletionToolErrorMessage(completionCall, rejectionDecision);
       messages.push(errorMessage);
       await persistAgentMessage(options.taskSessionId, errorMessage);
       metrics.recordToolFailure({ completionEvidence: false });
       metrics.recordToolResult({ signature: getToolCallSignature(completionCall), noProgress: true });
-      options.onAgentStep?.(createAgentStep({ type: "error", message: rejectionReason }));
+      options.onAgentStep?.(createCompletionRejectedStep(rejectionDecision));
       metrics.recordCompletionRejected({ sameEvidence, loopStopped });
       logAi(runId, "runtime.completeTaskRejected", {
         reason: requestedDecision.reason,
+        rejectionCode: rejectionDecision.code,
         evidence,
         evidenceFingerprint: completionRejectionState.fingerprint,
         consecutiveCount: completionRejectionState.consecutiveCount,
@@ -1579,7 +1627,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolResult({ signature, noProgress: true });
         consecutiveNoProgressSteps += 1;
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: workflowBlockReason, workflow: options.workflow?.type });
-        options.onAgentStep?.(createAgentStep({ type: "error", message: workflowBlockReason }));
+        options.onAgentStep?.(createAgentStep({ type: "tool_blocked", toolName: toolCall.name, message: workflowBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, workflowBlockReason);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
@@ -1590,7 +1638,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolResult({ signature, noProgress: true });
         consecutiveNoProgressSteps += 1;
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: patternFinderBlockReason });
-        options.onAgentStep?.(createAgentStep({ type: "error", message: patternFinderBlockReason }));
+        options.onAgentStep?.(createAgentStep({ type: "tool_blocked", toolName: toolCall.name, message: patternFinderBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, patternFinderBlockReason);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
@@ -1601,7 +1649,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolResult({ signature, noProgress: true });
         consecutiveNoProgressSteps += 1;
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: existenceCheckBlockReason });
-        options.onAgentStep?.(createAgentStep({ type: "error", message: existenceCheckBlockReason }));
+        options.onAgentStep?.(createAgentStep({ type: "tool_blocked", toolName: toolCall.name, message: existenceCheckBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, existenceCheckBlockReason);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
@@ -1612,7 +1660,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolResult({ signature, noProgress: true });
         consecutiveNoProgressSteps += 1;
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: modificationPlanBlockReason });
-        options.onAgentStep?.(createAgentStep({ type: "error", message: modificationPlanBlockReason }));
+        options.onAgentStep?.(createAgentStep({ type: "tool_blocked", toolName: toolCall.name, message: modificationPlanBlockReason }));
         const blockedMessage = createBlockedToolMessage(toolCall, modificationPlanBlockReason);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
@@ -1625,7 +1673,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         metrics.recordToolResult({ signature, noProgress: true });
         consecutiveNoProgressSteps += 1;
         logAi(runId, "runtime.toolBlocked", { toolName: toolCall.name, reason: approval.reason });
-        options.onAgentStep?.(createAgentStep({ type: "error", message: approval.reason }));
+        options.onAgentStep?.(createAgentStep({ type: "tool_blocked", toolName: toolCall.name, message: approval.reason }));
         const blockedMessage = createBlockedToolMessage(toolCall, approval.reason);
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);

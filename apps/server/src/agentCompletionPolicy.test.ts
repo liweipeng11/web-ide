@@ -157,6 +157,47 @@ test("验证早于最后变更时要求重新验证，验证能力不可用时�
   assert.equal(unavailable.status, "completed");
 });
 
+test("每类未完成证据都返回稳定拒绝码和建议动作", () => {
+  const cases: Array<{
+    overrides: Partial<CompletionEvidence>;
+    finalContent?: string;
+    expectedCode: string;
+  }> = [
+    { overrides: {}, expectedCode: "NO_MUTATION_EVIDENCE" },
+    { overrides: { changedFileCount: 1 }, expectedCode: "VALIDATION_NOT_RUN" },
+    { overrides: { changedFileCount: 1, validationStatus: "failed" }, expectedCode: "VALIDATION_FAILED" },
+    { overrides: { changedFileCount: 1, validationStatus: "passed", lastMutationAt: 20, lastValidationAt: 10 }, expectedCode: "VALIDATION_STALE" },
+    { overrides: { changedFileCount: 1, validationStatus: "passed", activeCommandCount: 1 }, expectedCode: "ACTIVE_COMMAND" },
+    { overrides: { changedFileCount: 1, validationStatus: "passed", failedToolCallCount: 1 }, expectedCode: "FAILED_TOOL_CALL" },
+    { overrides: { changedFileCount: 1, validationStatus: "passed", pendingPlanCount: 1 }, expectedCode: "PENDING_PLAN" },
+    { overrides: { changedFileCount: 1, validationStatus: "passed" }, finalContent: "任务尚未完成。", expectedCode: "INCOMPLETE_CLAIM" }
+  ];
+
+  for (const item of cases) {
+    const decision = evaluateAgentCompletion({
+      evidence: createEvidence(item.overrides),
+      finalContent: item.finalContent ?? "修改完成。",
+      recoveryAttempted: false,
+      editingToolsAvailable: true
+    });
+    assert.equal(decision.code, item.expectedCode);
+    assert.ok(decision.reason);
+    assert.ok(decision.suggestedAction);
+  }
+});
+
+test("构建通过但恢复证据丢失时返回面向用户的根因说明", () => {
+  const decision = evaluateAgentCompletion({
+    evidence: createEvidence({ validationStatus: "passed" }),
+    finalContent: "修改和构建均已完成。",
+    recoveryAttempted: true,
+    editingToolsAvailable: true
+  });
+
+  assert.equal(decision.code, "NO_MUTATION_EVIDENCE");
+  assert.equal(decision.reason, "构建已经通过，但当前恢复运行缺少文件变更证据。");
+});
+
 test("完成证据指纹稳定且不依赖模型 summary", () => {
   const evidence = createEvidence({
     changedFileCount: 1,
@@ -183,5 +224,11 @@ test("相同证据连续计数，理由文本不能绕过限制，证据变化�
   assert.equal(evidenceChanged.consecutiveCount, 1);
   assert.equal(reasonChanged.consecutiveCount, 3);
   assert.equal(reasonChanged.rejectionCode, "VALIDATION_FAILED");
-  assert.match(createCompletionRejectionGuidance({ status: "incomplete", reason: "缺少变更", shouldRecover: true }, 2), /禁止再次直接调用 completeTask/);
+  assert.match(createCompletionRejectionGuidance({
+    status: "incomplete",
+    code: "NO_MUTATION_EVIDENCE",
+    reason: "缺少变更",
+    suggestedAction: "执行文件编辑。",
+    shouldRecover: true
+  }, 2), /禁止再次直接调用 completeTask/);
 });

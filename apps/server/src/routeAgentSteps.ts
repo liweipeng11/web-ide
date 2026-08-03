@@ -80,7 +80,9 @@ export type AgentStepPayload =
   | {
       type: "error";
       message: string;
-    };
+    }
+  | Omit<Extract<AgentStep, { type: "completion_rejected" }>, "id" | "createdAt">
+  | Omit<Extract<AgentStep, { type: "tool_blocked" }>, "id" | "createdAt">;
 
 export function createAgentStep(step: AgentStepPayload): AgentStep {
   return {

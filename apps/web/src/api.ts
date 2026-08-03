@@ -297,7 +297,10 @@ export type AgentStep = {
         | "repeated_tool_warning"
         | "repeated_tool_blocked"
         | "negative_evidence"
+        | "create_intent"
+        | "create_intent_search_blocked"
         | "no_progress_recovery"
+        | "completion_recovery"
         | "budget_convergence"
         | "no_progress_stop"
         | "budget_stop";
@@ -376,7 +379,32 @@ export type AgentStep = {
       type: "error";
       message: string;
     }
+  | {
+      type: "completion_rejected";
+      completionStatus: "awaiting_approval" | "incomplete" | "blocked";
+      rejectionCode: CompletionRejectionCode;
+      message: string;
+      suggestedAction?: string;
+      shouldRecover: boolean;
+    }
+  | {
+      type: "tool_blocked";
+      toolName: string;
+      message: string;
+    }
 );
+
+export type CompletionRejectionCode =
+  | "NO_MUTATION_EVIDENCE"
+  | "VALIDATION_NOT_RUN"
+  | "VALIDATION_FAILED"
+  | "VALIDATION_STALE"
+  | "PENDING_APPROVAL"
+  | "PENDING_PLAN"
+  | "ACTIVE_COMMAND"
+  | "FAILED_TOOL_CALL"
+  | "INCOMPLETE_CLAIM"
+  | "UNCHANGED_COMPLETION_EVIDENCE";
 
 export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
 

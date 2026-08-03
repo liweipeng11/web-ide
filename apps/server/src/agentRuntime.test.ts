@@ -152,9 +152,16 @@ test("completeTask 证据不足时继续运行，真实编辑后才能完成", a
 
   assert.equal(result.status, "completed");
   assert.equal(completionCount, 3);
-  assert.equal(result.messages.some((message) => message.role === "tool" && String(message.content).includes("completeTask was rejected")), true);
+  const rejectionMessage = result.messages.find((message) =>
+    message.role === "tool" && String(message.content).includes('"error":"completion_rejected"')
+  );
+  assert.ok(rejectionMessage);
+  const rejection = JSON.parse(String(rejectionMessage.content)) as Record<string, unknown>;
+  assert.equal(rejection.rejectionCode, "NO_MUTATION_EVIDENCE");
+  assert.match(String(rejection.suggestedAction), /文件编辑|变更证据/);
   assert.equal(result.completionEvidence?.changedFileCount, 1);
   assert.equal(steps.filter((step) => step.type === "message" && step.content === "修改完成").length, 1);
+  assert.equal(steps.some((step) => step.type === "completion_rejected" && step.rejectionCode === "NO_MUTATION_EVIDENCE"), true);
 });
 
 test("相同完成证据第三次拒绝后终止循环，修改 summary 不能绕过", async () => {
@@ -295,7 +302,7 @@ test("编辑任务零交付物会恢复一次并返回 incomplete", async () => 
   assert.equal(result.completionEvidence?.generatedPatchCount, 0);
   assert.equal(result.completionEvidence?.changedFileCount, 0);
   assert.equal(result.requestedStatus, "completed");
-  assert.match(result.statusReason || "", /没有生成补丁/);
+  assert.match(result.statusReason || "", /缺少文件变更证据/);
   assert.equal(completionCount, 2);
   assert.equal(steps.some((step) => step.type === "strategy" && step.event === "completion_recovery"), true);
 });
