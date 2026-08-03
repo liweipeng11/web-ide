@@ -173,6 +173,25 @@ async function shouldAutoCancelTaskSession(taskSessionId: string | null) {
   }
 }
 
+function createRuntimeTaskProgressHandler(taskSessionId: string) {
+  return async (phase: Parameters<typeof advanceTaskPlanProgress>[1]) => {
+    // Runtime 必须等待计划写入完成，避免紧随其后的 completeTask 读取到旧状态。
+    await advanceTaskPlanProgress(taskSessionId, phase);
+  };
+}
+
+function getCommandTaskProgressPhase(status: unknown): Parameters<typeof advanceTaskPlanProgress>[1] | null {
+  // 后台命令仍在运行时没有最终验证结论，不能提前完成 validate。
+  if (status === "running") return null;
+  if (status === "cancelled") return "task_cancelled";
+  return status === "success" ? "validation_success" : "validation_failed";
+}
+
+async function advanceTaskPlanFromCommandResult(taskSessionId: string | null | undefined, status: unknown) {
+  const phase = getCommandTaskProgressPhase(status);
+  if (phase) await advanceTaskPlanProgress(taskSessionId, phase);
+}
+
 async function persistStreamTaskSessionOutcome(
   taskSessionId: string | null,
   progressEvent: Parameters<typeof advanceTaskPlanProgress>[1],
@@ -405,9 +424,9 @@ app.post(
 
     const result = await runProjectCommand(command, cwd, chatId, Boolean(confirmed));
     await addTaskSessionCommand(taskSessionId, result.command);
-    const stepStatus = result.status === "cancelled" ? "cancelled" : result.status === "success" || result.status === "running" ? "success" : "failed";
+    const stepStatus = result.status === "cancelled" ? "cancelled" : result.status === "running" ? "running" : result.status === "success" ? "success" : "failed";
     await appendTaskSessionStep(taskSessionId, createAgentStep({ type: "command", command: result.command, status: stepStatus, result }));
-    await advanceTaskPlanProgress(taskSessionId, result.status === "cancelled" ? "task_cancelled" : result.status === "success" || result.status === "running" ? "validation_success" : "validation_failed");
+    await advanceTaskPlanFromCommandResult(taskSessionId, result.status);
     response.json({ result });
   })
 );
@@ -680,11 +699,11 @@ app.post(
       createAgentStep({
         type: "command",
         command,
-        status: result?.status === "cancelled" ? "cancelled" : result?.status === "success" || result?.status === "running" ? "success" : result ? "failed" : "cancelled",
+        status: result?.status === "cancelled" ? "cancelled" : result?.status === "running" ? "running" : result?.status === "success" ? "success" : result ? "failed" : "cancelled",
         result: result || null
       })
     );
-    await advanceTaskPlanProgress(taskSessionId, result?.status === "cancelled" || !result ? "task_cancelled" : result.status === "success" || result.status === "running" ? "validation_success" : "validation_failed");
+    await advanceTaskPlanFromCommandResult(taskSessionId, result?.status ?? "cancelled");
     response.json({ success: true });
   })
 );
@@ -783,6 +802,7 @@ app.post(
       runtimeEvidence: sessionBeforeDecision.runtimeEvidence,
       pendingToolCall,
       decision,
+      onTaskProgress: createRuntimeTaskProgressHandler(taskSessionId),
       onAgentStep(step) {
         taskStepWrites.push(appendTaskSessionStep(taskSessionId, step));
       }
@@ -1042,6 +1062,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         signal: controller.signal,
         workflow: plannedTaskSession?.workflow || taskSession.workflow,
         runtimeEvidence: taskSession.runtimeEvidence,
+        onTaskProgress: createRuntimeTaskProgressHandler(taskSession.id),
         onAgentStep: pushAgentStep,
         onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
       });
@@ -1095,6 +1116,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         signal: controller.signal,
         workflow: plannedTaskSession?.workflow || taskSession.workflow,
         runtimeEvidence: taskSession.runtimeEvidence,
+        onTaskProgress: createRuntimeTaskProgressHandler(taskSession.id),
         onAgentStep: pushAgentStep,
         onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
       });

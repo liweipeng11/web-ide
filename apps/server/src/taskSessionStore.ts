@@ -981,13 +981,15 @@ function findWorkflowPlanItemIndex(items: TaskPlanItem[], workflowStepIds: strin
 
 function completeThroughPlanIndex(items: TaskPlanItem[], targetIndex: number, now: number) {
   for (let index = 0; index <= targetIndex && index < items.length; index += 1) {
-    if (items[index].status !== "blocked") {
+    if (items[index].status !== "blocked" && items[index].status !== "completed") {
       items[index] = { ...items[index], status: "completed", updatedAt: now };
     }
   }
 }
 
 function startNextPendingPlanItem(items: TaskPlanItem[], startIndex: number, now: number) {
+  // 重复恢复同一事件时保留当前活动步骤，避免再启动一个后续步骤。
+  if (items.some((item, index) => index > startIndex && item.status === "in_progress")) return;
   const pendingIndex = items.findIndex((item, index) => index > startIndex && item.status === "pending");
 
   if (pendingIndex !== -1) {
@@ -1001,6 +1003,14 @@ function advancePlanToIndex(items: TaskPlanItem[], targetIndex: number, now: num
   // 按真实执行阶段推进计划，避免人工审核通过后把后续步骤一次性扫成完成。
   completeThroughPlanIndex(items, targetIndex, now);
   startNextPendingPlanItem(items, targetIndex, now);
+}
+
+function hasTaskPlanProgressChanged(beforeItems: TaskPlanItem[], afterItems: TaskPlanItem[]) {
+  if (beforeItems.length !== afterItems.length) return true;
+  return beforeItems.some((item, index) => {
+    const nextItem = afterItems[index];
+    return !nextItem || item.id !== nextItem.id || item.status !== nextItem.status || item.note !== nextItem.note;
+  });
 }
 
 function getPatchGeneratedTargetIndex(items: TaskPlanItem[]) {
@@ -1067,6 +1077,15 @@ export async function advanceTaskPlanProgress(taskSessionId: string | null | und
     }
 
     if (phase === "validation_failed" || phase === "task_failed" || phase === "task_cancelled") {
+      if (phase === "task_cancelled" && nextItems.some((item) => item.note === "任务已取消，计划暂停。")) {
+        return session;
+      }
+      const existingReplan = nextItems.find((item) =>
+        item.status === "in_progress" && item.note === "系统已插入重规划步骤，请结合失败信息确认下一步。"
+      );
+
+      // 同一失败事件可能因审批恢复或重试重复送达，已有活动重规划项时保持幂等。
+      if (existingReplan) return session;
       const activeIndex = nextItems.findIndex((item) => item.status === "in_progress");
       const fallbackIndex = nextItems.findIndex((item) => item.status === "pending");
       const targetIndex = activeIndex === -1 ? fallbackIndex : activeIndex;
@@ -1094,6 +1113,8 @@ export async function advanceTaskPlanProgress(taskSessionId: string | null | und
         autoRevisionReason = phase === "validation_failed" ? "验证失败后自动回到计划阶段" : "任务失败后自动回到计划阶段";
       }
     }
+
+    if (!hasTaskPlanProgressChanged(items, nextItems)) return session;
 
     const revision = autoRevisionReason
       ? createTaskPlanRevision({

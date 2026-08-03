@@ -1745,6 +1745,112 @@ test("agent runtime blocks prohibited runCommand before approval", async () => {
   assert.equal(result.content, "Command was blocked, so I will not run it.");
 });
 
+test("agent runtime awaits direct tool progress and reports failed validation", async () => {
+  let round = 0;
+  let progressPersisted = false;
+  const phases: string[] = [];
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("customValidation", { status: "failed" }, (runtime) => {
+      runtime.agentContext.commandsRun = [{
+        command: "pnpm test",
+        status: "failed",
+        exitCode: 1,
+        validation: true,
+        finishedAt: Date.now()
+      }];
+    })
+  ]);
+
+  await runAgentRuntime({
+    userRequest: "运行验证并记录失败",
+    mode: "plan",
+    registry,
+    maxSteps: 2,
+    contextBudgetEnabled: false,
+    onTaskProgress: async (phase, evidence) => {
+      await Promise.resolve();
+      phases.push(phase);
+      assert.equal(evidence.source, "runtime");
+      progressPersisted = true;
+    },
+    requestCompletion: async () => {
+      round += 1;
+      if (round === 1) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("validation-failed", "customValidation", {})
+        ] } }] };
+      }
+      // 下一次模型请求只能发生在异步计划推进完成之后。
+      assert.equal(progressPersisted, true);
+      return { choices: [{ message: { role: "assistant", content: "验证失败，等待修复。" } }] };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.deepEqual(phases, ["validation_failed"]);
+});
+
+test("agent runtime only advances plans for confirmed mutations and terminal validation results", async () => {
+  const cases = [
+    {
+      name: "空写入",
+      toolName: "customMutation",
+      result: { changed: false, filePath: "src/unchanged.ts" },
+      arguments: { filePath: "src/unchanged.ts", content: "same" },
+      updateContext: undefined,
+      expected: []
+    },
+    {
+      name: "后台验证",
+      toolName: "customBackgroundValidation",
+      result: { status: "running" },
+      arguments: { command: "pnpm dev" },
+      updateContext: (runtime: AgentToolRuntime) => {
+        runtime.agentContext.commandsRun = [{ command: "pnpm dev", status: "running", exitCode: null, validation: true }];
+      },
+      expected: []
+    },
+    {
+      name: "取消验证",
+      toolName: "customCancelledValidation",
+      result: { status: "cancelled" },
+      arguments: { command: "pnpm test" },
+      updateContext: (runtime: AgentToolRuntime) => {
+        runtime.agentContext.commandsRun = [{ command: "pnpm test", status: "cancelled", exitCode: null, validation: true, finishedAt: Date.now() }];
+      },
+      expected: ["task_cancelled"]
+    }
+  ] as const;
+
+  for (const item of cases) {
+    const phases: string[] = [];
+    let round = 0;
+    const registry = createAgentToolRegistry([
+      createRuntimeTestTool(item.toolName, item.result, item.updateContext)
+    ]);
+
+    await runAgentRuntime({
+      userRequest: item.name,
+      mode: "plan",
+      registry,
+      maxSteps: 2,
+      contextBudgetEnabled: false,
+      onTaskProgress: async (phase) => { phases.push(phase); },
+      requestCompletion: async () => {
+        round += 1;
+        return round === 1
+          ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+              createModelToolCall(`progress-${item.name}`, item.toolName, item.arguments)
+            ] } }] }
+          : { choices: [{ message: { role: "assistant", content: "边界场景已检查。" } }] };
+      },
+      metricsRecorder: async () => undefined
+    });
+
+    assert.deepEqual(phases, item.expected, item.name);
+  }
+});
+
 test("agent runtime resumes after approving a pending tool call", async () => {
   let executed = false;
   let capturedMetrics: RunMetrics | undefined;
@@ -1894,6 +2000,7 @@ test("agent runtime restores Safe Editor context after approval", async () => {
 });
 
 test("审批恢复后保留 applyPatch 的已落盘文件证据", async () => {
+  const progressEvents: string[] = [];
   const registry = createAgentToolRegistry([
     createRuntimeTestTool("applyPatch", {
       patchId: "patch-approved",
@@ -1916,15 +2023,22 @@ test("审批恢复后保留 applyPatch 的已落盘文件证据", async () => {
     },
     decision: "approved",
     contextBudgetEnabled: false,
+    onTaskProgress: async (phase, evidence) => {
+      progressEvents.push(phase);
+      assert.equal(evidence.source, "approval_resume");
+      assert.deepEqual(evidence.appliedFilePaths, ["src/service.ts"]);
+    },
     requestCompletion: async () => ({ choices: [{ message: { role: "assistant", content: "补丁已应用。" } }] }),
     metricsRecorder: async () => undefined
   });
 
   assert.equal(result.status, "completed");
+  assert.deepEqual(progressEvents, ["patch_applied"]);
 });
 
 test("审批恢复会合并此前文件证据与本次验证时间", async () => {
   const validationFinishedAt = 300;
+  const progressEvents: string[] = [];
   const registry = createAgentToolRegistry([
     createRuntimeTestTool("runCommand", { exitCode: 0 }, (runtime) => {
       runtime.agentContext.commandsRun = [{
@@ -1959,6 +2073,11 @@ test("审批恢复会合并此前文件证据与本次验证时间", async () =>
     decision: "approved",
     contextBudgetEnabled: false,
     explicitCompletionRollout: { mode: "all" },
+    onTaskProgress: async (phase, evidence) => {
+      progressEvents.push(phase);
+      assert.equal(evidence.source, "approval_resume");
+      assert.equal(evidence.command?.status, "success");
+    },
     requestCompletion: async () => ({ choices: [{ message: { role: "assistant", content: null, tool_calls: [
       createModelToolCall("complete-after-validation", "completeTask", { summary: "修改与验证完成", verified: true, validationSummary: "测试通过" })
     ] } }] }),
@@ -1971,6 +2090,7 @@ test("审批恢复会合并此前文件证据与本次验证时间", async () =>
   assert.equal(result.runtimeEvidence.taskRunId, "task-run-evidence");
   assert.deepEqual(result.runtimeEvidence.generatedPatchIds, []);
   assert.equal(result.runtimeEvidence.lastValidationAt, validationFinishedAt);
+  assert.deepEqual(progressEvents, ["validation_success"]);
 });
 
 test("agent runtime emits a visible budget warning step before exhausting tool budget", async () => {

@@ -4,6 +4,7 @@ import type { ContextCache } from "./codeDiscovery/index.js";
 import type { ImpactAnalysisResult } from "./impactAnalyzer/index.js";
 import type { ExternalContextSource } from "./externalContext/types.js";
 import type { ReferenceResolution } from "./existenceChecker/types.js";
+import type { TaskPlanProgressPhase } from "./taskSessionStore.js";
 
 export type AgentRole = "system" | "user" | "assistant" | "tool";
 
@@ -49,6 +50,27 @@ export type AgentProgressSnapshot = {
   commandsRun: number;
   completedWorkflowSteps: number;
 };
+
+/** Runtime 推进持久化任务计划时附带的可审计执行证据。 */
+export type TaskProgressEvidence = {
+  source: "runtime" | "approval_resume";
+  occurredAt: number;
+  toolCallId?: string;
+  toolName?: string;
+  appliedFilePaths?: string[];
+  command?: {
+    command: string;
+    status: "success" | "failed" | "running" | "cancelled";
+    exitCode: number | null;
+    finishedAt?: number;
+  };
+};
+
+/** 计划推进必须可等待，确保下一次完成判断读取到最新持久化状态。 */
+export type TaskProgressCallback = (
+  phase: TaskPlanProgressPhase,
+  evidence: TaskProgressEvidence
+) => Promise<void>;
 
 export type AgentContext = {
   userGoal: string;

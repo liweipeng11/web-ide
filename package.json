@@ -21,6 +21,7 @@
     "verify:complete-task-convergence": "powershell -ExecutionPolicy Bypass -File scripts/check-complete-task-convergence.ps1",
     "verify:completion-status-presentation": "powershell -ExecutionPolicy Bypass -File scripts/check-completion-status-presentation.ps1",
     "verify:task-completion-observability": "powershell -ExecutionPolicy Bypass -File scripts/check-task-completion-observability.ps1",
+    "verify:task-plan-runtime-sync": "powershell -ExecutionPolicy Bypass -File scripts/check-task-plan-runtime-sync.ps1",
     "verify:state-storage-integrity": "powershell -ExecutionPolicy Bypass -File scripts/check-state-storage-integrity.ps1",
     "verify:safe-editor-stage0": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage0.ps1",
     "verify:safe-editor-stage1": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage1.ps1",

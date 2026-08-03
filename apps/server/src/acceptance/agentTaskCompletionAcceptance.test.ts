@@ -7,10 +7,13 @@ import { completionAgentToolDefinitions } from "../agentCompletionTools.js";
 import { resumeAgentRuntimeAfterApproval, runAgentRuntime, type AgentRuntimeOptions } from "../agentRuntime.js";
 import { createAgentToolRegistry } from "../agentToolRegistry.js";
 import type { AgentToolDefinition, AgentToolRuntime } from "../agentToolTypes.js";
+import { config } from "../config.js";
 import { writeFile as writeWorkspaceContent } from "../fileEditService.js";
 import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics } from "../observability/index.js";
-import { appendTaskSessionStep, createTaskSession, decideTaskSessionApproval, getTaskSession } from "../taskSessionStore.js";
+import { advanceTaskPlanProgress, appendTaskSessionStep, createTaskSession, decideTaskSessionApproval, getTaskSession } from "../taskSessionStore.js";
 import { finalizeTaskSession } from "../taskSessionFinalizer.js";
+import { initializeTaskPlan } from "../taskPlanService.js";
+import type { AgentStep } from "../types.js";
 import { setWorkspaceRoot } from "../workspaceStore.js";
 
 const strictRollout = { mode: "strict" as const };
@@ -214,6 +217,121 @@ test("阶段一验收：writeFile 与 runCommand 跨两次审批后仍可完成"
   });
 });
 
+test("阶段一验收：真实计划随跨审批执行推进并在首次完成请求时通过", async () => {
+  await withWorkspace(async (workspaceRoot) => {
+    const previousAiApiKey = config.aiApiKey;
+    config.aiApiKey = "";
+
+    try {
+      const session = await createTaskSession("创建 src/phase-zero.ts 并验证");
+      const plannedSession = await initializeTaskPlan(session, {
+        intent: "edit",
+        confidence: 1,
+        normalizedGoal: session.userGoal,
+        reason: "阶段零故障基线需要真实 feature 工作流"
+      }, { forceApproval: false });
+      assert.ok(plannedSession);
+      assert.ok(plannedSession.planItems);
+      const steps: AgentStep[] = [];
+      const targetFile = "src/phase-zero.ts";
+      const registry = createAgentToolRegistry([
+        tool("writeFile", async (args) => {
+          // 使用真实文件服务落盘，确保基线同时包含物理文件与 Runtime 变更证据。
+          return writeWorkspaceContent({
+            filePath: String(args.filePath),
+            content: String(args.content),
+            createIfMissing: true
+          });
+        }),
+        tool("runCommand", async (_args, runtime) => {
+          runtime.agentContext.commandsRun = [{
+            command: "pnpm build",
+            status: "success",
+            exitCode: 0,
+            validation: true,
+            // 保证验证证据严格晚于本次文件变更。
+            finishedAt: Date.now() + 10
+          }];
+          return { exitCode: 0, status: "success" };
+        }),
+        ...completionAgentToolDefinitions
+      ]);
+      const common: AgentRuntimeOptions = {
+        taskSessionId: plannedSession.id,
+        userRequest: plannedSession.userGoal,
+        mode: "act",
+        registry,
+        maxSteps: 3,
+        contextBudgetEnabled: false,
+        explicitCompletionRollout: strictRollout,
+        metricsRecorder: async () => undefined,
+        onTaskProgress: async (phase) => {
+          await advanceTaskPlanProgress(plannedSession.id, phase);
+        },
+        onAgentStep: (step) => {
+          steps.push(step);
+          void appendTaskSessionStep(plannedSession.id, step);
+        }
+      };
+
+      assert.deepEqual(
+        plannedSession.planItems.map((item) => item.workflowStepId),
+        ["analyze-project", "find-patterns", "plan-files", "implement", "validate", "summarize"]
+      );
+
+      const waitingForWrite = await runAgentRuntime({
+        ...common,
+        runtimeEvidence: plannedSession.runtimeEvidence,
+        requestCompletion: async () => response(call("phase-zero-write", "writeFile", {
+          filePath: targetFile,
+          content: "export const phaseZero = true;\n"
+        }))
+      });
+      assert.equal(waitingForWrite.status, "awaiting_approval");
+      await decideTaskSessionApproval(plannedSession.id, waitingForWrite.pendingToolCall!.actionId, "approved");
+
+      const waitingForValidation = await resumeAgentRuntimeAfterApproval({
+        ...common,
+        pendingToolCall: waitingForWrite.pendingToolCall!,
+        decision: "approved",
+        requestCompletion: async () => response(call("phase-zero-validate", "runCommand", { command: "pnpm build" }))
+      });
+      assert.equal(waitingForValidation.status, "awaiting_approval");
+      await decideTaskSessionApproval(plannedSession.id, waitingForValidation.pendingToolCall!.actionId, "approved");
+
+      const result = await resumeAgentRuntimeAfterApproval({
+        ...common,
+        // 首次有效完成请求必须直接通过，不能再进入 PENDING_PLAN 恢复循环。
+        maxSteps: 1,
+        pendingToolCall: waitingForValidation.pendingToolCall!,
+        decision: "approved",
+        requestCompletion: async () => response(completion("phase-zero-complete", "文件与构建均已完成"))
+      });
+      const persisted = await getTaskSession(plannedSession.id);
+      const rejected = steps.find((step): step is Extract<AgentStep, { type: "completion_rejected" }> => step.type === "completion_rejected");
+
+      assert.equal(result.status, "completed");
+      assert.equal(rejected, undefined);
+      assert.equal(await fs.readFile(path.join(workspaceRoot, targetFile), "utf8"), "export const phaseZero = true;\n");
+      assert.deepEqual(persisted.runtimeEvidence?.appliedFilePaths, [targetFile]);
+      assert.equal(result.agentContext.commandsRun?.at(-1)?.status, "success");
+      assert.equal(result.agentContext.commandsRun?.at(-1)?.validation, true);
+      assert.equal((persisted.runtimeEvidence?.lastValidationAt ?? 0) >= (persisted.runtimeEvidence?.lastMutationAt ?? 0), true);
+      assert.deepEqual(
+        (persisted.planItems ?? []).filter((item) => item.workflowStepId === "implement" || item.workflowStepId === "validate" || item.workflowStepId === "summarize")
+          .map((item) => ({ workflowStepId: item.workflowStepId, status: item.status })),
+        [
+          { workflowStepId: "implement", status: "completed" },
+          { workflowStepId: "validate", status: "completed" },
+          { workflowStepId: "summarize", status: "completed" }
+        ]
+      );
+    } finally {
+      config.aiApiKey = previousAiApiKey;
+    }
+  });
+});
+
 test("阶段七场景 6：验证失败的编辑任务不得 success", async () => {
   let round = 0;
   const registry = createAgentToolRegistry([
@@ -256,15 +374,18 @@ test("阶段七场景 7：Provider 中途错误映射为 failed", async () => {
 test("阶段七场景 8：客户端断开映射为 cancelled", async () => {
   await withWorkspace(async () => {
     const session = await createTaskSession("客户端断开场景");
+    const progressPhases: string[] = [];
     const error = new Error("client disconnected");
     error.name = "AbortError";
     await assert.rejects(() => runAgentRuntime({
       userRequest: "长任务", mode: "plan", registry: createAgentToolRegistry(completionAgentToolDefinitions),
       taskSessionId: session.id, contextBudgetEnabled: false, explicitCompletionRollout: strictRollout, metricsRecorder: async () => undefined,
+      onTaskProgress: async (phase) => { progressPhases.push(phase); },
       completeModel: async () => { throw error; }
     }), { name: "AbortError" });
     const finalized = await finalizeTaskSession({ taskSessionId: session.id, clientClosed: true, source: "client_disconnect" });
     assert.equal(finalized?.status, "cancelled");
+    assert.deepEqual(progressPhases, ["task_cancelled"]);
   });
 });
 

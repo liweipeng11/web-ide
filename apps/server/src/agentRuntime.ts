@@ -25,7 +25,7 @@ import {
 } from "./agentCompletionPolicy.js";
 import { evaluateAgentToolApproval } from "./agentPermissions.js";
 import type { AgentToolRegistry } from "./agentToolRegistry.js";
-import type { AgentCompletionResponse, AgentContext, AgentProgressSnapshot, AgentToolCall } from "./agentToolTypes.js";
+import type { AgentCompletionResponse, AgentContext, AgentProgressSnapshot, AgentToolCall, TaskProgressCallback, TaskProgressEvidence } from "./agentToolTypes.js";
 import { createAgentToolRuntime, executeAgentToolCall } from "./agentTools.js";
 import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
@@ -90,6 +90,7 @@ export type AgentRuntimeOptions = {
   workflow?: TaskWorkflowSnapshot;
   projectMemoryPrompt?: string | null;
   onAgentStep?: (step: AgentStep) => void;
+  onTaskProgress?: TaskProgressCallback;
   requestCompletion?: (body: Record<string, unknown>) => Promise<AgentCompletionResponse | ModelResponse>;
   completeModel?: (request: ModelRequest) => Promise<ModelResponse>;
   metricsRecorder?: RunMetricsRecorder;
@@ -339,6 +340,70 @@ function getLatestValidationAt(agentContext: AgentContext) {
     .filter((command) => command.validation === true && typeof command.finishedAt === "number")
     .map((command) => command.finishedAt as number);
   return finishedAt.length ? Math.max(...finishedAt) : undefined;
+}
+
+type ValidationCommandEvidence = NonNullable<AgentContext["commandsRun"]>[number];
+
+function getLatestValidationCommand(agentContext: AgentContext): ValidationCommandEvidence | undefined {
+  return (agentContext.commandsRun ?? []).filter((command) => command.validation === true).at(-1);
+}
+
+function getValidationCommandFingerprint(command: ValidationCommandEvidence | undefined) {
+  return command
+    ? JSON.stringify([command.command, command.status, command.exitCode, command.finishedAt])
+    : "";
+}
+
+async function emitToolTaskProgress(input: {
+  callback?: TaskProgressCallback;
+  source: TaskProgressEvidence["source"];
+  toolCallId: string;
+  toolName: string;
+  appliedFilePaths: string[];
+  validationBefore: ValidationCommandEvidence | undefined;
+  agentContext: AgentContext;
+  lastMutationAt?: number;
+}) {
+  if (!input.callback) return;
+
+  if (input.appliedFilePaths.length) {
+    await input.callback("patch_applied", {
+      source: input.source,
+      occurredAt: Date.now(),
+      toolCallId: input.toolCallId,
+      toolName: input.toolName,
+      appliedFilePaths: input.appliedFilePaths
+    });
+  }
+
+  const validation = getLatestValidationCommand(input.agentContext);
+  if (!validation || getValidationCommandFingerprint(validation) === getValidationCommandFingerprint(input.validationBefore)) return;
+  if (validation.status === "running") return;
+  if (
+    validation.status === "success"
+    && (validation.finishedAt === undefined || (input.lastMutationAt !== undefined && validation.finishedAt < input.lastMutationAt))
+  ) {
+    // 旧验证不能完成 validate，必须等待最后一次文件变更后的新验证结果。
+    return;
+  }
+
+  const phase = validation.status === "success"
+    ? "validation_success"
+    : validation.status === "cancelled"
+      ? "task_cancelled"
+      : "validation_failed";
+  await input.callback(phase, {
+    source: input.source,
+    occurredAt: validation.finishedAt ?? Date.now(),
+    toolCallId: input.toolCallId,
+    toolName: input.toolName,
+    command: {
+      command: validation.command,
+      status: validation.status,
+      exitCode: validation.exitCode,
+      finishedAt: validation.finishedAt
+    }
+  });
 }
 
 function createTaskRuntimeEvidence(input: {
@@ -921,6 +986,7 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     emitToolApprovalSteps: false,
     pendingActionId: options.pendingToolCall.actionId
   });
+  const validationBefore = getLatestValidationCommand(agentContext);
   const toolMessage =
     options.decision === "rejected"
       ? createRejectedToolMessage(options.pendingToolCall)
@@ -946,6 +1012,19 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     lastMutationAt: Math.max(persistedRuntimeEvidence?.lastMutationAt ?? 0, approvalMutationAt ?? 0) || undefined,
     lastValidationAt: Math.max(persistedRuntimeEvidence?.lastValidationAt ?? 0, getLatestValidationAt(agentContext) ?? 0) || undefined
   });
+
+  if (options.decision === "approved") {
+    await emitToolTaskProgress({
+      callback: options.onTaskProgress,
+      source: "approval_resume",
+      toolCallId: options.pendingToolCall.toolCallId,
+      toolName: options.pendingToolCall.toolName,
+      appliedFilePaths,
+      validationBefore,
+      agentContext,
+      lastMutationAt: runtimeEvidence.lastMutationAt
+    });
+  }
 
   messages.push(toolMessage);
   await persistAgentMessage(options.taskSessionId, toolMessage);
@@ -1812,6 +1891,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
 
       try {
         const progressBefore = await createProgressSnapshot(agentContext, generatedPatchIds, options.taskSessionId, readScopes);
+        const validationBefore = getLatestValidationCommand(agentContext);
         const result = toModelToolMessage(await executeAgentToolCall(toAgentToolCall(toolCall), toolRuntime));
         const resultMetrics = analyzeToolResult(result.content);
         const safeEditorMetricDelta = getSafeEditorMetricDelta(result.content);
@@ -1824,6 +1904,16 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         }
         // 验证命令可能由工具更新 AgentContext；暂停到下一次审批前必须保留完成时间。
         lastValidationAt = Math.max(lastValidationAt ?? 0, getLatestValidationAt(agentContext) ?? 0) || undefined;
+        await emitToolTaskProgress({
+          callback: options.onTaskProgress,
+          source: "runtime",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          appliedFilePaths: resultMetrics.failed ? [] : appliedFilePaths,
+          validationBefore,
+          agentContext,
+          lastMutationAt
+        });
         const readScope = getSuccessfulReadScope(toolCall);
         if (!resultMetrics.cached && !resultMetrics.failed && readScope) readScopes.add(readScope);
         const newCreateIntents = promoteCreateIntentFacts(agentContext, {
@@ -2005,6 +2095,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   };
   } catch (error) {
     const cancelled = error instanceof Error && error.name === "AbortError";
+    if (cancelled && options.onTaskProgress) {
+      await options.onTaskProgress("task_cancelled", {
+        source: options.approvalResume ? "approval_resume" : "runtime",
+        occurredAt: Date.now()
+      });
+    }
     await metrics.finish({
       status: cancelled ? "cancelled" : "failed",
       stopReason: cancelled ? "cancelled" : "provider_error",

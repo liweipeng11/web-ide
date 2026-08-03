@@ -938,6 +938,34 @@ test("keeps validation active when a compact edit plan has no apply step", async
   assert.deepEqual(afterApply?.planItems?.map((item) => item.status), ["completed", "completed", "in_progress"]);
 });
 
+test("keeps repeated runtime progress events idempotent", async () => {
+  const { session } = await createIsolatedTaskSession("重复 Runtime 进度事件");
+  await setTaskPlanItems(session.id, [
+    { workflowStepId: "analyze-project", title: "分析项目" },
+    { workflowStepId: "implement", title: "实现修改" },
+    { workflowStepId: "validate", title: "运行验证" },
+    { workflowStepId: "summarize", title: "总结结果" }
+  ]);
+
+  const firstApply = await advanceTaskPlanProgress(session.id, "patch_applied");
+  const repeatedApply = await advanceTaskPlanProgress(session.id, "patch_applied");
+  assert.deepEqual(repeatedApply?.planItems?.map((item) => item.status), ["completed", "completed", "in_progress", "pending"]);
+  assert.equal(repeatedApply?.updatedAt, firstApply?.updatedAt);
+
+  const firstFailure = await advanceTaskPlanProgress(session.id, "validation_failed");
+  const repeatedFailure = await advanceTaskPlanProgress(session.id, "validation_failed");
+  assert.equal(repeatedFailure?.planItems?.filter((item) => item.title === "根据验证反馈调整计划").length, 1);
+  assert.equal(repeatedFailure?.planRevisions?.length, firstFailure?.planRevisions?.length);
+  assert.equal(repeatedFailure?.updatedAt, firstFailure?.updatedAt);
+
+  const { session: cancelledSession } = await createIsolatedTaskSession("重复取消事件");
+  await setTaskPlanItems(cancelledSession.id, [{ title: "运行任务" }, { title: "输出总结" }]);
+  const firstCancellation = await advanceTaskPlanProgress(cancelledSession.id, "task_cancelled");
+  const repeatedCancellation = await advanceTaskPlanProgress(cancelledSession.id, "task_cancelled");
+  assert.deepEqual(repeatedCancellation?.planItems?.map((item) => item.status), ["blocked", "pending"]);
+  assert.equal(repeatedCancellation?.updatedAt, firstCancellation?.updatedAt);
+});
+
 
 test("updates approval request status by action id", async () => {
   const { session } = await createIsolatedTaskSession("approve tool action");
