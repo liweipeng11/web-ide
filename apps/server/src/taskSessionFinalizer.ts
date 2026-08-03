@@ -1,5 +1,5 @@
 import type { CompletionEvidence } from "./agentCompletionPolicy.js";
-import { commitTaskSessionFinalization, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { commitTaskSessionFinalization, reconcileTaskPlanFromRuntimeEvidence, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { isTerminalTaskSessionStatus, resolvePlanModeTaskStatus, resolveRuntimeTaskStatus } from "./taskWorkflow/index.js";
 import type { TaskWorkflowType } from "./taskWorkflow/index.js";
 import type { AgentRuntimeStatus, TaskSessionFinalizationSource, TaskSessionStatus } from "./types.js";
@@ -37,6 +37,18 @@ function resolveTaskSessionStatus(input: FinalizeTaskSessionInput): TaskSessionS
  * 统一任务状态出口：传输层只提供关闭信号，业务终态必须由 Runtime/验证结果决定。
  */
 export async function finalizeTaskSession(input: FinalizeTaskSessionInput) {
+  const completionEvidence = input.runtimeResult?.completionEvidence;
+  await reconcileTaskPlanFromRuntimeEvidence(input.taskSessionId, {
+    validationStatus: completionEvidence?.validationStatus === "passed"
+      ? "success"
+      : completionEvidence?.validationStatus === "failed"
+        ? "failed"
+        : undefined,
+    pendingApprovalCount: completionEvidence?.pendingApprovalCount,
+    activeCommandCount: completionEvidence?.activeCommandCount,
+    failedToolCallCount: completionEvidence?.failedToolCallCount
+  });
+
   const status = resolveTaskSessionStatus(input);
   const runtimeStatus = input.runtimeResult?.status;
   const runtimeOutcome = runtimeStatus && runtimeStatus !== "failed" && runtimeStatus !== "cancelled"

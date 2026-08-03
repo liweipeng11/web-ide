@@ -461,6 +461,8 @@ export type TaskRuntimeEvidence = {
   generatedPatchIds: string[];
   lastMutationAt?: number;
   lastValidationAt?: number;
+  // 与最近验证时间一起持久化，避免服务恢复后把失败验证误判为成功。
+  lastValidationStatus?: "success" | "failed" | "running" | "cancelled";
 };
 
 export type TaskSessionFinalizationSource =

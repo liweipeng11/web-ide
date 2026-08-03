@@ -44,12 +44,51 @@ function normalizeTaskRuntimeEvidence(value: unknown): TaskRuntimeEvidence | und
   const record = value as Partial<TaskRuntimeEvidence>;
   if (typeof record.taskRunId !== "string" || !record.taskRunId.trim()) return undefined;
 
+  const lastValidationStatus = record.lastValidationStatus === "success"
+    || record.lastValidationStatus === "failed"
+    || record.lastValidationStatus === "running"
+    || record.lastValidationStatus === "cancelled"
+    ? record.lastValidationStatus
+    : undefined;
+
   return {
     taskRunId: record.taskRunId.trim(),
     appliedFilePaths: unique(Array.isArray(record.appliedFilePaths) ? record.appliedFilePaths.filter((item): item is string => typeof item === "string") : []),
     generatedPatchIds: unique(Array.isArray(record.generatedPatchIds) ? record.generatedPatchIds.filter((item): item is string => typeof item === "string") : []),
     lastMutationAt: typeof record.lastMutationAt === "number" && Number.isFinite(record.lastMutationAt) ? record.lastMutationAt : undefined,
-    lastValidationAt: typeof record.lastValidationAt === "number" && Number.isFinite(record.lastValidationAt) ? record.lastValidationAt : undefined
+    lastValidationAt: typeof record.lastValidationAt === "number" && Number.isFinite(record.lastValidationAt) ? record.lastValidationAt : undefined,
+    ...(lastValidationStatus ? { lastValidationStatus } : {})
+  };
+}
+
+function mergeTaskRuntimeEvidence(current: TaskRuntimeEvidence | undefined, incoming: TaskRuntimeEvidence) {
+  if (!current) return incoming;
+
+  // taskRunId 是证据所属运行的边界；迟到的旧 Runtime 不能覆盖当前任务运行。
+  if (current.taskRunId !== incoming.taskRunId) return current;
+
+  const currentValidationAt = current.lastValidationAt ?? 0;
+  const incomingValidationAt = incoming.lastValidationAt ?? 0;
+  let lastValidationAt = current.lastValidationAt;
+  let lastValidationStatus = current.lastValidationStatus;
+
+  if (incomingValidationAt > currentValidationAt) {
+    lastValidationAt = incoming.lastValidationAt;
+    lastValidationStatus = incoming.lastValidationStatus;
+  } else if (incomingValidationAt === currentValidationAt) {
+    // 相同时间戳无法证明先后顺序时采用保守状态，避免迟到快照把失败覆盖为成功。
+    const conservativeStatus = [current.lastValidationStatus, incoming.lastValidationStatus]
+      .find((status) => status === "failed" || status === "cancelled" || status === "running");
+    lastValidationStatus = conservativeStatus ?? incoming.lastValidationStatus ?? current.lastValidationStatus;
+  }
+
+  return {
+    taskRunId: current.taskRunId,
+    appliedFilePaths: unique([...current.appliedFilePaths, ...incoming.appliedFilePaths]),
+    generatedPatchIds: unique([...current.generatedPatchIds, ...incoming.generatedPatchIds]),
+    lastMutationAt: Math.max(current.lastMutationAt ?? 0, incoming.lastMutationAt ?? 0) || undefined,
+    lastValidationAt,
+    ...(lastValidationStatus ? { lastValidationStatus } : {})
   };
 }
 
@@ -963,6 +1002,14 @@ export async function interruptTaskSessionForReplan(taskSessionId: string | null
 
 export type TaskPlanProgressPhase = "patch_generated" | "patch_applied" | "validation_failed" | "validation_success" | "task_failed" | "task_cancelled";
 
+export type TaskPlanReconciliationEvidence = {
+  runtimeEvidence?: TaskRuntimeEvidence;
+  validationStatus?: "success" | "failed" | "running" | "cancelled";
+  pendingApprovalCount?: number;
+  activeCommandCount?: number;
+  failedToolCallCount?: number;
+};
+
 function titleMatches(title: string, patterns: RegExp[]) {
   return patterns.some((pattern) => pattern.test(title));
 }
@@ -1013,6 +1060,164 @@ function hasTaskPlanProgressChanged(beforeItems: TaskPlanItem[], afterItems: Tas
   });
 }
 
+const mutationWorkflowStepIds = new Set(["implement", "minimal-fix", "refactor"]);
+const validationWorkflowStepIds = new Set(["validate", "regression-validation", "regression"]);
+
+function reconcileSuccessfulRuntimeEvidence(
+  items: TaskPlanItem[],
+  evidence: TaskRuntimeEvidence,
+  validationStatus: TaskPlanReconciliationEvidence["validationStatus"],
+  now: number
+) {
+  const nextItems = items.map((item) => ({ ...item }));
+  const systemItems = nextItems.filter((item) => Boolean(item.workflowStepId));
+
+  // 人工阻塞代表显式决策边界，持久化证据不能越过该边界继续推进。
+  if (systemItems.some((item) => item.status === "blocked")) return items;
+
+  const mutationIndex = nextItems.findIndex((item) => Boolean(item.workflowStepId && mutationWorkflowStepIds.has(item.workflowStepId)));
+  const hasAppliedMutation = evidence.appliedFilePaths.length > 0
+    && typeof evidence.lastMutationAt === "number"
+    && evidence.lastMutationAt > 0;
+
+  if (!hasAppliedMutation || mutationIndex === -1) return items;
+
+  for (let index = 0; index <= mutationIndex; index += 1) {
+    const item = nextItems[index];
+    // 只校准工作流生成的稳定步骤；人工计划、备注和证据字段均原样保留。
+    if (item.workflowStepId && item.status !== "completed") {
+      nextItems[index] = { ...item, status: "completed", updatedAt: now };
+    }
+  }
+
+  const validationIndex = nextItems.findIndex((item) => Boolean(item.workflowStepId && validationWorkflowStepIds.has(item.workflowStepId)));
+  const validationIsFresh = validationStatus === "success"
+    && typeof evidence.lastValidationAt === "number"
+    && evidence.lastValidationAt > evidence.lastMutationAt!;
+  if (!validationIsFresh || validationIndex === -1) {
+    if (validationIndex !== -1 && nextItems[validationIndex].status !== "in_progress") {
+      // 新修改会使旧验证失效；计划必须同步退回验证中，不能只依赖完成门禁拒绝。
+      nextItems[validationIndex] = { ...nextItems[validationIndex], status: "in_progress", updatedAt: now };
+    }
+    const staleSummaryIndex = nextItems.findIndex((item) => item.workflowStepId === "summarize");
+    if (staleSummaryIndex !== -1 && nextItems[staleSummaryIndex].status === "completed") {
+      nextItems[staleSummaryIndex] = { ...nextItems[staleSummaryIndex], status: "pending", updatedAt: now };
+    }
+    return nextItems;
+  }
+
+  for (let index = 0; index <= validationIndex; index += 1) {
+    const item = nextItems[index];
+    if (item.workflowStepId && item.status !== "completed") {
+      nextItems[index] = { ...item, status: "completed", updatedAt: now };
+    }
+  }
+
+  const summarizeIndex = nextItems.findIndex((item) => item.workflowStepId === "summarize");
+  if (summarizeIndex !== -1 && nextItems[summarizeIndex].status !== "completed") {
+    nextItems[summarizeIndex] = { ...nextItems[summarizeIndex], status: "completed", updatedAt: now };
+  }
+
+  return nextItems;
+}
+
+function applyTaskPlanFailureProgress(
+  session: TaskSession,
+  phase: Extract<TaskPlanProgressPhase, "validation_failed" | "task_failed" | "task_cancelled">
+) {
+  const items = normalizeTaskPlanItems(session.planItems);
+  if (!items.length) return session;
+  if (phase === "task_cancelled" && items.some((item) => item.note === "任务已取消，计划暂停。")) return session;
+  if (items.some((item) => item.status === "in_progress" && item.note === "系统已插入重规划步骤，请结合失败信息确认下一步。")) {
+    return session;
+  }
+
+  const now = Date.now();
+  const nextItems = items.map((item) => ({ ...item }));
+  const activeIndex = nextItems.findIndex((item) => item.status === "in_progress");
+  const fallbackIndex = nextItems.findIndex((item) => item.status === "pending");
+  const targetIndex = activeIndex === -1 ? fallbackIndex : activeIndex;
+
+  if (targetIndex !== -1) {
+    nextItems[targetIndex] = {
+      ...nextItems[targetIndex],
+      status: "blocked",
+      note: phase === "task_cancelled" ? "任务已取消，计划暂停。" : "执行过程中遇到问题，需要处理后继续。",
+      updatedAt: now
+    };
+  }
+
+  let revision: TaskPlanRevision | null = null;
+  if (phase === "validation_failed" || phase === "task_failed") {
+    nextItems.push({
+      id: `plan-${now.toString(36)}-replan-${crypto.randomUUID()}`,
+      title: phase === "validation_failed" ? "根据验证反馈调整计划" : "重新评估失败原因并修订方案",
+      status: "in_progress",
+      note: "系统已插入重规划步骤，请结合失败信息确认下一步。",
+      evidence: { stepIds: [], files: [], commands: [] },
+      createdAt: now,
+      updatedAt: now
+    });
+    revision = createTaskPlanRevision({
+      trigger: phase === "validation_failed" ? "validation" : "agent",
+      reason: phase === "validation_failed" ? "验证失败后自动回到计划阶段" : "任务失败后自动回到计划阶段",
+      beforeItems: items,
+      afterItems: nextItems
+    });
+  }
+
+  return {
+    ...session,
+    planItems: nextItems,
+    planRevisions: revision ? [revision, ...normalizeTaskPlanRevisions(session.planRevisions)].slice(0, 20) : normalizeTaskPlanRevisions(session.planRevisions),
+    updatedAt: now
+  };
+}
+
+/**
+ * 使用已经落盘的 Runtime 证据修复系统计划状态；调用方参数只补充瞬时阻塞信息，
+ * 不会替代会话文件中的权威证据。
+ */
+export async function reconcileTaskPlanFromRuntimeEvidence(
+  taskSessionId: string | null | undefined,
+  input: TaskPlanReconciliationEvidence = {}
+) {
+  if (!taskSessionId) return null;
+
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const evidence = normalizeTaskRuntimeEvidence(session.runtimeEvidence);
+    const suppliedEvidence = normalizeTaskRuntimeEvidence(input.runtimeEvidence);
+    const evidenceMatches = !suppliedEvidence || suppliedEvidence.taskRunId === evidence?.taskRunId;
+    if (!evidence || !evidenceMatches) return session;
+
+    // 成功状态只信任已落盘证据；瞬时失败/运行状态可以收紧门禁，但不能把持久化失败升级为成功。
+    const validationStatus = input.validationStatus === "failed"
+      || input.validationStatus === "cancelled"
+      || input.validationStatus === "running"
+      ? input.validationStatus
+      : evidence.lastValidationStatus;
+    const hasBlocker = Boolean(session.pendingToolCall)
+      || (input.pendingApprovalCount ?? 0) > 0
+      || (input.activeCommandCount ?? 0) > 0
+      || (input.failedToolCallCount ?? 0) > 0
+      || validationStatus === "running";
+    if (hasBlocker) return session;
+
+    if (validationStatus === "failed" || validationStatus === "cancelled") {
+      // 失败证据只能触发既有重规划路径，绝不能完成验证步骤。
+      return applyTaskPlanFailureProgress(session, "validation_failed");
+    }
+
+    const items = normalizeTaskPlanItems(session.planItems);
+    if (!items.length) return session;
+    const now = Date.now();
+    const nextItems = reconcileSuccessfulRuntimeEvidence(items, evidence, validationStatus, now);
+    if (!hasTaskPlanProgressChanged(items, nextItems)) return session;
+
+    return { ...session, planItems: nextItems, updatedAt: now };
+  }, { flushImmediately: true });
+}
+
 function getPatchGeneratedTargetIndex(items: TaskPlanItem[]) {
   const implementationIndex = findWorkflowPlanItemIndex(items, ["implement", "minimal-fix", "refactor"]);
 
@@ -1054,6 +1259,10 @@ export async function advanceTaskPlanProgress(taskSessionId: string | null | und
   if (!taskSessionId) return null;
 
   return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    if (phase === "validation_failed" || phase === "task_failed" || phase === "task_cancelled") {
+      return applyTaskPlanFailureProgress(session, phase);
+    }
+
     const items = normalizeTaskPlanItems(session.planItems);
 
     if (!items.length) {
@@ -1062,7 +1271,6 @@ export async function advanceTaskPlanProgress(taskSessionId: string | null | und
 
     const now = Date.now();
     const nextItems = items.map((item) => ({ ...item }));
-    let autoRevisionReason = "";
 
     if (phase === "patch_generated") {
       advancePlanToIndex(nextItems, getPatchGeneratedTargetIndex(nextItems), now);
@@ -1076,59 +1284,12 @@ export async function advanceTaskPlanProgress(taskSessionId: string | null | und
       advancePlanToIndex(nextItems, getValidationSuccessTargetIndex(nextItems), now);
     }
 
-    if (phase === "validation_failed" || phase === "task_failed" || phase === "task_cancelled") {
-      if (phase === "task_cancelled" && nextItems.some((item) => item.note === "任务已取消，计划暂停。")) {
-        return session;
-      }
-      const existingReplan = nextItems.find((item) =>
-        item.status === "in_progress" && item.note === "系统已插入重规划步骤，请结合失败信息确认下一步。"
-      );
-
-      // 同一失败事件可能因审批恢复或重试重复送达，已有活动重规划项时保持幂等。
-      if (existingReplan) return session;
-      const activeIndex = nextItems.findIndex((item) => item.status === "in_progress");
-      const fallbackIndex = nextItems.findIndex((item) => item.status === "pending");
-      const targetIndex = activeIndex === -1 ? fallbackIndex : activeIndex;
-
-      if (targetIndex !== -1) {
-        nextItems[targetIndex] = {
-          ...nextItems[targetIndex],
-          status: "blocked",
-        note: phase === "task_cancelled" ? "任务已取消，计划暂停。" : "执行过程中遇到问题，需要处理后继续。",
-        updatedAt: now
-        };
-      }
-
-      if (phase === "validation_failed" || phase === "task_failed") {
-        // 失败后自动回到计划阶段，模拟主流 AI IDE 的滚动重规划检查点。
-        nextItems.push({
-          id: `plan-${now.toString(36)}-replan-${crypto.randomUUID()}`,
-          title: phase === "validation_failed" ? "根据验证反馈调整计划" : "重新评估失败原因并修订方案",
-          status: "in_progress",
-        note: "系统已插入重规划步骤，请结合失败信息确认下一步。",
-        evidence: { stepIds: [], files: [], commands: [] },
-        createdAt: now,
-        updatedAt: now
-        });
-        autoRevisionReason = phase === "validation_failed" ? "验证失败后自动回到计划阶段" : "任务失败后自动回到计划阶段";
-      }
-    }
-
     if (!hasTaskPlanProgressChanged(items, nextItems)) return session;
-
-    const revision = autoRevisionReason
-      ? createTaskPlanRevision({
-          trigger: phase === "validation_failed" ? "validation" : "agent",
-          reason: autoRevisionReason,
-          beforeItems: items,
-          afterItems: nextItems
-        })
-      : null;
 
     return {
       ...session,
       planItems: nextItems,
-      planRevisions: revision ? [revision, ...normalizeTaskPlanRevisions(session.planRevisions)].slice(0, 20) : normalizeTaskPlanRevisions(session.planRevisions),
+      planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
       updatedAt: now
     };
   });
@@ -1224,12 +1385,18 @@ export async function setTaskSessionRuntimeEvidence(taskSessionId: string | null
   const normalized = normalizeTaskRuntimeEvidence(runtimeEvidence);
   if (!normalized) throw new Error("runtimeEvidence.taskRunId is required");
 
-  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
-    ...session,
-    // 审批暂停前立即保存，服务重启后仍可恢复同一任务运行的完成证据。
-    runtimeEvidence: normalized,
-    updatedAt: Date.now()
-  }), { flushImmediately: true });
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const current = normalizeTaskRuntimeEvidence(session.runtimeEvidence);
+    const merged = mergeTaskRuntimeEvidence(current, normalized);
+    if (JSON.stringify(current) === JSON.stringify(merged)) return session;
+
+    return {
+      ...session,
+      // 审批暂停前立即保存，服务重启后仍可恢复同一任务运行的完成证据。
+      runtimeEvidence: merged,
+      updatedAt: Date.now()
+    };
+  }, { flushImmediately: true });
 }
 
 export async function listTaskSessions(options: { includeDiffView?: boolean } = {}) {

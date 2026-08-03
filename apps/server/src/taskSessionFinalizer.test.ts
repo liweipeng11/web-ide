@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { finalizeTaskSession } from "./taskSessionFinalizer.js";
-import { createTaskSession, getTaskSession, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { createTaskSession, getTaskSession, setTaskPlanItems, setTaskSessionRuntimeEvidence, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 
 async function withTaskSession(
@@ -63,6 +63,49 @@ test("等待审批保持非终态，审批恢复完成后才能进入 success", 
       source: "agent_runtime"
     });
     assert.equal(completed?.status, "success");
+  });
+});
+
+test("finalize 前使用持久化成功证据补齐系统计划", async () => {
+  await withTaskSession(async (taskSessionId) => {
+    const session = await getTaskSession(taskSessionId);
+    await setTaskPlanItems(taskSessionId, [
+      { workflowStepId: "implement", title: "实现修改" },
+      { workflowStepId: "validate", title: "运行验证" },
+      { workflowStepId: "summarize", title: "总结结果" }
+    ]);
+    await setTaskSessionRuntimeEvidence(taskSessionId, {
+      taskRunId: session.runtimeEvidence!.taskRunId,
+      appliedFilePaths: ["src/finalize.ts"],
+      generatedPatchIds: [],
+      lastMutationAt: 100,
+      lastValidationAt: 200,
+      lastValidationStatus: "success"
+    });
+
+    const finalized = await finalizeTaskSession({
+      taskSessionId,
+      runtimeResult: {
+        status: "completed",
+        completionEvidence: {
+          mutationExpected: true,
+          changedFileCount: 1,
+          generatedPatchCount: 0,
+          pendingPlanCount: 0,
+          blockedPlanCount: 0,
+          validationStatus: "passed",
+          pendingApprovalCount: 0,
+          activeCommandCount: 0,
+          failedToolCallCount: 0,
+          lastMutationAt: 100,
+          lastValidationAt: 200
+        }
+      },
+      source: "agent_runtime"
+    });
+
+    assert.equal(finalized?.status, "success");
+    assert.equal(finalized?.planItems?.every((item) => item.status === "completed"), true);
   });
 });
 

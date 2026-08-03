@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics, RunMetricsTracker } from "./observability/index.js";
@@ -964,6 +964,216 @@ test("keeps repeated runtime progress events idempotent", async () => {
   const repeatedCancellation = await advanceTaskPlanProgress(cancelledSession.id, "task_cancelled");
   assert.deepEqual(repeatedCancellation?.planItems?.map((item) => item.status), ["blocked", "pending"]);
   assert.equal(repeatedCancellation?.updatedAt, firstCancellation?.updatedAt);
+});
+
+test("持久化 Runtime 成功证据会校准系统计划且重复执行不产生物理写入", async () => {
+  const { session } = await createIsolatedTaskSession("从持久化证据恢复计划");
+  await setTaskPlanItems(session.id, [
+    { workflowStepId: "analyze-project", title: "分析项目" },
+    { workflowStepId: "implement", title: "实现修改", note: "保留人工备注" },
+    { title: "用户补充的人工检查", note: "不得自动完成" },
+    { workflowStepId: "validate", title: "运行验证" },
+    { workflowStepId: "summarize", title: "总结结果" }
+  ]);
+  const runtimeEvidence = {
+    taskRunId: session.runtimeEvidence!.taskRunId,
+    appliedFilePaths: ["src/recovered.ts"],
+    generatedPatchIds: [],
+    lastMutationAt: 100,
+    lastValidationAt: 200,
+    lastValidationStatus: "success" as const
+  };
+  await setTaskSessionRuntimeEvidence(session.id, runtimeEvidence);
+  await clearTaskMetricsForTest({ key: session.id });
+
+  const first = await reconcileTaskPlanFromRuntimeEvidence(session.id, { runtimeEvidence });
+  const metricsAfterFirst = await getTaskSessionPersistenceMetrics(session.id);
+  const repeated = await reconcileTaskPlanFromRuntimeEvidence(session.id, { runtimeEvidence });
+  const metricsAfterRepeated = await getTaskSessionPersistenceMetrics(session.id);
+
+  assert.deepEqual(first?.planItems?.map((item) => item.status), ["completed", "completed", "pending", "completed", "completed"]);
+  assert.equal(first?.planItems?.[1]?.note, "保留人工备注");
+  assert.equal(first?.planItems?.[2]?.note, "不得自动完成");
+  assert.equal(repeated?.updatedAt, first?.updatedAt);
+  assert.equal(metricsAfterRepeated.taskSessionPhysicalWriteCount, metricsAfterFirst.taskSessionPhysicalWriteCount);
+  assert.equal((await getTaskSession(session.id)).runtimeEvidence?.lastValidationStatus, "success");
+});
+
+test("迟到或跨运行的 Runtime 快照不会回退当前持久化证据", async () => {
+  const { session } = await createIsolatedTaskSession("拒绝过期 Runtime 快照");
+  const taskRunId = session.runtimeEvidence!.taskRunId;
+  await setTaskSessionRuntimeEvidence(session.id, {
+    taskRunId,
+    appliedFilePaths: ["src/newest.ts"],
+    generatedPatchIds: ["patch-newest"],
+    lastMutationAt: 200,
+    lastValidationAt: 300,
+    lastValidationStatus: "success"
+  });
+
+  await setTaskSessionRuntimeEvidence(session.id, {
+    taskRunId,
+    appliedFilePaths: ["src/older.ts"],
+    generatedPatchIds: ["patch-older"],
+    lastMutationAt: 100,
+    lastValidationAt: 150,
+    lastValidationStatus: "failed"
+  });
+  await setTaskSessionRuntimeEvidence(session.id, {
+    taskRunId: "stale-task-run",
+    appliedFilePaths: ["src/foreign.ts"],
+    generatedPatchIds: ["patch-foreign"],
+    lastMutationAt: 1_000,
+    lastValidationAt: 2_000,
+    lastValidationStatus: "failed"
+  });
+
+  const persisted = (await getTaskSession(session.id)).runtimeEvidence;
+  assert.equal(persisted?.taskRunId, taskRunId);
+  assert.deepEqual(persisted?.appliedFilePaths, ["src/newest.ts", "src/older.ts"]);
+  assert.deepEqual(persisted?.generatedPatchIds, ["patch-newest", "patch-older"]);
+  assert.equal(persisted?.lastMutationAt, 200);
+  assert.equal(persisted?.lastValidationAt, 300);
+  assert.equal(persisted?.lastValidationStatus, "success");
+});
+
+test("瞬时成功状态不能替代缺失的持久化验证结果", async () => {
+  const { session } = await createIsolatedTaskSession("成功校准只信任落盘证据");
+  await setTaskPlanItems(session.id, [
+    { workflowStepId: "implement", title: "实现修改" },
+    { workflowStepId: "validate", title: "运行验证" },
+    { workflowStepId: "summarize", title: "总结结果" }
+  ]);
+  await setTaskSessionRuntimeEvidence(session.id, {
+    taskRunId: session.runtimeEvidence!.taskRunId,
+    appliedFilePaths: ["src/unverified.ts"],
+    generatedPatchIds: [],
+    lastMutationAt: 100,
+    lastValidationAt: 200
+  });
+
+  const reconciled = await reconcileTaskPlanFromRuntimeEvidence(session.id, { validationStatus: "success" });
+  assert.deepEqual(reconciled?.planItems?.map((item) => item.status), ["completed", "in_progress", "pending"]);
+});
+
+test("持久化校准保持未验证修改门禁并拒绝过期验证", async () => {
+  for (const evidence of [
+    { lastMutationAt: 200, lastValidationAt: undefined, lastValidationStatus: undefined },
+    { lastMutationAt: 200, lastValidationAt: 200, lastValidationStatus: "success" as const }
+  ]) {
+    const { session } = await createIsolatedTaskSession("未验证修改不得完成");
+    await setTaskPlanItems(session.id, [
+      { workflowStepId: "analyze-project", title: "分析项目" },
+      { workflowStepId: "implement", title: "实现修改" },
+      { workflowStepId: "validate", title: "运行验证" },
+      { workflowStepId: "summarize", title: "总结结果" }
+    ]);
+    await setTaskSessionRuntimeEvidence(session.id, {
+      taskRunId: session.runtimeEvidence!.taskRunId,
+      appliedFilePaths: ["src/stale.ts"],
+      generatedPatchIds: [],
+      ...evidence
+    });
+
+    const reconciled = await reconcileTaskPlanFromRuntimeEvidence(session.id);
+    assert.deepEqual(reconciled?.planItems?.map((item) => item.status), ["completed", "completed", "in_progress", "pending"]);
+  }
+});
+
+test("验证完成后的新修改会把系统计划退回验证阶段", async () => {
+  const { session } = await createIsolatedTaskSession("修改后重新验证");
+  await setTaskPlanItems(session.id, [
+    { workflowStepId: "implement", title: "实现修改" },
+    { workflowStepId: "validate", title: "运行验证" },
+    { workflowStepId: "summarize", title: "总结结果" }
+  ]);
+  const taskRunId = session.runtimeEvidence!.taskRunId;
+  await setTaskSessionRuntimeEvidence(session.id, {
+    taskRunId,
+    appliedFilePaths: ["src/revalidated.ts"],
+    generatedPatchIds: [],
+    lastMutationAt: 100,
+    lastValidationAt: 200,
+    lastValidationStatus: "success"
+  });
+  const completed = await reconcileTaskPlanFromRuntimeEvidence(session.id);
+  assert.deepEqual(completed?.planItems?.map((item) => item.status), ["completed", "completed", "completed"]);
+
+  await setTaskSessionRuntimeEvidence(session.id, {
+    taskRunId,
+    appliedFilePaths: ["src/revalidated.ts"],
+    generatedPatchIds: [],
+    lastMutationAt: 300,
+    lastValidationAt: 200,
+    lastValidationStatus: "success"
+  });
+  const stale = await reconcileTaskPlanFromRuntimeEvidence(session.id);
+
+  assert.deepEqual(stale?.planItems?.map((item) => item.status), ["completed", "in_progress", "pending"]);
+  assert.equal((stale?.runtimeEvidence?.lastValidationAt ?? 0) < (stale?.runtimeEvidence?.lastMutationAt ?? 0), true);
+});
+
+test("待审批、运行中命令、失败工具和人工阻塞均禁止成功校准", async () => {
+  for (const blocker of ["pending", "active", "failed", "blocked"] as const) {
+    const { session } = await createIsolatedTaskSession(`校准阻塞-${blocker}`);
+    await setTaskPlanItems(session.id, [
+      { workflowStepId: "analyze-project", title: "分析项目" },
+      { workflowStepId: "implement", title: "实现修改", status: blocker === "blocked" ? "blocked" : "pending" },
+      { workflowStepId: "validate", title: "运行验证" },
+      { workflowStepId: "summarize", title: "总结结果" }
+    ]);
+    const runtimeEvidence = {
+      taskRunId: session.runtimeEvidence!.taskRunId,
+      appliedFilePaths: ["src/blocked.ts"],
+      generatedPatchIds: [],
+      lastMutationAt: 100,
+      lastValidationAt: 200,
+      lastValidationStatus: "success" as const
+    };
+    await setTaskSessionRuntimeEvidence(session.id, runtimeEvidence);
+    if (blocker === "pending") {
+      await setTaskSessionPendingToolCall(session.id, {
+        actionId: "approval-blocker",
+        toolCallId: "tool-blocker",
+        toolName: "runCommand",
+        arguments: { command: "pnpm test" },
+        riskLevel: "medium"
+      });
+    }
+    const before = await getTaskSession(session.id);
+    const reconciled = await reconcileTaskPlanFromRuntimeEvidence(session.id, {
+      runtimeEvidence,
+      activeCommandCount: blocker === "active" ? 1 : 0,
+      failedToolCallCount: blocker === "failed" ? 1 : 0
+    });
+    assert.deepEqual(reconciled?.planItems, before.planItems);
+  }
+});
+
+test("失败验证只生成一次重规划修订且不完成验证", async () => {
+  const { session } = await createIsolatedTaskSession("失败证据恢复");
+  await setTaskPlanItems(session.id, [
+    { workflowStepId: "implement", title: "实现修改" },
+    { workflowStepId: "validate", title: "运行验证" },
+    { workflowStepId: "summarize", title: "总结结果" }
+  ]);
+  const runtimeEvidence = {
+    taskRunId: session.runtimeEvidence!.taskRunId,
+    appliedFilePaths: ["src/failed.ts"],
+    generatedPatchIds: [],
+    lastMutationAt: 100,
+    lastValidationAt: 200,
+    lastValidationStatus: "failed" as const
+  };
+  await setTaskSessionRuntimeEvidence(session.id, runtimeEvidence);
+
+  const first = await reconcileTaskPlanFromRuntimeEvidence(session.id, { runtimeEvidence });
+  const repeated = await reconcileTaskPlanFromRuntimeEvidence(session.id, { runtimeEvidence });
+
+  assert.equal(first?.planItems?.find((item) => item.workflowStepId === "validate")?.status === "completed", false);
+  assert.equal(repeated?.planItems?.filter((item) => item.title === "根据验证反馈调整计划").length, 1);
+  assert.equal(repeated?.planRevisions?.length, first?.planRevisions?.length);
+  assert.equal(repeated?.updatedAt, first?.updatedAt);
 });
 
 

@@ -50,7 +50,7 @@ import { getPendingPatch } from "./patchStore.js";
 import { ConservativeTokenEstimator, prepareContextBudget } from "./contextBudget/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { implementedFeatures, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, type CompletionPolicyFeatureFlags, type CompletionPolicyRolloutConfig, type ExplicitCompletionRolloutConfig } from "./featureFlags.js";
-import { getTaskSessionContextState, recordTaskSessionContextBudget, setTaskSessionRuntimeEvidence } from "./taskSessionStore.js";
+import { getTaskSessionContextState, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, setTaskSessionRuntimeEvidence } from "./taskSessionStore.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
 import { parseCompleteTaskInput, type CompleteTaskInput } from "./agentCompletionTools.js";
@@ -412,13 +412,23 @@ function createTaskRuntimeEvidence(input: {
   directAppliedFiles: ReadonlySet<string>;
   lastMutationAt?: number;
   lastValidationAt?: number;
+  lastValidationStatus?: TaskRuntimeEvidence["lastValidationStatus"];
 }): TaskRuntimeEvidence {
+  const lastValidationAt = input.lastValidationStatus === "success"
+    && input.lastMutationAt !== undefined
+    && input.lastValidationAt !== undefined
+    && input.lastValidationAt <= input.lastMutationAt
+    // Date.now() 分辨率不足时用逻辑时钟保留“验证发生在修改之后”的真实顺序。
+    ? input.lastMutationAt + 1
+    : input.lastValidationAt;
+
   return {
     taskRunId: input.taskRunId,
     appliedFilePaths: [...input.directAppliedFiles],
     generatedPatchIds: [...new Set(input.generatedPatchIds)],
     lastMutationAt: input.lastMutationAt,
-    lastValidationAt: input.lastValidationAt
+    lastValidationAt,
+    ...(input.lastValidationStatus ? { lastValidationStatus: input.lastValidationStatus } : {})
   };
 }
 
@@ -1010,7 +1020,8 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
     generatedPatchIds,
     directAppliedFiles: new Set(mergedAppliedFilePaths),
     lastMutationAt: Math.max(persistedRuntimeEvidence?.lastMutationAt ?? 0, approvalMutationAt ?? 0) || undefined,
-    lastValidationAt: Math.max(persistedRuntimeEvidence?.lastValidationAt ?? 0, getLatestValidationAt(agentContext) ?? 0) || undefined
+    lastValidationAt: Math.max(persistedRuntimeEvidence?.lastValidationAt ?? 0, getLatestValidationAt(agentContext) ?? 0) || undefined,
+    lastValidationStatus: getLatestValidationCommand(agentContext)?.status ?? persistedRuntimeEvidence?.lastValidationStatus
   });
 
   if (options.decision === "approved") {
@@ -1023,6 +1034,16 @@ export async function resumeAgentRuntimeAfterApproval(options: ResumeAgentRuntim
       validationBefore,
       agentContext,
       lastMutationAt: runtimeEvidence.lastMutationAt
+    });
+  }
+
+  if (completionPolicyFlags.taskRuntimeEvidencePersistence) {
+    // 审批执行结果先落盘，再由权威快照校准计划，确保断线或重启后仍能恢复一致状态。
+    await setTaskSessionRuntimeEvidence(options.taskSessionId, runtimeEvidence);
+    await reconcileTaskPlanFromRuntimeEvidence(options.taskSessionId, {
+      runtimeEvidence,
+      validationStatus: runtimeEvidence.lastValidationStatus,
+      activeCommandCount: (agentContext.commandsRun ?? []).filter((command) => command.status === "running").length
     });
   }
 
@@ -1143,7 +1164,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     generatedPatchIds,
     directAppliedFiles,
     lastMutationAt,
-    lastValidationAt
+    lastValidationAt,
+    lastValidationStatus: getLatestValidationCommand(agentContext)?.status ?? restoredRuntimeEvidence?.lastValidationStatus
   });
   const persistRuntimeEvidence = () => completionPolicyFlags.taskRuntimeEvidencePersistence
     ? setTaskSessionRuntimeEvidence(options.taskSessionId, snapshotRuntimeEvidence())
@@ -1173,6 +1195,18 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   metrics.setPrice(selectedModelDescriptor?.price);
   if (options.approvalResume) metrics.recordApprovalResume();
   metrics.recordChangedFileCount(directAppliedFiles.size);
+  const persistAndReconcileRuntimeEvidence = async () => {
+    if (!completionPolicyFlags.taskRuntimeEvidencePersistence) return;
+    const runtimeEvidence = snapshotRuntimeEvidence();
+    // 完成裁决前先持久化再校准，确保计划读取到的是同一份权威证据快照。
+    await setTaskSessionRuntimeEvidence(options.taskSessionId, runtimeEvidence);
+    await reconcileTaskPlanFromRuntimeEvidence(options.taskSessionId, {
+      runtimeEvidence,
+      validationStatus: runtimeEvidence.lastValidationStatus,
+      activeCommandCount: (agentContext.commandsRun ?? []).filter((command) => command.status === "running").length,
+      failedToolCallCount: metrics.getCompletionEvidenceSnapshot().failedToolCallCount
+    });
+  };
   const persistedAppliedFileCount = restoredRuntimeEvidence?.appliedFilePaths?.length ?? 0;
   let mutationEvidenceRestoreFailureRecorded = false;
   const recordCompletionEvidenceObservation = (evidence: CompletionEvidence) => {
@@ -1353,6 +1387,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const assistantMessage: ModelMessage = { role: "assistant", content };
       messages.push(assistantMessage);
       await persistAgentMessage(options.taskSessionId, assistantMessage);
+      await persistAndReconcileRuntimeEvidence();
       const evidence = await collectCompletionEvidence({
         taskSessionId: options.taskSessionId,
         workflowType,
@@ -1542,6 +1577,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         continue;
       }
 
+      // completeTask 必须基于刚落盘并校准后的计划，不能依赖可能丢失的瞬时进度回调。
+      await persistAndReconcileRuntimeEvidence();
       const evidence = await collectCompletionEvidence({
         taskSessionId: options.taskSessionId,
         workflowType,

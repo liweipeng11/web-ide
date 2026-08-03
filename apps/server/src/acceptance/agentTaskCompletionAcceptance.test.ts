@@ -217,7 +217,7 @@ test("阶段一验收：writeFile 与 runCommand 跨两次审批后仍可完成"
   });
 });
 
-test("阶段一验收：真实计划随跨审批执行推进并在首次完成请求时通过", async () => {
+test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨审批计划", async () => {
   await withWorkspace(async (workspaceRoot) => {
     const previousAiApiKey = config.aiApiKey;
     config.aiApiKey = "";
@@ -265,9 +265,8 @@ test("阶段一验收：真实计划随跨审批执行推进并在首次完成�
         contextBudgetEnabled: false,
         explicitCompletionRollout: strictRollout,
         metricsRecorder: async () => undefined,
-        onTaskProgress: async (phase) => {
-          await advanceTaskPlanProgress(plannedSession.id, phase);
-        },
+        // 模拟 SSE 断线或进度回调丢失，计划只能依靠已落盘 Runtime 证据恢复。
+        onTaskProgress: async () => undefined,
         onAgentStep: (step) => {
           steps.push(step);
           void appendTaskSessionStep(plannedSession.id, step);
@@ -316,7 +315,8 @@ test("阶段一验收：真实计划随跨审批执行推进并在首次完成�
       assert.deepEqual(persisted.runtimeEvidence?.appliedFilePaths, [targetFile]);
       assert.equal(result.agentContext.commandsRun?.at(-1)?.status, "success");
       assert.equal(result.agentContext.commandsRun?.at(-1)?.validation, true);
-      assert.equal((persisted.runtimeEvidence?.lastValidationAt ?? 0) >= (persisted.runtimeEvidence?.lastMutationAt ?? 0), true);
+      assert.equal((persisted.runtimeEvidence?.lastValidationAt ?? 0) > (persisted.runtimeEvidence?.lastMutationAt ?? 0), true);
+      assert.equal(persisted.runtimeEvidence?.lastValidationStatus, "success");
       assert.deepEqual(
         (persisted.planItems ?? []).filter((item) => item.workflowStepId === "implement" || item.workflowStepId === "validate" || item.workflowStepId === "summarize")
           .map((item) => ({ workflowStepId: item.workflowStepId, status: item.status })),
@@ -325,6 +325,70 @@ test("阶段一验收：真实计划随跨审批执行推进并在首次完成�
           { workflowStepId: "validate", status: "completed" },
           { workflowStepId: "summarize", status: "completed" }
         ]
+      );
+    } finally {
+      config.aiApiKey = previousAiApiKey;
+    }
+  });
+});
+
+test("阶段二验收：非审批运行在 completeTask 裁决前由持久化证据校准计划", async () => {
+  await withWorkspace(async () => {
+    const previousAiApiKey = config.aiApiKey;
+    config.aiApiKey = "";
+
+    try {
+      const session = await createTaskSession("直接修改 src/direct.ts 并验证");
+      const plannedSession = await initializeTaskPlan(session, {
+        intent: "edit",
+        confidence: 1,
+        normalizedGoal: session.userGoal,
+        reason: "覆盖非审批路径完成前校准"
+      }, { forceApproval: false });
+      assert.ok(plannedSession);
+
+      let round = 0;
+      const registry = createAgentToolRegistry([
+        tool("replaceInFile", async () => ({ changed: true, filePath: "src/direct.ts" })),
+        tool("runCommand", async () => ({ exitCode: 0, status: "success" })),
+        tool("recordValidation", async (_args, runtime) => {
+          runtime.agentContext.commandsRun = [{
+            command: "pnpm test",
+            status: "success",
+            exitCode: 0,
+            validation: true,
+            finishedAt: Date.now()
+          }];
+          return { status: "success" };
+        }),
+        ...completionAgentToolDefinitions
+      ]);
+
+      const result = await runAgentRuntime({
+        taskSessionId: plannedSession.id,
+        userRequest: plannedSession.userGoal,
+        mode: "act",
+        registry,
+        maxSteps: 5,
+        contextBudgetEnabled: false,
+        explicitCompletionRollout: strictRollout,
+        metricsRecorder: async () => undefined,
+        onTaskProgress: async () => undefined,
+        requestCompletion: async () => {
+          round += 1;
+          if (round === 1) return response(call("direct-edit", "replaceInFile", { filePath: "src/direct.ts" }));
+          if (round === 2) return response(call("direct-validation", "recordValidation"));
+          return response(completion("direct-complete", "直接修改与验证均已完成"));
+        }
+      });
+      const persisted = await getTaskSession(plannedSession.id);
+
+      assert.equal(result.status, "completed");
+      assert.deepEqual(
+        (persisted.planItems ?? [])
+          .filter((item) => ["implement", "validate", "summarize"].includes(item.workflowStepId ?? ""))
+          .map((item) => item.status),
+        ["completed", "completed", "completed"]
       );
     } finally {
       config.aiApiKey = previousAiApiKey;
