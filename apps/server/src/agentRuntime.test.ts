@@ -1169,6 +1169,81 @@ test("agent runtime warns on repeated tool calls with the same arguments", async
   assert.equal(hasRepeatedWarning, true);
 });
 
+test("replaceInFile 失败后必须读取最新文件内容才能重试", async () => {
+  let replaceAttempts = 0;
+  let readAttempts = 0;
+  const requests: Record<string, unknown>[] = [];
+  const registry = createAgentToolRegistry([
+    {
+      name: "replaceInFile",
+      description: "Test exact replacement",
+      parameters: { type: "object", properties: {}, additionalProperties: true },
+      async execute() {
+        replaceAttempts += 1;
+        if (replaceAttempts === 1) {
+          throw Object.assign(new Error("Search block was not found in src/main.js"), {
+            name: "SearchReplaceMismatchError",
+            status: 422,
+            filePath: "src/main.js"
+          });
+        }
+        return { changed: true, filePath: "src/main.js" };
+      },
+      summarize(value) { return value; }
+    },
+    {
+      name: "readFile",
+      description: "Test file read",
+      parameters: { type: "object", properties: {}, additionalProperties: true },
+      async execute() {
+        readAttempts += 1;
+        return { filePath: "src/main.js", content: "import Vue from 'vue'\n" };
+      },
+      summarize(value) { return value; }
+    }
+  ]);
+  let modelStep = 0;
+
+  const result = await runAgentRuntime({
+    userRequest: "修复 src/main.js 的初始化代码",
+    registry,
+    runId: "test-runtime-edit-failure-recovery",
+    requestCompletion: async (body) => {
+      requests.push(body);
+      modelStep += 1;
+      if (modelStep <= 2) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall(`replace-${modelStep}`, "replaceInFile", { filePath: "src/main.js", search: "old", replace: "new" })
+        ] } }] };
+      }
+      if (modelStep === 3) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("read-current", "readFile", { filePath: "src/main.js" })
+        ] } }] };
+      }
+      if (modelStep === 4) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("replace-after-read", "replaceInFile", { filePath: "src/main.js", search: "old", replace: "new" })
+        ] } }] };
+      }
+      return { choices: [{ message: { role: "assistant", content: "已读取最新内容并完成修改。" } }] };
+    }
+  });
+
+  const secondAttemptResults = result.messages
+    .filter((message) => message.role === "tool" && typeof message.content === "string")
+    .map((message) => JSON.parse(message.content as string) as Record<string, unknown>);
+
+  assert.notEqual(result.status, "no_progress");
+  assert.equal(replaceAttempts, 2);
+  assert.equal(readAttempts, 1);
+  assert.equal(secondAttemptResults.some((content) => content.error === "tool_failure_analysis_required"), true);
+  assert.equal(
+    requests[1]?.messages && (requests[1].messages as Array<{ content?: string }>).some((message) => message.content?.includes("SEARCH_BLOCK_NOT_FOUND")),
+    true
+  );
+});
+
 test("agent runtime blocks the third identical tool call and can finish with another tool", async () => {
   let searchExecutions = 0;
   let listExecutions = 0;

@@ -640,6 +640,68 @@ function analyzeToolResult(content: ModelMessage["content"]) {
   }
 }
 
+type ToolFailureDiagnosis = {
+  error: string;
+  errorCode: string;
+  retryable: boolean;
+  suggestedAction: string;
+  filePath?: string;
+};
+
+/** 从结构化工具错误中提取恢复决策；兼容历史仅含 error 字段的工具结果。 */
+function getToolFailureDiagnosis(content: ModelMessage["content"]): ToolFailureDiagnosis | null {
+  if (typeof content !== "string") return null;
+
+  try {
+    const value = JSON.parse(content) as Record<string, unknown>;
+    if (typeof value.error !== "string") return null;
+    return {
+      error: value.error,
+      errorCode: typeof value.errorCode === "string" ? value.errorCode : "TOOL_EXECUTION_FAILED",
+      retryable: value.retryable === true,
+      suggestedAction: typeof value.suggestedAction === "string"
+        ? value.suggestedAction
+        : "请分析错误并调整调用参数；不要重复提交完全相同的调用。",
+      filePath: typeof value.filePath === "string" ? value.filePath : undefined
+    };
+  } catch {
+    return null;
+  }
+}
+
+function createToolFailureRecoveryMessage(toolCall: ModelToolCall, diagnosis: ToolFailureDiagnosis): ModelMessage {
+  const target = diagnosis.filePath || String(toolCall.arguments.filePath || "").trim();
+  const readInstruction = diagnosis.errorCode === "SEARCH_BLOCK_NOT_FOUND" && target
+    ? `下一步必须先读取 ${target} 的当前内容，再决定是否重新编辑。`
+    : "请先分析该错误并调整策略，再决定是否重试。";
+  return {
+    role: "user",
+    content: [
+      `工具 ${toolCall.name} 调用失败（${diagnosis.errorCode}）：${diagnosis.error}`,
+      `建议：${diagnosis.suggestedAction}`,
+      readInstruction,
+      "不要重复提交相同参数；本轮目标是基于新的证据生成不同的下一步。"
+    ].join("\n")
+  };
+}
+
+function createToolFailureAnalysisRequiredMessage(toolCall: ModelToolCall, diagnosis: ToolFailureDiagnosis): ModelMessage {
+  const target = diagnosis.filePath || String(toolCall.arguments.filePath || "").trim();
+  return {
+    role: "tool",
+    toolCallId: toolCall.id,
+    content: JSON.stringify({
+      error: "tool_failure_analysis_required",
+      errorCode: diagnosis.errorCode,
+      toolName: toolCall.name,
+      filePath: target || undefined,
+      instruction: target
+        ? `上一次编辑 ${target} 失败。请先读取该文件的当前内容并调整参数，再重试。`
+        : "上一次工具调用失败。请先分析错误并获取新的上下文，再重试。"
+    })
+  };
+}
+
 function getSafeEditorMetricDelta(content: ModelMessage["content"]) {
   if (typeof content !== "string") return null;
   try {
@@ -1152,6 +1214,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const toolCallsBySignature = new Map<string, ModelToolCall>();
   const repeatCountsByToolCall = new Map<ModelToolCall, number>();
   const repeatedToolWarnings = new Set<string>();
+  // 精确替换失败后，必须读取目标文件以获得新证据，才允许再次编辑该文件。
+  const pendingEditFailureDiagnoses = new Map<string, ToolFailureDiagnosis>();
   let budgetWarningSent = false;
   let consecutiveNoProgressSteps = 0;
   let recoveryAttempts = 0;
@@ -1856,6 +1920,29 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         await persistAgentMessage(options.taskSessionId, blockedMessage);
         continue;
       }
+      const filePath = String(toolCall.arguments.filePath || "").trim();
+      const pendingEditFailure = toolCall.name === "replaceInFile" && filePath
+        ? pendingEditFailureDiagnoses.get(filePath)
+        : undefined;
+      if (pendingEditFailure) {
+        metrics.recordToolFailure();
+        metrics.recordToolResult({ signature, noProgress: true });
+        consecutiveNoProgressSteps += 1;
+        const blockedMessage = createToolFailureAnalysisRequiredMessage(toolCall, pendingEditFailure);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        options.onAgentStep?.(createAgentStep({
+          type: "tool_blocked",
+          toolName: toolCall.name,
+          message: `编辑失败后尚未读取 ${filePath} 的最新内容，Runtime 已阻止重复替换。`
+        }));
+        logAi(runId, "runtime.toolFailureAnalysisRequired", {
+          toolName: toolCall.name,
+          filePath,
+          errorCode: pendingEditFailure.errorCode
+        });
+        continue;
+      }
       const approval = evaluateAgentToolApproval(toAgentToolCall(toolCall), definition);
 
       if (approval.status === "blocked") {
@@ -1963,7 +2050,25 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           lastMutationAt
         });
         const readScope = getSuccessfulReadScope(toolCall);
-        if (!resultMetrics.cached && !resultMetrics.failed && readScope) readScopes.add(readScope);
+        if (!resultMetrics.cached && !resultMetrics.failed && readScope) {
+          readScopes.add(readScope);
+          const readFilePath = String(toolCall.arguments.filePath || "").trim();
+          if (readFilePath && pendingEditFailureDiagnoses.delete(readFilePath)) {
+            // 已读取失败目标的最新内容，旧 search 基于旧文件状态；允许模型用相同参数重新尝试。
+            for (const [previousSignature, previousToolCall] of toolCallsBySignature) {
+              if (previousToolCall.name !== "replaceInFile") continue;
+              if (String(previousToolCall.arguments.filePath || "").trim() !== readFilePath) continue;
+              toolCallCounts.delete(previousSignature);
+              toolCallsBySignature.delete(previousSignature);
+              repeatedToolWarnings.delete(previousSignature);
+            }
+          }
+        }
+        const failureDiagnosis = resultMetrics.failed ? getToolFailureDiagnosis(result.content) : null;
+        if (failureDiagnosis && toolCall.name === "replaceInFile" && failureDiagnosis.retryable) {
+          const failedFilePath = failureDiagnosis.filePath || String(toolCall.arguments.filePath || "").trim();
+          if (failedFilePath) pendingEditFailureDiagnoses.set(failedFilePath, failureDiagnosis);
+        }
         const newCreateIntents = promoteCreateIntentFacts(agentContext, {
           mode,
           workflowType,
@@ -1982,6 +2087,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         consecutiveNoProgressSteps = progressed ? 0 : consecutiveNoProgressSteps + 1;
         messages.push(result);
         await persistAgentMessage(options.taskSessionId, result);
+        if (failureDiagnosis) {
+          const recoveryMessage = createToolFailureRecoveryMessage(toolCall, failureDiagnosis);
+          messages.push(recoveryMessage);
+          await persistAgentMessage(options.taskSessionId, recoveryMessage);
+        }
         const newEvidence = (agentContext.negativeEvidence || []).filter((item) => {
           if (!item.exhaustive) return false;
           const key = `${item.kind}:${item.scope}:${item.query}`;

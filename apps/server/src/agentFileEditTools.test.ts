@@ -309,10 +309,18 @@ test("replaceInFile 失败时会记录 file_edit_failed 事件", async () => {
         taskSessionId: session.id
       })
     );
-    const content = JSON.parse(message.content) as { error?: string };
+    const content = JSON.parse(message.content) as {
+      error?: string;
+      errorCode?: string;
+      retryable?: boolean;
+      suggestedAction?: string;
+    };
     const loaded = await getTaskSession(session.id);
 
     assert.match(content.error || "", /Search block was not found/);
+    assert.equal(content.errorCode, "SEARCH_BLOCK_NOT_FOUND");
+    assert.equal(content.retryable, true);
+    assert.match(content.suggestedAction || "", /先读取 target\.ts/);
     assert.deepEqual(
       loaded.fileEditEvents?.map((event) => event.type),
       ["file_edit_started", "file_edit_failed"]

@@ -17,6 +17,15 @@ import { createReferenceCheckKey, parseReferenceCheckKey } from "./taskWorkflow/
 
 export type { AgentContext, AgentToolCall, AgentToolMessage, AgentToolRuntime } from "./agentToolTypes.js";
 
+type ToolFailurePayload = {
+  error: string;
+  errorCode: string;
+  retryable: boolean;
+  suggestedAction: string;
+  toolName: string;
+  status?: number;
+};
+
 // 中等复杂度任务经常需要同时比对多个入口、路由和组件文件，5 个文件的上限过于激进，
 // 容易在真正进入修改/审批前就提前失败。
 const MAX_AUTO_READ_FILES = 8;
@@ -1423,6 +1432,70 @@ function withCacheMarker(result: unknown, toolName: string) {
   };
 }
 
+/**
+ * 将工具异常转换为模型可直接判断的结构化结果。
+ * 错误作为数据返回而非抛出，便于 Agent 基于错误码选择读取、修正参数或停止重试。
+ */
+function createToolFailurePayload(toolName: string, args: Record<string, unknown>, error: unknown): ToolFailurePayload & Record<string, unknown> {
+  const exception = error instanceof Error ? error : null;
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const status = typeof record.status === "number" ? record.status : undefined;
+  const filePath = typeof record.filePath === "string"
+    ? record.filePath
+    : typeof args.filePath === "string" ? args.filePath : undefined;
+  const message = exception?.message || `${toolName} failed`;
+
+  if (exception?.name === "SearchReplaceMismatchError") {
+    return {
+      ...args,
+      error: message,
+      errorCode: "SEARCH_BLOCK_NOT_FOUND",
+      retryable: true,
+      suggestedAction: `先读取 ${filePath || "目标文件"} 的当前内容，基于最新文本重新生成 search；不要重复提交相同的 replaceInFile 参数。`,
+      toolName,
+      status,
+      ...(filePath ? { filePath } : {})
+    };
+  }
+
+  if (status === 404) {
+    return {
+      ...args,
+      error: message,
+      errorCode: "RESOURCE_NOT_FOUND",
+      retryable: true,
+      suggestedAction: "先检查目标路径是否存在；若任务明确要求新建文件，请改用允许创建的写入工具。",
+      toolName,
+      status,
+      ...(filePath ? { filePath } : {})
+    };
+  }
+
+  if (status === 422) {
+    return {
+      ...args,
+      error: message,
+      errorCode: "INVALID_TOOL_INPUT",
+      retryable: true,
+      suggestedAction: "检查工具参数与目标文件当前状态，修正参数后再重试；不要重复提交完全相同的调用。",
+      toolName,
+      status,
+      ...(filePath ? { filePath } : {})
+    };
+  }
+
+  return {
+    ...args,
+    error: message,
+    errorCode: "TOOL_EXECUTION_FAILED",
+    retryable: false,
+    suggestedAction: "检查错误详情与当前上下文；若无法定位可恢复原因，请停止重试并说明阻塞条件。",
+    toolName,
+    status,
+    ...(filePath ? { filePath } : {})
+  };
+}
+
 export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: AgentToolRuntime): Promise<AgentToolMessage> {
   const toolName = toolCall.function.name;
   const args = parseArguments(toolCall.function.arguments);
@@ -1504,6 +1577,6 @@ export async function executeAgentToolCall(toolCall: AgentToolCall, runtime: Age
     const message = error instanceof Error ? error.message : `${toolName} failed`;
     logAi(runtime.runId, `tool.${toolName}.error`, { args, error: message });
     runtime.onAgentStep?.(createAgentStep({ type: "error", message: `${toolName} failed: ${message}` }));
-    return { role: "tool", tool_call_id: toolCall.id, content: JSON.stringify({ error: message, ...args }) };
+    return { role: "tool", tool_call_id: toolCall.id, content: JSON.stringify(createToolFailurePayload(toolName, args, error)) };
   }
 }
