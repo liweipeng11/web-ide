@@ -9,7 +9,7 @@ import { createAgentToolRegistry } from "../agentToolRegistry.js";
 import type { AgentToolDefinition, AgentToolRuntime } from "../agentToolTypes.js";
 import { config } from "../config.js";
 import { writeFile as writeWorkspaceContent } from "../fileEditService.js";
-import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics } from "../observability/index.js";
+import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics, type RunMetrics } from "../observability/index.js";
 import { advanceTaskPlanProgress, appendTaskSessionStep, createTaskSession, decideTaskSessionApproval, getTaskSession } from "../taskSessionStore.js";
 import { finalizeTaskSession } from "../taskSessionFinalizer.js";
 import { initializeTaskPlan } from "../taskPlanService.js";
@@ -233,6 +233,8 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
       assert.ok(plannedSession);
       assert.ok(plannedSession.planItems);
       const steps: AgentStep[] = [];
+      const runMetrics: RunMetrics[] = [];
+      const requestedToolNames: string[] = [];
       const targetFile = "src/phase-zero.ts";
       const registry = createAgentToolRegistry([
         tool("writeFile", async (args) => {
@@ -264,7 +266,7 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
         maxSteps: 3,
         contextBudgetEnabled: false,
         explicitCompletionRollout: strictRollout,
-        metricsRecorder: async () => undefined,
+        metricsRecorder: async (metrics) => { runMetrics.push(metrics); },
         // 模拟 SSE 断线或进度回调丢失，计划只能依靠已落盘 Runtime 证据恢复。
         onTaskProgress: async () => undefined,
         onAgentStep: (step) => {
@@ -281,10 +283,13 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
       const waitingForWrite = await runAgentRuntime({
         ...common,
         runtimeEvidence: plannedSession.runtimeEvidence,
-        requestCompletion: async () => response(call("phase-zero-write", "writeFile", {
-          filePath: targetFile,
-          content: "export const phaseZero = true;\n"
-        }))
+        requestCompletion: async () => {
+          requestedToolNames.push("writeFile");
+          return response(call("phase-zero-write", "writeFile", {
+            filePath: targetFile,
+            content: "export const phaseZero = true;\n"
+          }));
+        }
       });
       assert.equal(waitingForWrite.status, "awaiting_approval");
       await decideTaskSessionApproval(plannedSession.id, waitingForWrite.pendingToolCall!.actionId, "approved");
@@ -293,7 +298,10 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
         ...common,
         pendingToolCall: waitingForWrite.pendingToolCall!,
         decision: "approved",
-        requestCompletion: async () => response(call("phase-zero-validate", "runCommand", { command: "pnpm build" }))
+        requestCompletion: async () => {
+          requestedToolNames.push("runCommand");
+          return response(call("phase-zero-validate", "runCommand", { command: "pnpm build" }));
+        }
       });
       assert.equal(waitingForValidation.status, "awaiting_approval");
       await decideTaskSessionApproval(plannedSession.id, waitingForValidation.pendingToolCall!.actionId, "approved");
@@ -304,21 +312,37 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
         maxSteps: 1,
         pendingToolCall: waitingForValidation.pendingToolCall!,
         decision: "approved",
-        requestCompletion: async () => response(completion("phase-zero-complete", "文件与构建均已完成"))
+        requestCompletion: async () => {
+          requestedToolNames.push("completeTask");
+          return response(completion("phase-zero-complete", "文件与构建均已完成"));
+        }
+      });
+      await finalizeTaskSession({
+        taskSessionId: plannedSession.id,
+        runtimeResult: result,
+        source: "agent_runtime",
+        mode: "act",
+        workflowType: "feature"
       });
       const persisted = await getTaskSession(plannedSession.id);
-      const rejected = steps.find((step): step is Extract<AgentStep, { type: "completion_rejected" }> => step.type === "completion_rejected");
+      const rejected = steps.filter((step): step is Extract<AgentStep, { type: "completion_rejected" }> => step.type === "completion_rejected");
+      const systemPlanItems = (persisted.planItems ?? []).filter((item) => item.workflowStepId);
+      const metricTotal = (field: "completionAcceptedCount" | "completionRejectedCount" | "completionLoopStoppedCount" | "providerCallCount") =>
+        runMetrics.reduce((total, metrics) => total + metrics[field], 0);
 
       assert.equal(result.status, "completed");
-      assert.equal(rejected, undefined);
+      assert.equal(persisted.status, "success");
+      assert.equal(rejected.length, 0);
       assert.equal(await fs.readFile(path.join(workspaceRoot, targetFile), "utf8"), "export const phaseZero = true;\n");
       assert.deepEqual(persisted.runtimeEvidence?.appliedFilePaths, [targetFile]);
       assert.equal(result.agentContext.commandsRun?.at(-1)?.status, "success");
       assert.equal(result.agentContext.commandsRun?.at(-1)?.validation, true);
       assert.equal((persisted.runtimeEvidence?.lastValidationAt ?? 0) > (persisted.runtimeEvidence?.lastMutationAt ?? 0), true);
       assert.equal(persisted.runtimeEvidence?.lastValidationStatus, "success");
+      assert.ok(systemPlanItems.length > 0);
+      assert.equal(systemPlanItems.every((item) => item.status === "completed"), true);
       assert.deepEqual(
-        (persisted.planItems ?? []).filter((item) => item.workflowStepId === "implement" || item.workflowStepId === "validate" || item.workflowStepId === "summarize")
+        systemPlanItems.filter((item) => item.workflowStepId === "implement" || item.workflowStepId === "validate" || item.workflowStepId === "summarize")
           .map((item) => ({ workflowStepId: item.workflowStepId, status: item.status })),
         [
           { workflowStepId: "implement", status: "completed" },
@@ -326,6 +350,18 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
           { workflowStepId: "summarize", status: "completed" }
         ]
       );
+      // 阶段五发布门槛：正常路径只完成一次，不允许进入拒绝或相同证据熔断。
+      assert.equal(metricTotal("completionRejectedCount"), 0);
+      assert.equal(metricTotal("completionAcceptedCount"), 1);
+      assert.equal(metricTotal("completionLoopStoppedCount"), 0);
+      assert.equal(metricTotal("providerCallCount"), 3);
+      assert.equal(runMetrics.at(-1)?.result.status, "completed");
+      assert.equal(runMetrics.at(-1)?.result.validationStatus, "passed");
+      assert.equal(runMetrics.every((metrics) => metrics.tools.repeatedCalls === 0 && metrics.tools.mostRepeatedCall === null), true);
+      assert.deepEqual(requestedToolNames, ["writeFile", "runCommand", "completeTask"]);
+      assert.equal(requestedToolNames.filter((name) => name === "completeTask").length, 1);
+      assert.equal(requestedToolNames.slice(requestedToolNames.indexOf("runCommand") + 1).some((name) => /^(readFile|listFiles|search)/.test(name)), false);
+      assert.doesNotMatch(JSON.stringify(steps), /PENDING_PLAN|UNCHANGED_COMPLETION_EVIDENCE/);
     } finally {
       config.aiApiKey = previousAiApiKey;
     }
@@ -569,7 +605,7 @@ test("阶段六验收：修改后未验证与验证后再次修改均不得完�
   }
 });
 
-test("阶段六验收：无文件变化时返回结构化拒绝并在第三次相同请求后熔断", async () => {
+test("阶段六验收：无文件变化时返回结构化拒绝并在一次无效恢复后熔断", async () => {
   const steps: Array<{ type: string; rejectionCode?: string }> = [];
   let providerCallCount = 0;
   const result = await runAgentRuntime({
@@ -580,7 +616,7 @@ test("阶段六验收：无文件变化时返回结构化拒绝并在第三次�
     requestCompletion: async () => { providerCallCount += 1; return response(completion(`unchanged-${providerCallCount}`)); }
   });
   assert.equal(result.status, "incomplete");
-  assert.equal(providerCallCount, 3);
+  assert.equal(providerCallCount, 2);
   assert.equal(steps[0]?.type, "completion_rejected");
   assert.equal(steps[0]?.rejectionCode, "NO_MUTATION_EVIDENCE");
   assert.equal(steps.at(-1)?.rejectionCode, "UNCHANGED_COMPLETION_EVIDENCE");

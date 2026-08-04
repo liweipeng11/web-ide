@@ -22,6 +22,7 @@
     "verify:completion-status-presentation": "powershell -ExecutionPolicy Bypass -File scripts/check-completion-status-presentation.ps1",
     "verify:task-completion-observability": "powershell -ExecutionPolicy Bypass -File scripts/check-task-completion-observability.ps1",
     "verify:task-plan-runtime-sync": "powershell -ExecutionPolicy Bypass -File scripts/check-task-plan-runtime-sync.ps1",
+    "verify:release:task-plan-runtime-sync": "pnpm verify:task-plan-runtime-sync && pnpm verify:agent-new-file-stage7 && pnpm verify:task-completion-stage8",
     "verify:state-storage-integrity": "powershell -ExecutionPolicy Bypass -File scripts/check-state-storage-integrity.ps1",
     "verify:safe-editor-stage0": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage0.ps1",
     "verify:safe-editor-stage1": "powershell -ExecutionPolicy Bypass -File scripts/check-safe-editor-stage1.ps1",

@@ -16,6 +16,16 @@ pnpm verify:stage5
 
 该命令串联服务端全量测试、服务端与前端类型检查、前端生产构建，并生成 `apps/server/artifacts/evaluation/stage-5-integration.json`。验收报告覆盖四项默认启用检查、四项独立回退检查和十类离线集成场景，完成度低于 90% 时命令返回失败。
 
+## 任务计划与 Runtime 同步发布门禁
+
+涉及任务计划、审批恢复、Runtime 执行证据、完成门禁或任务状态持久化的修改，发布前必须执行：
+
+```bash
+pnpm verify:release:task-plan-runtime-sync
+```
+
+该命令依次执行任务计划与 Runtime 的九步专项门禁、新文件路由创建验收和任务完成 Stage 8 验收。专项门禁包含跨两次审批的真实文件写入与构建路径，并断言最终状态为 `success`、所有系统计划步骤完成、验证通过、`completeTask` 仅调用一次，且不存在 `PENDING_PLAN` 或 `UNCHANGED_COMPLETION_EVIDENCE`。
+
 ## 功能特性
 
 - 在浏览器 UI 中打开并恢复本地项目工作区。
