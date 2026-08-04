@@ -1125,58 +1125,64 @@ function parseArguments(rawArguments: string) {
 function getToolPurpose(toolName: string, args: Record<string, unknown>) {
   if (toolName === "analyzeImpact") {
     const count = Array.isArray(args.changes) ? args.changes.length : 0;
-    return `Use analyzeImpact to inspect direct and indirect consumers for ${count || "the planned"} change target(s).`;
+    return `分析 ${count || "计划中的"} 个变更目标的直接和间接影响，避免遗漏关联文件。`;
   }
 
   if (toolName === "analyzeSymbolGraph") {
-    return `Use analyzeSymbolGraph to inspect ${String(args.kind || "symbol relationships")} for "${String(args.symbolName || args.filePath || "the selected scope")}".`;
+    return `分析“${String(args.symbolName || args.filePath || "当前范围")}”的${String(args.kind || "符号")}关系，为后续修改确认依赖。`;
   }
 
   if (toolName === "inspectProject") {
-    return "Use inspectProject to verify package manager, framework, and dependency versions before choosing APIs.";
+    return "检查项目技术栈、包管理器和依赖版本，以选择兼容的实现方式。";
   }
 
   if (toolName === "searchCode") {
-    return `Use searchCode to search workspace code with keyword "${String(args.query || "").trim()}".`;
+    return `在工作区搜索“${String(args.query || "").trim()}”，定位现有实现和可复用代码。`;
   }
 
   if (toolName === "searchCodeRegex") {
-    return `Use searchCodeRegex to search workspace code with regex "${String(args.regex || "").trim()}".`;
+    return `用正则“${String(args.regex || "").trim()}”搜索工作区，定位符合模式的代码。`;
   }
 
   if (toolName === "listFiles") {
-    return `Use listFiles to inspect workspace directory "${String(args.path || "").trim() || "."}" without reading file contents.`;
+    return `查看“${String(args.path || "").trim() || "."}”下的目录结构，确定相关文件位置。`;
   }
 
   if (toolName === "searchFilesByName") {
-    return `Use searchFilesByName to find workspace paths matching "${String(args.query || "").trim()}".`;
+    return `按名称查找“${String(args.query || "").trim()}”相关文件，缩小需要阅读的范围。`;
   }
 
   if (toolName === "listCodeDefinitionNames") {
-    return `Use listCodeDefinitionNames to inspect top-level definitions under "${String(args.path || "").trim() || "."}" before reading full files.`;
+    return `提取“${String(args.path || "").trim() || "."}”中的顶层定义，快速判断相关入口。`;
   }
 
   if (toolName === "readFile") {
-    return `Use readFile to load the first chunk of workspace file "${String(args.filePath || "").trim()}" as context.`;
+    return `读取“${String(args.filePath || "").trim()}”的内容，了解现有实现后再作决策。`;
   }
 
   if (toolName === "readFileChunk") {
-    return `Use readFileChunk to load lines ${String(args.startLine || "1")} through ${String(args.endLine || "the default chunk end")} from workspace file "${String(args.filePath || "").trim()}".`;
+    return `读取“${String(args.filePath || "").trim()}”第 ${String(args.startLine || "1")} 至 ${String(args.endLine || "默认结束行")} 行，补充所需上下文。`;
   }
 
   if (toolName === "readFileRange") {
-    return `Use readFileRange to load lines ${String(args.startLine || "?")} through ${String(args.endLine || "?")} from workspace file "${String(args.filePath || "").trim()}".`;
+    return `读取“${String(args.filePath || "").trim()}”第 ${String(args.startLine || "?")} 至 ${String(args.endLine || "?")} 行，核对具体实现细节。`;
   }
 
   if (toolName === "replaceInFile") {
-    return `Use replaceInFile to edit workspace file "${String(args.filePath || "").trim()}" with an exact search/replace block.`;
+    return `在“${String(args.filePath || "").trim()}”中执行精确替换，完成已确认的局部修改。`;
   }
 
   if (toolName === "writeFile") {
-    return `Use writeFile to write the full latest content of workspace file "${String(args.filePath || "").trim()}".`;
+    return `写入“${String(args.filePath || "").trim()}”的最新完整内容，落地已确认的修改。`;
   }
 
-  return `Use ${toolName}.`;
+  if (toolName === "runCommand") return `运行命令“${String(args.command || "").trim()}”，执行验证或推进当前任务。`;
+  if (toolName === "proposePatch") return "生成待审阅补丁，汇总建议的文件修改而不直接写入工作区。";
+  if (toolName === "applyPatch") return "应用已生成的补丁，将审阅后的修改写入工作区。";
+  if (toolName === "deleteFile") return `删除“${String(args.filePath || args.path || "").trim()}”，移除不再需要的文件。`;
+  if (toolName === "automateBrowser") return `在“${String(args.url || "").trim()}”执行浏览器自动化，完成必要的页面检查或交互。`;
+  if (toolName === "askUser") return "向用户补充询问必要信息，避免在关键条件不明确时继续执行。";
+  return `调用 ${toolName}，获取推进当前任务所需的信息或执行结果。`;
 }
 
 function createToolApprovalStep(toolName: string, args: Record<string, unknown>) {

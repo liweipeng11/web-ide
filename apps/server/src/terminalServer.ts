@@ -41,6 +41,23 @@ function getShellLabel(shell: string) {
   return path.basename(shell).replace(/\.exe$/i, "");
 }
 
+function getTerminalOptions(workspaceRoot: string) {
+  return {
+    name: "xterm-256color",
+    cols: 80,
+    rows: 24,
+    cwd: workspaceRoot,
+    env: {
+      ...process.env,
+      TERM: "xterm-256color"
+    },
+    // node-pty 1.1.x 的 ConPTY 清理流程会启动独立进程调用 AttachConsole；
+    // 在部分 Windows 会话（例如从 PowerShell 启动的开发服务）中该调用会失败并使服务进程退出。
+    // 回退到 winpty 可避免该不稳定的控制台枚举路径，终端输入输出功能不受影响。
+    ...(process.platform === "win32" ? { useConpty: false } : {})
+  };
+}
+
 function parseMessage(data: RawData): TerminalClientMessage | null {
   try {
     const text = typeof data === "string" ? data : data.toString("utf8");
@@ -128,16 +145,7 @@ export function attachTerminalServer(server: Server, options: { executionService
         const workspaceRoot = getWorkspaceRoot() || process.cwd();
         const shell = getShell();
 
-        terminal = pty.spawn(shell, [], {
-          name: "xterm-256color",
-          cols: 80,
-          rows: 24,
-          cwd: workspaceRoot,
-          env: {
-            ...process.env,
-            TERM: "xterm-256color"
-          }
-        });
+        terminal = pty.spawn(shell, [], getTerminalOptions(workspaceRoot));
 
         writeJson(socket, {
           type: "ready",

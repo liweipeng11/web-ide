@@ -264,7 +264,7 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
     const purpose = getStringField(step.input, "purpose");
 
     if (purpose) {
-      return { label: "Tool", title: purpose, detail: getStringField(step.input, "toolDescription") || step.toolName };
+      return { label: "调用目的", title: purpose, detail: getStringField(step.input, "toolDescription") || step.toolName };
     }
 
     if (step.toolName === "searchCode") {
@@ -299,7 +299,7 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
       return { label: "Chunk", title: `Reading ${filePath}`, detail: range };
     }
 
-    return { label: "Tool", title: `Calling ${step.toolName}`, detail: summarizeUnknown(step.input) };
+    return { label: "调用目的", title: `调用 ${step.toolName} 以推进当前任务`, detail: summarizeUnknown(step.input) };
   }
 
   if (step.type === "tool_result") {

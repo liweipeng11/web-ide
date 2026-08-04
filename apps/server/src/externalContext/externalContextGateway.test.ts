@@ -185,10 +185,10 @@ test("Plan 与 Act 模式注册外部只读工具，交互式浏览仅在 Act �
     { id: "browser-action", type: "function", function: { name: "automateBrowser", arguments: JSON.stringify({ url: "https://example.com", actions: [{ type: "click", selector: "#continue" }] }) } },
     getAgentModeConfig("act").registry.get("automateBrowser")
   );
-  assert.equal(browserApproval.status, "requires_approval");
+  assert.equal(browserApproval.status, "auto_approved");
   const browserLoadApproval = evaluateAgentToolApproval(
     { id: "browser-load", type: "function", function: { name: "automateBrowser", arguments: JSON.stringify({ url: "https://example.com" }) } },
     getAgentModeConfig("act").registry.get("automateBrowser")
   );
-  assert.equal(browserLoadApproval.status, "requires_approval");
+  assert.equal(browserLoadApproval.status, "auto_approved");
 });

@@ -1611,10 +1611,22 @@ test("generating a patch resets the no-progress counter", async () => {
   if (pendingPatchId) deletePendingPatch(pendingPatchId);
 });
 
-test("agent runtime pauses before approval-required tools", async () => {
+test("agent runtime directly executes medium-risk tools", async () => {
   let executed = false;
   const registry = createAgentToolRegistry([createRuntimeTestTool("runCommand", { exitCode: 0 }, () => (executed = true))]);
   const steps: Array<{ type: string; status?: string; actionType?: string }> = [];
+  const responses: AgentCompletionResponse[] = [
+    {
+      choices: [{
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "tool-command-1", type: "function", function: { name: "runCommand", arguments: JSON.stringify({ command: "pnpm test" }) } }]
+        }
+      }]
+    },
+    { choices: [{ message: { role: "assistant", content: "测试已执行。" } }] }
+  ];
 
   const result = await runAgentRuntime({
     userRequest: "Run tests",
@@ -1624,33 +1636,17 @@ test("agent runtime pauses before approval-required tools", async () => {
     onAgentStep(step) {
       steps.push({ type: step.type, status: step.type === "approval_request" ? step.status : undefined, actionType: step.type === "approval_request" ? step.actionType : undefined });
     },
-    requestCompletion: async () => ({
-      choices: [
-        {
-          message: {
-            role: "assistant",
-            content: null,
-            tool_calls: [
-              {
-                id: "tool-command-1",
-                type: "function",
-                function: { name: "runCommand", arguments: JSON.stringify({ command: "pnpm test" }) }
-              }
-            ]
-          }
-        }
-      ]
-    })
+    requestCompletion: async () => {
+      const response = responses.shift();
+      assert.ok(response);
+      return response;
+    }
   });
-  // Stop at the first approval-required tool; later tools are neither shown nor executed early.
-  assert.equal(result.status, "awaiting_approval");
-  assert.equal(result.pendingToolCall?.toolName, "runCommand");
-  assert.equal(result.pendingToolCall?.riskLevel, "medium");
-  assert.deepEqual(result.pendingToolCall?.agentContext?.filesRead, ["src/service.ts"]);
-  assert.equal(result.completionEvidence?.pendingApprovalCount, 1);
-  assert.match(result.statusReason ?? "", /等待用户审批/);
-  assert.equal(executed, false);
-  assert.deepEqual(steps, [{ type: "approval_request", status: "pending", actionType: "run_command" }]);
+  assert.equal(result.status, "completed");
+  assert.equal(result.pendingToolCall, null);
+  assert.equal(result.completionEvidence?.pendingApprovalCount, 0);
+  assert.equal(executed, true);
+  assert.equal(steps.some((step) => step.type === "approval_request"), false);
 });
 
 test("agent runtime emits no approval cards for auto-approved tools", async () => {
@@ -1698,11 +1694,11 @@ test("agent runtime emits no approval cards for auto-approved tools", async () =
   assert.equal(steps.some((step) => step.type === "approval_request"), false);
 });
 
-test("agent runtime exposes only the first pending approval from a tool batch", async () => {
-  let runCommandExecuted = false;
+test("agent runtime exposes only the first high-risk approval from a tool batch", async () => {
+  let deleteFileExecuted = false;
   let applyPatchExecuted = false;
   const registry = createAgentToolRegistry([
-    createRuntimeTestTool("runCommand", { exitCode: 0 }, () => (runCommandExecuted = true)),
+    createRuntimeTestTool("deleteFile", { deleted: true }, () => (deleteFileExecuted = true)),
     createRuntimeTestTool("applyPatch", { files: [] }, () => (applyPatchExecuted = true))
   ]);
   const steps: Array<{ type: string; actionType?: string; status?: string }> = [];
@@ -1721,11 +1717,7 @@ test("agent runtime exposes only the first pending approval from a tool batch", 
             role: "assistant",
             content: null,
             tool_calls: [
-              {
-                id: "tool-command-first",
-                type: "function",
-                function: { name: "runCommand", arguments: JSON.stringify({ command: "pnpm test" }) }
-              },
+              { id: "tool-delete-first", type: "function", function: { name: "deleteFile", arguments: JSON.stringify({ filePath: "src/obsolete.ts" }) } },
               {
                 id: "tool-patch-second",
                 type: "function",
@@ -1740,10 +1732,10 @@ test("agent runtime exposes only the first pending approval from a tool batch", 
 
   // Cline 濡炲瀛╅悧鎼佸及椤栫偘娴烽柛鎺撳椤戝洦绋夐埀顒佺▔椤忓嫮绐￠悗鍏夊墲婢规帒顔忛妷銉ュ緮閻忓繗椴稿▓蹇涘磻濠婃劗绀夐柛姘捣閻㈣顔忛妷銉ュ緮濞戞挸绉崇槐浼村箵閹邦剙顤呴悘鐐存礈閵囨岸骞嬮弽銊モ挃閻炴稑琚埀?
   assert.equal(result.status, "awaiting_approval");
-  assert.equal(result.pendingToolCall?.toolName, "runCommand");
-  assert.equal(runCommandExecuted, false);
+  assert.equal(result.pendingToolCall?.toolName, "deleteFile");
+  assert.equal(deleteFileExecuted, false);
   assert.equal(applyPatchExecuted, false);
-  assert.deepEqual(steps, [{ type: "approval_request", actionType: "run_command", status: "pending" }]);
+  assert.deepEqual(steps, [{ type: "approval_request", actionType: "delete_file", status: "pending" }]);
 });
 
 test("agent runtime feeds blocked unknown tools back to the model", async () => {

@@ -416,7 +416,7 @@ test("read tools emit activity steps without an approval card", async () => {
   await fs.writeFile(path.join(workspaceRoot, "sample.txt"), "hello\n", "utf8");
   await setWorkspaceRoot(workspaceRoot, { persist: false });
 
-  const steps: Array<{ type: string; actionType?: string; status?: string; toolName?: string }> = [];
+  const steps: Array<{ type: string; actionType?: string; status?: string; toolName?: string; input?: unknown }> = [];
   await executeAgentToolCall(
     createToolCall("readFile", { filePath: "sample.txt" }),
     createAgentToolRuntime({
@@ -432,6 +432,7 @@ test("read tools emit activity steps without an approval card", async () => {
   assert.equal(steps.some((step) => step.type === "approval_request"), false);
   assert.equal(steps[0].type, "tool_call");
   assert.equal(steps[0].toolName, "readFile");
+  assert.match(String((steps[0].input as Record<string, unknown>).purpose), /读取“sample.txt”/);
 });
 
 test("readFileChunk returns an explicit cached marker for duplicate calls", async () => {

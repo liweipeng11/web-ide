@@ -198,7 +198,8 @@ export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: 
     return { status: "auto_approved", step };
   }
 
-  if (requiresUserApproval(toolName, args) || riskLevel !== "low") {
+  // 仅高风险操作需要暂停等待人工确认；中风险操作会记录在活动流中并直接执行。
+  if (requiresUserApproval(toolName, args) && riskLevel === "high") {
     return { status: "requires_approval", step, riskLevel };
   }
 
