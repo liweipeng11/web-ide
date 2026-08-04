@@ -5,7 +5,10 @@ export type CompletionEvidence = {
   workflowType?: TaskWorkflowType;
   mutationExpected: boolean;
   changedFileCount: number;
+  /** 历史生成数量仅用于审计，不能据此判断补丁当前是否仍待处理。 */
   generatedPatchCount: number;
+  /** 当前仍存在于 pending patch store、尚未应用或拒绝的补丁数量。 */
+  pendingPatchCount?: number;
   pendingPlanCount: number;
   blockedPlanCount: number;
   pendingPlanItems?: PendingPlanItemSummary[];
@@ -36,6 +39,7 @@ export type CompletionPolicyInput = {
 export type CompletionEvidenceFingerprintInput = Pick<CompletionEvidence,
   | "changedFileCount"
   | "generatedPatchCount"
+  | "pendingPatchCount"
   | "validationStatus"
   | "pendingPlanCount"
   | "blockedPlanCount"
@@ -74,6 +78,7 @@ export function createCompletionEvidenceFingerprint(evidence: CompletionEvidence
   return JSON.stringify([
     evidence.changedFileCount,
     evidence.generatedPatchCount,
+    evidence.pendingPatchCount ?? 0,
     evidence.validationStatus,
     evidence.pendingPlanCount,
     evidence.blockedPlanCount,
@@ -142,7 +147,7 @@ export function finalContentHasNonRecoverableBlock(content: string) {
 export function evaluateAgentCompletion(input: CompletionPolicyInput): CompletionDecision {
   const { evidence } = input;
 
-  if (evidence.generatedPatchCount > 0) {
+  if ((evidence.pendingPatchCount ?? 0) > 0) {
     return {
       status: "awaiting_approval",
       code: "PENDING_APPROVAL",
@@ -276,7 +281,7 @@ export function createCompletionRecoveryMessage(decision: CompletionDecision, ev
       "Runtime 完成前检查未通过，本轮不能结束。",
       `拒绝代码：${decision.code}`,
       `原因：${decision.reason}`,
-      `当前证据：待审核补丁 ${evidence.generatedPatchCount} 个，已变更文件 ${evidence.changedFileCount} 个，验证状态 ${evidence.validationStatus}，未完成计划 ${evidence.pendingPlanCount} 项，阻塞计划 ${evidence.blockedPlanCount} 项，待审批 ${evidence.pendingApprovalCount} 项，运行中命令 ${evidence.activeCommandCount} 个，失败工具 ${evidence.failedToolCallCount} 次。`,
+      `当前证据：待审核补丁 ${evidence.pendingPatchCount ?? 0} 个，历史生成补丁 ${evidence.generatedPatchCount} 个，已变更文件 ${evidence.changedFileCount} 个，验证状态 ${evidence.validationStatus}，未完成计划 ${evidence.pendingPlanCount} 项，阻塞计划 ${evidence.blockedPlanCount} 项，待审批 ${evidence.pendingApprovalCount} 项，运行中命令 ${evidence.activeCommandCount} 个，失败工具 ${evidence.failedToolCallCount} 次。`,
       `建议动作：${decision.suggestedAction ?? "根据当前证据补齐未完成条件。"}`,
       ...(decision.pendingPlanItems?.length
         ? [`具体未完成计划：${decision.pendingPlanItems.map((item) => `${item.workflowStepId ?? "custom"}:${item.title}（${item.status}）`).join("；")}`]

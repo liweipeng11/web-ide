@@ -28,9 +28,9 @@ function createEvidence(overrides: Partial<CompletionEvidence> = {}): Completion
   };
 }
 
-test("编辑任务生成补丁后进入 awaiting_approval", () => {
+test("编辑任务存在待处理补丁后进入 awaiting_approval", () => {
   const decision = evaluateAgentCompletion({
-    evidence: createEvidence({ generatedPatchCount: 1 }),
+    evidence: createEvidence({ generatedPatchCount: 1, pendingPatchCount: 1 }),
     finalContent: "已生成补丁。",
     recoveryAttempted: false,
     editingToolsAvailable: true
@@ -38,6 +38,22 @@ test("编辑任务生成补丁后进入 awaiting_approval", () => {
 
   assert.equal(decision.status, "awaiting_approval");
   assert.equal(decision.shouldRecover, false);
+});
+
+test("历史补丁已经应用后不再进入 awaiting_approval", () => {
+  const decision = evaluateAgentCompletion({
+    evidence: createEvidence({
+      generatedPatchCount: 1,
+      pendingPatchCount: 0,
+      changedFileCount: 2,
+      validationStatus: "passed"
+    }),
+    finalContent: "补丁已应用且验证通过。",
+    recoveryAttempted: false,
+    editingToolsAvailable: true
+  });
+
+  assert.equal(decision.status, "completed");
 });
 
 test("文件已写入、验证通过且实现计划完成时才返回 completed", () => {

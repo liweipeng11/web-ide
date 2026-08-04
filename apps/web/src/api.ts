@@ -537,7 +537,9 @@ export type ReferenceResolutionStatus =
 export type CompletionEvidence = {
   workflowType?: TaskWorkflowType;
   mutationExpected: boolean;
+  // 历史生成数量与当前待处理数量分离，避免已应用补丁继续显示为等待审批。
   generatedPatchCount: number;
+  pendingPatchCount?: number;
   changedFileCount: number;
   pendingPlanCount: number;
   blockedPlanCount: number;

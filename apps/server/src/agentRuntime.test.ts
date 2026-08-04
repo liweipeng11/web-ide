@@ -10,6 +10,19 @@ import { createTaskWorkflow } from "./taskWorkflow/index.js";
 import type { RunMetrics } from "./observability/index.js";
 import { resolveAgentNoProgressPolicy, resolveAgentRepeatToolCallThresholds } from "./config.js";
 import { completionAgentToolDefinitions } from "./agentCompletionTools.js";
+import { createPendingPatch, deletePendingPatch } from "./patchStore.js";
+
+function createTestPendingPatch() {
+  return createPendingPatch([{
+    filePath: "src/app.ts",
+    path: "src/app.ts",
+    status: "modify",
+    summary: "测试待处理补丁",
+    diffHtml: "",
+    oldContent: "before",
+    newContent: "after"
+  }]);
+}
 
 function createRuntimeTestTool(name: string, result: unknown, onExecute?: (runtime: AgentToolRuntime) => void): AgentToolDefinition {
   return {
@@ -1027,6 +1040,7 @@ test("agent runtime hard-blocks hidden broad searches during convergence", async
 });
 
 test("agent runtime forces the final request without tools and prioritizes pending patch context", async () => {
+  const pendingPatch = createTestPendingPatch();
   const registry = createAgentToolRegistry([
     createRuntimeTestTool("readFile", { filePath: "src/app.ts", content: "export {}" }),
     createRuntimeTestTool("searchCode", [])
@@ -1037,7 +1051,7 @@ test("agent runtime forces the final request without tools and prioritizes pendi
   const result = await runAgentRuntime({
     userRequest: "总结补丁",
     registry,
-    generatedPatchIds: ["patch-existing"],
+    generatedPatchIds: [pendingPatch.patchId],
     maxSteps: 2,
     forceFinalRemainingSteps: 1,
     requestCompletion: async (body) => {
@@ -1068,6 +1082,7 @@ test("agent runtime forces the final request without tools and prioritizes pendi
   assert.deepEqual(finalRequest.tools, []);
   assert.equal(finalMessages.some((message) => message.content?.includes("待审核补丁")), true);
   assert.equal(finalMessages.some((message) => message.content?.includes("工具调用已被 Runtime 禁用")), true);
+  deletePendingPatch(pendingPatch.patchId);
 });
 
 test("agent runtime prevents a provider from bypassing the force-final tool ban", async () => {
@@ -1480,13 +1495,16 @@ test("reading a new range of an existing file counts as progress", async () => {
 });
 
 test("generating a patch resets the no-progress counter", async () => {
+  let pendingPatchId: string | undefined;
   const registry = createAgentToolRegistry([{
     name: "proposePatch",
     description: "Generate a test patch",
     parameters: { type: "object", properties: {}, additionalProperties: true },
     async execute(_args, runtime) {
-      runtime.generatedPatchIds?.push("progress-patch");
-      return { patchId: "progress-patch" };
+      const pendingPatch = createTestPendingPatch();
+      pendingPatchId = pendingPatch.patchId;
+      runtime.generatedPatchIds?.push(pendingPatch.patchId);
+      return { patchId: pendingPatch.patchId };
     },
     summarize(value, cached) {
       return { cached, value };
@@ -1508,7 +1526,8 @@ test("generating a patch resets the no-progress counter", async () => {
   });
 
   assert.equal(result.status, "awaiting_approval");
-  assert.deepEqual(result.generatedPatchIds, ["progress-patch"]);
+  assert.deepEqual(result.generatedPatchIds, [pendingPatchId]);
+  if (pendingPatchId) deletePendingPatch(pendingPatchId);
 });
 
 test("agent runtime pauses before approval-required tools", async () => {
@@ -2015,6 +2034,12 @@ test("审批恢复后保留 applyPatch 的已落盘文件证据", async () => {
     userRequest: "修改 src/service.ts",
     mode: "act",
     registry,
+    // 模拟 proposePatch 已记录在运行证据中，但审批应用后已从 pending patch store 删除。
+    runtimeEvidence: {
+      taskRunId: "task-run-applied-patch",
+      appliedFilePaths: [],
+      generatedPatchIds: ["patch-approved"]
+    },
     pendingToolCall: {
       actionId: "apply_patch:approved",
       toolCallId: "tool-apply-approved",
@@ -2036,6 +2061,8 @@ test("审批恢复后保留 applyPatch 的已落盘文件证据", async () => {
   });
 
   assert.equal(result.status, "completed");
+  assert.equal(result.completionEvidence?.generatedPatchCount, 1);
+  assert.equal(result.completionEvidence?.pendingPatchCount, 0);
   assert.deepEqual(progressEvents, ["patch_applied"]);
 });
 

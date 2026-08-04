@@ -341,7 +341,8 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
 
   if (step.type === "completion_rejected") {
     return {
-      label: step.completionStatus === "awaiting_approval" ? "等待审批" : "完成条件未满足",
+      // 完成拒绝不是可审批实体；真实审批按钮只属于 approval_request。
+      label: step.completionStatus === "awaiting_approval" ? "等待处理" : "完成条件未满足",
       title: step.message,
       detail: step.suggestedAction ? `下一步：${step.suggestedAction}` : ""
     };

@@ -484,6 +484,8 @@ async function collectCompletionEvidence(input: {
     workflowType: input.workflowType,
     mutationExpected: input.mutationExpected,
     generatedPatchCount: new Set(input.generatedPatchIds).size,
+    // generatedPatchIds 是跨审批保留的审计历史；只有仍能从 patch store 读取到的补丁才等待处理。
+    pendingPatchCount: new Set(input.generatedPatchIds.filter((patchId) => getPendingPatch(patchId) !== null)).size,
     // 会话中的 filesChanged 是跨多轮累积历史，不能作为本轮完成证据，否则后续零变更轮次会被误判成功。
     changedFileCount: new Set(input.directAppliedFiles).size,
     pendingPlanCount: relevantPlanItems.filter((item) => item.status === "pending" || item.status === "in_progress").length,
@@ -1412,7 +1414,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           ["proposePatch", "replaceInFile", "writeFile"].includes(definition.name)
         )
       });
-      const legacyCompletionDecision = evidence.generatedPatchCount > 0
+      const legacyCompletionDecision = (evidence.pendingPatchCount ?? 0) > 0
         ? { status: "awaiting_approval" as const, code: "PENDING_APPROVAL" as const, reason: "已生成待审核补丁。", suggestedAction: "审核待处理补丁。", shouldRecover: false }
         : { status: "completed" as const, code: "COMPLETED" as const, reason: "模型已返回最终文本。", shouldRecover: false };
       recordFeatureDecisionDifference({
