@@ -2611,3 +2611,93 @@ test("bugfix workflow requires a reproduction command attempt before editing", a
   assert.equal(result.messages.some((message) => message.role === "tool" && message.content?.includes("command attempt")), true);
   assert.equal((requests[0]?.messages as Array<{ content?: string }>).some((message) => message.content?.includes("evidence missing before edit: command_attempt")), true);
 });
+
+test("bugfix workflow turns a failed serve reproduction into a focused repair step", async () => {
+  let callCount = 0;
+  let editExecuted = false;
+  let capturedMetrics: RunMetrics | undefined;
+  const requests: Record<string, unknown>[] = [];
+  const failedServeTool: AgentToolDefinition = {
+    name: "runCommand",
+    description: "Run a test command",
+    parameters: { type: "object", properties: {}, additionalProperties: true },
+    async execute(_args, runtime) {
+      runtime.agentContext.commandsRun = [
+        ...(runtime.agentContext.commandsRun ?? []),
+        {
+          command: "npm run serve",
+          status: "failed",
+          exitCode: null,
+          validation: false,
+          finishedAt: Date.now()
+        }
+      ];
+      return {
+        policy: { level: "allow", reason: "test" },
+        result: {
+          command: "npm run serve",
+          status: "timeout",
+          exitCode: null,
+          stdout: "src/views/createuserid.vue:3:3 The template root requires exactly one element"
+        }
+      };
+    },
+    summarize(value, cached) {
+      return { cached, ...(value as Record<string, unknown>) };
+    }
+  };
+  const registry = createAgentToolRegistry([
+    failedServeTool,
+    createRuntimeTestTool("replaceInFile", { changed: true, filePath: "src/views/createuserid.vue" }, () => { editExecuted = true; })
+  ]);
+  const workflow = createTaskWorkflow("修复项目运行报错", {
+    intent: "diagnose_then_edit",
+    confidence: 0.95,
+    normalizedGoal: "修复项目运行报错",
+    reason: "test"
+  });
+
+  await runAgentRuntime({
+    userRequest: "修复项目运行报错",
+    mode: "act",
+    workflow,
+    registry,
+    maxSteps: 3,
+    contextBudgetEnabled: false,
+    agentContext: {
+      userGoal: "修复项目运行报错",
+      filesRead: ["src/views/createuserid.vue"],
+      searchQueries: [],
+      searchResultFiles: [],
+      relevantFiles: ["src/views/createuserid.vue"],
+      commandsRun: []
+    },
+    requestCompletion: async (body) => {
+      requests.push(body);
+      callCount += 1;
+      if (callCount === 1) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("serve-failed", "runCommand", { command: "npm run serve", mode: "foreground" })
+        ] } }] };
+      }
+      if (callCount === 2) {
+        const nextMessages = body.messages as Array<{ content?: string }>;
+        assert.equal(nextMessages.some((message) => String(message.content).includes("缺陷复现命令失败")), true);
+        assert.equal(nextMessages.some((message) => String(message.content).includes("不要继续调用 listFiles")), true);
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+          createModelToolCall("repair-template", "replaceInFile", {
+            filePath: "src/views/createuserid.vue",
+            search: "<template>",
+            replace: "<template>"
+          })
+        ] } }] };
+      }
+      return { choices: [{ message: { role: "assistant", content: "已实施最小修复。" } }] };
+    },
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; }
+  });
+
+  assert.equal(editExecuted, true);
+  assert.equal(capturedMetrics?.tools.failedCalls, 1);
+  assert.equal(requests.length, 3);
+});

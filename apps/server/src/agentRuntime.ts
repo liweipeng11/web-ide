@@ -349,11 +349,15 @@ function getLatestValidationAt(agentContext: AgentContext) {
 
 type ValidationCommandEvidence = NonNullable<AgentContext["commandsRun"]>[number];
 
+function getLatestCommand(agentContext: AgentContext): ValidationCommandEvidence | undefined {
+  return (agentContext.commandsRun ?? []).at(-1);
+}
+
 function getLatestValidationCommand(agentContext: AgentContext): ValidationCommandEvidence | undefined {
   return (agentContext.commandsRun ?? []).filter((command) => command.validation === true).at(-1);
 }
 
-function getValidationCommandFingerprint(command: ValidationCommandEvidence | undefined) {
+function getCommandFingerprint(command: ValidationCommandEvidence | undefined) {
   return command
     ? JSON.stringify([command.command, command.status, command.exitCode, command.finishedAt])
     : "";
@@ -371,6 +375,23 @@ function createValidationFailureRecoveryMessage(validation: ValidationCommandEvi
       `失败命令：${validation.command}（退出码 ${validation.exitCode ?? "未知"}）。`,
       "请复用上一条 runCommand 的原始输出定位文件和行号；读取最小相关文件，按现有风格修复，然后使用相同命令重新验证。",
       "若错误无法由工作区代码安全修复，请明确说明具体外部阻塞条件；不要仅因计划项尚未收敛而停止。"
+    ].join("\n")
+  };
+}
+
+/**
+ * Bugfix 的复现命令可能是 serve/dev 等长期命令，它们不是正式验证命令，
+ * 但只要输出已经暴露工作区错误，就必须优先进入修复，而不是继续宽泛搜索。
+ */
+function createReproductionFailureRecoveryMessage(command: ValidationCommandEvidence): ModelMessage {
+  return {
+    role: "user",
+    content: [
+      "缺陷复现命令失败，当前已经获得可用于修复的运行证据，必须优先实施最小修复。",
+      `失败命令：${command.command}（退出码 ${command.exitCode ?? "未知"}）。`,
+      "请复用上一条 runCommand 的原始输出定位报错文件和行号；只读取最小相关文件，然后调用编辑或补丁工具修复。",
+      "修复后优先运行 lint、build、test 或 typecheck 等一次性验证命令；如果需要重启 dev/serve/watch，请使用 background 模式。",
+      "除非原始输出没有文件或符号线索，否则不要继续调用 listFiles 或进行宽泛搜索。"
     ].join("\n")
   };
 }
@@ -398,7 +419,7 @@ async function emitToolTaskProgress(input: {
   }
 
   const validation = getLatestValidationCommand(input.agentContext);
-  if (!validation || getValidationCommandFingerprint(validation) === getValidationCommandFingerprint(input.validationBefore)) return;
+  if (!validation || getCommandFingerprint(validation) === getCommandFingerprint(input.validationBefore)) return;
   if (validation.status === "running") return;
   if (
     validation.status === "success"
@@ -646,7 +667,12 @@ function analyzeToolResult(content: ModelMessage["content"]) {
 
     const record = value as Record<string, unknown>;
     const cached = record.cached === true || (typeof record.note === "string" && record.note.includes("already called with these arguments"));
-    const failed = typeof record.error === "string";
+    const nestedResult = record.result && typeof record.result === "object" && !Array.isArray(record.result)
+      ? record.result as Record<string, unknown>
+      : null;
+    const nestedStatus = typeof nestedResult?.status === "string" ? nestedResult.status : "";
+    // runCommand 将进程结果放在 result 中；失败和超时都必须进入 Runtime 的失败指标与恢复链路。
+    const failed = typeof record.error === "string" || nestedStatus === "failed" || nestedStatus === "timeout";
     // 缓存包装和搜索工具都使用这些集合字段；只判断明确存在的空集合，避免把普通对象误报为空结果。
     const collection = ["results", "matches", "files", "items"]
       .map((key) => record[key])
@@ -2061,6 +2087,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       try {
         const progressBefore = await createProgressSnapshot(agentContext, generatedPatchIds, options.taskSessionId, readScopes);
         const validationBefore = getLatestValidationCommand(agentContext);
+        const commandBefore = getLatestCommand(agentContext);
         const result = toModelToolMessage(await executeAgentToolCall(toAgentToolCall(toolCall), toolRuntime));
         const resultMetrics = analyzeToolResult(result.content);
         const safeEditorMetricDelta = getSafeEditorMetricDelta(result.content);
@@ -2124,7 +2151,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         const latestValidation = getLatestValidationCommand(agentContext);
         if (
           latestValidation?.status === "failed"
-          && getValidationCommandFingerprint(latestValidation) !== getValidationCommandFingerprint(validationBefore)
+          && getCommandFingerprint(latestValidation) !== getCommandFingerprint(validationBefore)
         ) {
           const recoveryMessage = createValidationFailureRecoveryMessage(latestValidation);
           messages.push(recoveryMessage);
@@ -2133,6 +2160,25 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
             type: "strategy",
             event: "completion_recovery",
             message: `验证命令失败，Runtime 已要求优先修复并重跑：${latestValidation.command}`,
+            toolName: toolCall.name,
+            currentStep: step + 1,
+            maxSteps
+          }));
+        }
+        const latestCommand = getLatestCommand(agentContext);
+        if (
+          workflowType === "bugfix"
+          && latestCommand?.validation !== true
+          && latestCommand?.status === "failed"
+          && getCommandFingerprint(latestCommand) !== getCommandFingerprint(commandBefore)
+        ) {
+          const recoveryMessage = createReproductionFailureRecoveryMessage(latestCommand);
+          messages.push(recoveryMessage);
+          await persistAgentMessage(options.taskSessionId, recoveryMessage);
+          options.onAgentStep?.(createAgentStep({
+            type: "strategy",
+            event: "completion_recovery",
+            message: `缺陷复现命令失败，Runtime 已要求优先实施最小修复：${latestCommand.command}`,
             toolName: toolCall.name,
             currentStep: step + 1,
             maxSteps
