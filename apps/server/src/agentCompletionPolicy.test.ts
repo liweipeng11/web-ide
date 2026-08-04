@@ -183,7 +183,8 @@ test("每类未完成证据都返回稳定拒绝码和建议动作", () => {
   }> = [
     { overrides: {}, expectedCode: "NO_MUTATION_EVIDENCE" },
     { overrides: { changedFileCount: 1 }, expectedCode: "VALIDATION_NOT_RUN" },
-    { overrides: { changedFileCount: 1, validationStatus: "failed" }, expectedCode: "VALIDATION_FAILED" },
+    // 验证失败必须优先于计划阻塞，确保 Runtime 有机会把明确错误回灌给模型修复。
+    { overrides: { changedFileCount: 1, validationStatus: "failed", blockedPlanCount: 1 }, expectedCode: "VALIDATION_FAILED" },
     { overrides: { changedFileCount: 1, validationStatus: "passed", lastMutationAt: 20, lastValidationAt: 10 }, expectedCode: "VALIDATION_STALE" },
     { overrides: { changedFileCount: 1, validationStatus: "passed", activeCommandCount: 1 }, expectedCode: "ACTIVE_COMMAND" },
     { overrides: { changedFileCount: 1, validationStatus: "passed", failedToolCallCount: 1 }, expectedCode: "FAILED_TOOL_CALL" },

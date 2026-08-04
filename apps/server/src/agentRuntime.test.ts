@@ -226,6 +226,7 @@ test("编辑任务必须在最后变更后获得成功验证才能 completeTask"
   let completionCount = 0;
   let validationAttempt = 0;
   let capturedMetrics: RunMetrics | undefined;
+  const requests: Record<string, unknown>[] = [];
   const registry = createAgentToolRegistry([
     createRuntimeTestTool("replaceInFile", { changed: true, filePath: "src/a.ts" }),
     // 注册 runCommand 表示环境具备验证能力；recordValidation 模拟审批后返回的命令结果。
@@ -252,7 +253,8 @@ test("编辑任务必须在最后变更后获得成功验证才能 completeTask"
     maxSteps: 8,
     contextBudgetEnabled: false,
     registry,
-    requestCompletion: async () => {
+    requestCompletion: async (body) => {
+      requests.push(body);
       completionCount += 1;
       if (completionCount === 1) {
         return { choices: [{ message: { role: "assistant", content: null, tool_calls: [
@@ -276,6 +278,10 @@ test("编辑任务必须在最后变更后获得成功验证才能 completeTask"
   assert.equal(result.completionEvidence?.validationStatus, "passed");
   assert.equal(result.completionEvidence?.lastValidationAt !== undefined, true);
   assert.equal(result.messages.some((message) => message.role === "tool" && String(message.content).includes("验证命令执行失败")), true);
+  // 验证失败后，下一次模型请求应优先收到明确的回修闭环，而非仅收到抽象完成拒绝。
+  assert.equal((requests[2]?.messages as Array<{ content?: string }>).some((message) =>
+    String(message.content).includes("验证失败，必须先完成一次小范围回修闭环")
+  ), true);
   assert.equal(capturedMetrics?.result.validationStatus, "passed");
   assert.equal(capturedMetrics?.result.validationCommandCount, 2);
 });

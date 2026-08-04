@@ -26,6 +26,7 @@
     "test:agent-new-file-stage4": "tsx --test src/agentCompletionPolicy.test.ts src/agentRuntime.test.ts src/taskWorkflow/taskWorkflowEngine.test.ts src/taskSessionStore.test.ts src/observability/runMetrics.test.ts",
     "test:agent-new-file-stage6": "tsx --test src/taskSessionStore.test.ts src/observability/runMetrics.test.ts src/agentRuntime.test.ts",
     "test:agent-new-file-stage7": "tsx --test src/acceptance/agentNewFileAcceptance.test.ts",
+    "test:dependency-operation": "tsx --test src/dependencyOperationPolicy.test.ts src/prompts.test.ts",
     "test:task-completion-stage7": "tsx --test src/acceptance/agentTaskCompletionAcceptance.test.ts src/featureFlags.test.ts src/evaluation/runner.test.ts",
     "test:state-storage": "tsx --test src/stateFileStorage.test.ts src/chatStore.test.ts src/commandResults.test.ts src/commandExecution/commandExecutionStore.test.ts src/workspaceStore.test.ts src/taskSessionStore.test.ts src/observability/taskMetrics.test.ts",
     "dev": "tsx watch src/index.ts",

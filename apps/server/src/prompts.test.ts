@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   AI_AGENT_ACT_SYSTEM_PROMPT,
   AI_AGENT_CONTEXT_BUDGET_PROMPT,
+  AI_AGENT_DEPENDENCY_OPERATION_PROMPT,
   AI_AGENT_DISCOVERY_STRATEGY_PROMPT,
   AI_FILE_CHAT_SYSTEM_PROMPT,
   AI_MULTI_FILE_EDIT_SYSTEM_PROMPT
@@ -31,6 +32,22 @@ test("shared context budget keeps exploration bounded", () => {
   assertIncludes(AI_AGENT_CONTEXT_BUDGET_PROMPT, "Read at most 8 files automatically");
   assertIncludes(AI_AGENT_CONTEXT_BUDGET_PROMPT, "Do not call readFile more than once");
   assertIncludes(AI_AGENT_CONTEXT_BUDGET_PROMPT, "cached:true");
+});
+
+test("dependency operations prefer the detected package manager over manifest text edits", () => {
+  assertIncludes(AI_AGENT_DEPENDENCY_OPERATION_PROMPT, "identify the project ecosystem and package manager");
+  assertIncludes(AI_AGENT_DEPENDENCY_OPERATION_PROMPT, "Use runCommand with the named subproject as cwd");
+  assertIncludes(AI_AGENT_DEPENDENCY_OPERATION_PROMPT, "do not use proposePatch, replaceInFile, or writeFile");
+  assertIncludes(AI_AGENT_DEPENDENCY_OPERATION_PROMPT, "inspect the real output and current files");
+  assertIncludes(AI_AGENT_DEPENDENCY_OPERATION_PROMPT, "Manual manifest editing is a fallback only");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "Dependency operation strategy");
+});
+
+test("agent prompt requires a bounded validation recovery loop", () => {
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "Validation recovery loop");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "highest-priority next task");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "rerun the same command");
+  assertIncludes(AI_AGENT_ACT_SYSTEM_PROMPT, "after two focused repair attempts");
 });
 
 test("agent, edit, and chat prompts all include the shared discovery strategy", () => {

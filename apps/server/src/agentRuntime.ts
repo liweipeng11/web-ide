@@ -56,6 +56,7 @@ import { getTaskSessionContextState, reconcileTaskPlanFromRuntimeEvidence, recor
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
 import { parseCompleteTaskInput, type CompleteTaskInput } from "./agentCompletionTools.js";
+import { getDependencyOperationEditBlockReason } from "./dependencyOperationPolicy.js";
 
 export type AgentRuntimeResult = {
   status: AgentRuntimeStatus;
@@ -356,6 +357,22 @@ function getValidationCommandFingerprint(command: ValidationCommandEvidence | un
   return command
     ? JSON.stringify([command.command, command.status, command.exitCode, command.finishedAt])
     : "";
+}
+
+/**
+ * 将刚发生的验证失败转为下一轮的显式回修任务，避免模型先尝试结束任务或继续无关探索。
+ * 真正的文件定位仍以 runCommand 已返回的原始输出为准，防止 Runtime 臆测修复方案。
+ */
+function createValidationFailureRecoveryMessage(validation: ValidationCommandEvidence): ModelMessage {
+  return {
+    role: "user",
+    content: [
+      "验证失败，必须先完成一次小范围回修闭环，当前不要调用 completeTask。",
+      `失败命令：${validation.command}（退出码 ${validation.exitCode ?? "未知"}）。`,
+      "请复用上一条 runCommand 的原始输出定位文件和行号；读取最小相关文件，按现有风格修复，然后使用相同命令重新验证。",
+      "若错误无法由工作区代码安全修复，请明确说明具体外部阻塞条件；不要仅因计划项尚未收敛而停止。"
+    ].join("\n")
+  };
 }
 
 async function emitToolTaskProgress(input: {
@@ -1851,6 +1868,23 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         });
         continue;
       }
+      const dependencyOperationBlockReason = getDependencyOperationEditBlockReason({
+        toolName: toolCall.name,
+        toolArguments: toolCall.arguments,
+        agentContext,
+        runCommandAvailable: Boolean(registry.get("runCommand"))
+      });
+      if (dependencyOperationBlockReason) {
+        metrics.recordToolFailure();
+        metrics.recordToolResult({ signature, noProgress: true });
+        consecutiveNoProgressSteps += 1;
+        logAi(runId, "runtime.dependencyOperationEditBlocked", { toolName: toolCall.name, reason: dependencyOperationBlockReason });
+        options.onAgentStep?.(createAgentStep({ type: "tool_blocked", toolName: toolCall.name, message: dependencyOperationBlockReason }));
+        const blockedMessage = createBlockedToolMessage(toolCall, dependencyOperationBlockReason);
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        continue;
+      }
       const workflowDecision = getWorkflowToolBlockReason(toolCall.name, toolCall.arguments, agentContext, currentAvailableToolNames, options.workflow);
       const workflowBlockReason = workflowDecision?.reason || null;
       if (options.workflow && workflowDecision) {
@@ -2087,6 +2121,23 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         consecutiveNoProgressSteps = progressed ? 0 : consecutiveNoProgressSteps + 1;
         messages.push(result);
         await persistAgentMessage(options.taskSessionId, result);
+        const latestValidation = getLatestValidationCommand(agentContext);
+        if (
+          latestValidation?.status === "failed"
+          && getValidationCommandFingerprint(latestValidation) !== getValidationCommandFingerprint(validationBefore)
+        ) {
+          const recoveryMessage = createValidationFailureRecoveryMessage(latestValidation);
+          messages.push(recoveryMessage);
+          await persistAgentMessage(options.taskSessionId, recoveryMessage);
+          options.onAgentStep?.(createAgentStep({
+            type: "strategy",
+            event: "completion_recovery",
+            message: `验证命令失败，Runtime 已要求优先修复并重跑：${latestValidation.command}`,
+            toolName: toolCall.name,
+            currentStep: step + 1,
+            maxSteps
+          }));
+        }
         if (failureDiagnosis) {
           const recoveryMessage = createToolFailureRecoveryMessage(toolCall, failureDiagnosis);
           messages.push(recoveryMessage);

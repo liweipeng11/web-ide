@@ -186,6 +186,19 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
     };
   }
 
+  // 可定位的验证失败优先进入回修闭环。否则被遗留的计划阻塞项抢占后，
+  // Runtime 只会要求重新规划，模型不会回到已经给出文件行号的错误上。
+  if (evidence.validationStatus === "failed") {
+    return {
+      status: "incomplete",
+      code: "VALIDATION_FAILED",
+      reason: "验证命令执行失败。",
+      suggestedAction: "复用最近一次失败命令的结果定位问题，修复对应文件，再使用 runCommand 重新运行验证。",
+      pendingPlanItems: evidence.pendingPlanItems ?? [],
+      shouldRecover: !input.recoveryAttempted && input.editingToolsAvailable
+    };
+  }
+
   if (evidence.blockedPlanCount > 0 || finalContentHasNonRecoverableBlock(input.finalContent)) {
     return {
       status: "blocked",
@@ -240,13 +253,7 @@ export function evaluateAgentCompletion(input: CompletionPolicyInput): Completio
               reason: "本轮仍存在失败的工具调用。",
               suggestedAction: "修复工具调用错误并重新执行必要步骤。"
             }
-          : evidence.validationStatus === "failed"
-            ? {
-                code: "VALIDATION_FAILED" as const,
-                reason: "验证命令执行失败。",
-                suggestedAction: "复用最近一次失败命令的结果定位问题，修复对应文件，再使用 runCommand 重新运行验证。"
-              }
-            : evidence.validationStatus === "not_run" || evidence.validationStatus === "not_required"
+          : evidence.validationStatus === "not_run" || evidence.validationStatus === "not_required"
               ? {
                   code: "VALIDATION_NOT_RUN" as const,
                   reason: "编辑任务尚未运行必要验证。",
