@@ -115,6 +115,22 @@ function getBooleanField(value: unknown, field: string) {
   return value && typeof value === "object" && typeof (value as Record<string, unknown>)[field] === "boolean" ? Boolean((value as Record<string, unknown>)[field]) : null;
 }
 
+function isProgressiveStep(step: AgentStep): step is Extract<AgentStep, { type: "delivery_unit_started" | "delivery_unit_completed" | "replan_requested" | "awaiting_user_decision" | "tool_failure_recorded" }> {
+  return step.type === "delivery_unit_started" || step.type === "delivery_unit_completed" || step.type === "replan_requested" || step.type === "awaiting_user_decision" || step.type === "tool_failure_recorded";
+}
+
+function getProgressiveDetail(step: AgentStep, field: string) {
+  if (!isProgressiveStep(step)) return undefined;
+  const value = step.details[field];
+  return typeof value === "string" ? value : undefined;
+}
+
+function getProgressiveFacts(step: AgentStep) {
+  if (step.type !== "replan_requested" && step.type !== "awaiting_user_decision") return [];
+  const facts = step.details.facts;
+  return Array.isArray(facts) ? facts.filter((fact): fact is string => typeof fact === "string").slice(0, 5) : [];
+}
+
 function getDiscoveryToolLabel(toolName: string) {
   if (toolName === "searchFilesByName") return "文件名发现";
   if (toolName === "listFiles") return "目录发现";
@@ -554,7 +570,41 @@ function WorkflowDecisionCard({ step }: { step: Extract<AgentStep, { type: "work
   );
 }
 
+// 只渲染服务端已经脱敏和截断后的诊断字段，避免在前端回放完整工具输入或错误输出。
+function ProgressiveDeliveryCard({ step }: { step: AgentStep }) {
+  if (step.type === "tool_failure_recorded") {
+    const details = step.details;
+    return (
+      <article className="agent-progressive-card tool-failure">
+        <strong>工具失败诊断</strong>
+        <dl>
+          <div><dt>工具</dt><dd>{getStringField(details, "toolName") || "未记录"}</dd></div>
+          <div><dt>参数摘要</dt><dd>{getStringField(details, "parameterSummary") || "未提供"}</dd></div>
+          <div><dt>失败类别</dt><dd>{getStringField(details, "errorCategory") || "未分类"}</dd></div>
+          <div><dt>Runtime 动作</dt><dd>{getStringField(details, "runtimeAction") || "已记录，等待恢复决策"}</dd></div>
+          <div><dt>可重试</dt><dd>{details.retryable === true ? "是" : "否"}</dd></div>
+        </dl>
+      </article>
+    );
+  }
+
+  if (step.type === "replan_requested" || step.type === "awaiting_user_decision") {
+    const facts = getProgressiveFacts(step);
+    return (
+      <article className="agent-progressive-card recovery">
+        <strong>{step.type === "replan_requested" ? "恢复与重规划" : "等待用户决策"}</strong>
+        <p>{step.message}</p>
+        {facts.length > 0 && <><span>已复用事实</span><ul>{facts.map((fact) => <li key={fact}>{fact}</li>)}</ul></>}
+        {getProgressiveDetail(step, "deliveryUnitId") && <small>关联交付单元：{getProgressiveDetail(step, "deliveryUnitId")}</small>}
+      </article>
+    );
+  }
+
+  return null;
+}
+
 type Props = {
+  activeDeliveryUnitId?: string;
   disabled?: boolean;
   inline?: boolean;
   steps: AgentStep[];
@@ -563,8 +613,9 @@ type Props = {
   onRollbackCheckpoint?: (checkpointId: string) => void;
 };
 
-export default function AgentStepsPanel({ disabled = false, inline = false, steps, title = "Agent Steps", onDecideApproval, onRollbackCheckpoint }: Props) {
+export default function AgentStepsPanel({ activeDeliveryUnitId, disabled = false, inline = false, steps, title = "Agent Steps", onDecideApproval, onRollbackCheckpoint }: Props) {
   const [pendingActionId, setPendingActionId] = useState<string | null>(null);
+  const [showAllSteps, setShowAllSteps] = useState(false);
 
   if (!steps.length) return null;
 
@@ -580,11 +631,23 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
     }
   }
 
+  const currentBatchMatches = activeDeliveryUnitId
+    ? steps.map((step, index) => ({ step, index })).filter(({ step }) => step.type === "delivery_unit_started" && getProgressiveDetail(step, "deliveryUnitId") === activeDeliveryUnitId)
+    : [];
+  const currentBatchStartIndex = currentBatchMatches.length ? currentBatchMatches[currentBatchMatches.length - 1].index : undefined;
+  const visibleSteps = !showAllSteps && currentBatchStartIndex !== undefined ? steps.slice(currentBatchStartIndex) : steps;
+
   return (
     <section className={inline ? "agent-steps agent-steps-inline" : "agent-steps"} aria-label={title}>
       {!inline && <strong>{title}</strong>}
+      {currentBatchStartIndex !== undefined && !inline && (
+        <div className="agent-step-scope">
+          <span>{showAllSteps ? `全部历史（${steps.length}）` : `当前批次（${visibleSteps.length}）`}</span>
+          <button type="button" className="secondary" onClick={() => setShowAllSteps((current) => !current)}>{showAllSteps ? "只看当前批次" : "查看全部历史"}</button>
+        </div>
+      )}
       <ol>
-        {steps.map((step) => {
+        {visibleSteps.map((step) => {
           const view = getAgentStepView(step);
           const showApprovalCard = step.type === "approval_request" && (step.status !== "pending" || isRuntimeApprovalStep(step));
 
@@ -599,6 +662,7 @@ export default function AgentStepsPanel({ disabled = false, inline = false, step
                 <AgentStepObservation step={step} />
                 {step.type === "completion_rejected" && <CompletionRejectionCard step={step} />}
                 {step.type === "workflow_decision" && <WorkflowDecisionCard step={step} />}
+                <ProgressiveDeliveryCard step={step} />
                 {step.type === "approval_request" && showApprovalCard && <ApprovalRequestCard disabled={disabled} pending={pendingActionId === step.actionId} step={step} onDecideApproval={decideApproval} />}
                 {step.type === "checkpoint" && <CheckpointCard disabled={disabled} step={step} onRollbackCheckpoint={onRollbackCheckpoint} />}
                 <AgentStepDetailBlock step={step} />

@@ -531,6 +531,7 @@ export default function ChatPanel({
         onRewritePlan={(instruction) => (session ? onRewritePlan(session.id, instruction) : Promise.resolve())}
         onApprovePlan={() => (session ? onApprovePlan(session.id) : Promise.resolve())}
         onInterruptForReplan={(instruction) => (session ? onInterruptTaskForReplan(session.id, instruction) : Promise.resolve())}
+        onOpenTaskConversation={() => session && onOpenTaskSession(session.id)}
       />
     );
   }
@@ -778,7 +779,7 @@ export default function ChatPanel({
                     {selectedTaskSession.estimatedCostUsd === null || selectedTaskSession.estimatedCostUsd === undefined ? "费用无法估算" : `约 $${selectedTaskSession.estimatedCostUsd.toFixed(6)}`}
                   </p>
                 ) : null}
-                <AgentStepsPanel steps={selectedTaskSession.steps} disabled={disabled || loading} onDecideApproval={onDecideApproval} onRollbackCheckpoint={onRollbackCheckpoint} />
+                <AgentStepsPanel steps={selectedTaskSession.steps} activeDeliveryUnitId={selectedTaskSession.activeDeliveryUnitId} disabled={disabled || loading} onDecideApproval={onDecideApproval} onRollbackCheckpoint={onRollbackCheckpoint} />
               </section>
             </div>
           )}
@@ -798,7 +799,7 @@ export default function ChatPanel({
             return (
               <article key={message.id} className={"chat-message " + message.role}>
                 <strong className="chat-message-role">{message.role === "user" ? "用户" : "智能体"}</strong>
-                <AgentStepsPanel inline steps={messageAgentSteps} disabled={disabled || loading} onDecideApproval={onDecideApproval} onRollbackCheckpoint={onRollbackCheckpoint} />
+                <AgentStepsPanel inline steps={messageAgentSteps} activeDeliveryUnitId={activeTaskSession?.activeDeliveryUnitId} disabled={disabled || loading} onDecideApproval={onDecideApproval} onRollbackCheckpoint={onRollbackCheckpoint} />
                 {editingMessageId === message.id ? (
                   <div className="chat-message-edit">
                     <textarea value={editingDraft} onChange={(event) => setEditingDraft(event.target.value)} />

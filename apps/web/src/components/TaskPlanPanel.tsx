@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState } from "react";
-import type { AgentMode, AgentRuntimeStatus, TaskPlanItem, TaskPlanItemStatus, TaskSession, TaskWorkflowType } from "../api";
+import type { AgentMode, AgentRuntimeStatus, DeliveryUnit, DeliveryUnitStatus, TaskContinuation, TaskPlanItem, TaskPlanItemStatus, TaskSession, TaskWorkflowType } from "../api";
 import Icon from "./Icon";
 import { getTaskTokenUsageText } from "./taskTokenUsage";
 
@@ -16,6 +16,7 @@ type Props = {
   onRewritePlan: (instruction: string) => Promise<void>;
   onApprovePlan: () => Promise<void>;
   onInterruptForReplan?: (instruction: string) => Promise<void>;
+  onOpenTaskConversation?: () => void;
 };
 
 const statusText: Record<TaskPlanItemStatus, string> = {
@@ -45,6 +46,21 @@ const runtimeStatusView: Record<AgentRuntimeStatus, { label: string; detail: str
   failed: { label: "执行失败", detail: "出现无法安全恢复的内部错误" }
 };
 
+const deliveryUnitStatusText: Record<DeliveryUnitStatus, string> = {
+  pending: "后续单元",
+  active: "当前单元",
+  validated: "已完成单元",
+  blocked: "阻塞单元",
+  deferred: "可继续单元"
+};
+
+const taskPauseView: Partial<Record<TaskSession["status"], { label: string; detail: string }>> = {
+  incomplete: { label: "可继续暂停", detail: "本轮未完成，但已保留可复用事实和后续入口。" },
+  awaiting_replan: { label: "等待重规划", detail: "当前事实不足以安全继续，请重规划或编辑计划。" },
+  awaiting_user: { label: "等待你的决策", detail: "任务需要你回答具体问题或确认条件后才能继续。" },
+  blocked: { label: "任务受阻", detail: "需要用户、权限或外部条件介入。" }
+};
+
 function getRevisionTriggerText(trigger: string) {
   const triggerText: Record<string, string> = {
     user: "用户调整",
@@ -69,6 +85,20 @@ function countByStatus(items: TaskPlanItem[], status: TaskPlanItemStatus) {
   return items.filter((item) => item.status === status).length;
 }
 
+function getDeliveryUnitGroups(units: DeliveryUnit[]) {
+  return (["active", "validated", "pending", "deferred", "blocked"] as const)
+    .map((status) => ({ status, units: units.filter((unit) => unit.status === status) }))
+    .filter((group) => group.units.length > 0);
+}
+
+function getContinuationLabel(continuation?: TaskContinuation) {
+  if (!continuation) return "打开任务对话";
+  if (continuation.nextStep === "replan") return "按建议重规划";
+  if (continuation.nextStep === "await_user_input") return "打开对话并回答";
+  if (continuation.nextStep === "resume_validation") return "继续验证";
+  return "继续当前任务";
+}
+
 export default function TaskPlanPanel({
   session,
   loading,
@@ -81,7 +111,8 @@ export default function TaskPlanPanel({
   onDeleteItem,
   onRewritePlan,
   onApprovePlan,
-  onInterruptForReplan
+  onInterruptForReplan,
+  onOpenTaskConversation
 }: Props) {
   const [draftTitle, setDraftTitle] = useState("");
   const [rewriteInstruction, setRewriteInstruction] = useState("");
@@ -89,6 +120,8 @@ export default function TaskPlanPanel({
   const [editingTitle, setEditingTitle] = useState("");
   const [editingNote, setEditingNote] = useState("");
   const planItems = session?.planItems || [];
+  const deliveryUnits = session?.deliveryUnits || [];
+  const deliveryUnitGroups = getDeliveryUnitGroups(deliveryUnits);
   const planRevisions = session?.planRevisions || [];
   const workflow = session?.workflow;
   const isAwaitingReplan = session?.status === "awaiting_replan";
@@ -103,6 +136,7 @@ export default function TaskPlanPanel({
   const completionEvidence = session?.completionEvidence;
   const tokenUsage = getTaskTokenUsageText(session?.modelUsage);
   const taskFinished = session ? ["success", "incomplete", "blocked", "failed", "cancelled"].includes(session.status) : false;
+  const pauseView = session ? taskPauseView[session.status] : undefined;
 
   useEffect(() => {
     setEditingItemId("");
@@ -184,6 +218,39 @@ export default function TaskPlanPanel({
         </div>
       )}
 
+      {pauseView && (
+        <div className={`task-continuation status-${session?.status}`} role="status">
+          <div>
+            <strong>{pauseView.label}</strong>
+            <p>{session?.continuation?.message || session?.runtimeStatusReason || pauseView.detail}</p>
+          </div>
+          {session?.continuation?.requiredUserInputs.length ? (
+            <ul aria-label="需要补充的信息">
+              {session.continuation.requiredUserInputs.map((input) => (
+                <li key={input.field}>{input.label}{input.required ? "（必填）" : "（可选）"}</li>
+              ))}
+            </ul>
+          ) : null}
+          {session?.status === "awaiting_replan" && (
+            <div className="task-continuation-actions">
+              <button type="button" disabled={!canEdit} onClick={() => void onRewritePlan("请基于已记录的事实、失败诊断和当前交付单元重新规划，保留已完成项。")}>
+                按当前事实重规划
+              </button>
+              <button type="button" className="secondary" disabled={!canEdit} onClick={() => setRewriteInstruction("请调整计划后继续执行：")}>
+                编辑计划后继续
+              </button>
+            </div>
+          )}
+          {session?.status !== "awaiting_replan" && (
+            <div className="task-continuation-actions">
+              <button type="button" disabled={disabled || loading} onClick={onOpenTaskConversation}>
+                {getContinuationLabel(session?.continuation)}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {taskFinished && tokenUsage && (
         <div className="task-token-usage" aria-label="本次任务 Token 消耗">
           <strong>本次任务 Token 消耗</strong>
@@ -198,6 +265,29 @@ export default function TaskPlanPanel({
           <span>{workflow.reason}</span>
           <small>{Math.round(workflow.confidence * 100)}% 置信度 · {workflow.steps.length} 个阶段</small>
         </div>
+      )}
+
+      {deliveryUnitGroups.length > 0 && (
+        <section className="delivery-unit-summary" aria-label="交付单元">
+          <div className="delivery-unit-heading">
+            <strong>交付单元</strong>
+            <span>{deliveryUnits.length} 个批次{session?.activeDeliveryUnitId ? " · 已定位当前批次" : ""}</span>
+          </div>
+          {deliveryUnitGroups.map(({ status, units }) => (
+            <div key={status} className={`delivery-unit-group status-${status}`}>
+              <strong>{deliveryUnitStatusText[status]}（{units.length}）</strong>
+              <ul>
+                {units.map((unit) => (
+                  <li key={unit.id} className={unit.id === session?.activeDeliveryUnitId ? "active" : ""}>
+                    <span>{unit.title}</span>
+                    {unit.candidateFiles.length > 0 && <small>{unit.candidateFiles.length} 个候选文件</small>}
+                    {unit.verificationCommands.length > 0 && <small>{unit.verificationCommands.length} 个验证项</small>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </section>
       )}
 
       {session?.planApproval?.status === "pending" && (

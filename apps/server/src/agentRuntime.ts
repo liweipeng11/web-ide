@@ -2390,9 +2390,12 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
             event: "tool_failure_recorded",
             details: {
               toolName: lastFailureDiagnostic.toolName,
+              // 仅传递已在会话层截断的摘要，供前端解释失败原因而不泄露完整工具参数。
+              parameterSummary: lastFailureDiagnostic.parameterSummary,
               errorCode: lastFailureDiagnostic.errorCode,
               errorCategory: lastFailureDiagnostic.errorCategory,
-              retryable: lastFailureDiagnostic.retryable
+              retryable: lastFailureDiagnostic.retryable,
+              runtimeAction: "已记录失败，正在评估受限恢复策略"
             }
           }));
           const recoveryMessage = createToolFailureRecoveryMessage(toolCall, failureDiagnosis);

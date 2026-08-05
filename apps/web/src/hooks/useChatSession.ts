@@ -133,7 +133,13 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
       return;
     }
 
-    await handleSendChatMessage(state.userRequest);
+    const resumableSession = state.selectedTaskSession?.id === state.currentTaskSessionId
+      && (state.selectedTaskSession.status === "awaiting_user" || state.selectedTaskSession.status === "incomplete")
+      ? state.selectedTaskSession
+      : null;
+
+    // 用户在恢复的任务对话中提交决策时复用原会话，由服务端重新校验计划、审批与运行时证据。
+    await handleSendChatMessage(state.userRequest, undefined, resumableSession?.id);
   }
 
   async function handleSendChatMessage(content: string, replayFromMessageId?: string, approvedTaskSessionId?: string, options: { contextPaths?: string[]; agentMode?: AgentMode } = {}) {
