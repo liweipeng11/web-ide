@@ -6,6 +6,12 @@ import { createCapabilityRouter } from "./capabilityRoutes.js";
 import { createServerCapabilities, defaultFeatureFlags, getStableRolloutBucket, readCompletionPolicyRollout, readExplicitCompletionRollout, readFeatureFlags, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
 import { buildSafeEditRecommendation, evaluateSafeEditRollout } from "./safeEditor/index.js";
 
+test("渐进交付开关默认关闭，且可通过环境变量显式启用或回退", () => {
+  assert.equal(readFeatureFlags({}).progressiveDelivery, false);
+  assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_DELIVERY_ENABLED: "1" }).progressiveDelivery, true);
+  assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_DELIVERY_ENABLED: "invalid" }).progressiveDelivery, false);
+});
+
 test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {
   assert.deepEqual(readFeatureFlags({}), defaultFeatureFlags);
   assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true", AGENT_PLANNED_FILE_RESOLUTION: "true", AGENT_SEMANTIC_COMPLETION_CHECK: "true", SAFE_EDIT_EVIDENCE_V2_ENABLED: "true", AGENT_EXPLICIT_COMPLETION_TOOL: "true", AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE: "true", AGENT_COMPLETION_REJECTION_CONVERGENCE: "true", AGENT_STRUCTURED_COMPLETION_REJECTION: "true" }), defaultFeatureFlags);
@@ -42,7 +48,8 @@ test("Feature Flag 仅在实现可用时切换新路径，否则保持旧路径"
 
 test("各项 Feature Flag 分别裁决 legacy 和 next 路径", () => {
   const names = Object.keys(defaultFeatureFlags) as Array<keyof FeatureFlags>;
-  const allAvailable = { ...defaultFeatureFlags };
+  // 开关默认值与实现可用性相互独立；阶段 0 的新开关默认关闭但仍应可验证通用途径选择。
+  const allAvailable = Object.fromEntries(names.map((name) => [name, true])) as FeatureFlags;
   for (const name of names) {
     const disabled = Object.fromEntries(names.map((item) => [item, false])) as FeatureFlags;
     assert.equal(resolveFeaturePath(name, disabled, allAvailable), "legacy");

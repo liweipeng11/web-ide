@@ -27,7 +27,8 @@ export type Stage5AcceptanceReport = {
   evaluation: EvaluationReport["summary"];
 };
 
-const featureLabels: Record<keyof FeatureFlags, string> = {
+// 阶段 5 的历史验收仅覆盖当时已发布能力；阶段 0 的默认关闭开关由专用夹具验收。
+const featureLabels: Record<Exclude<keyof FeatureFlags, "progressiveDelivery">, string> = {
   contextBudgetV2: "Context Budget V2",
   modelProviderGateway: "Model Provider Gateway",
   lsp: "Language Service / LSP",
@@ -77,7 +78,7 @@ export async function runStage5Acceptance(options: { evaluation?: EvaluationRepo
     defaultModel: "acceptance-model"
   });
 
-  const featureNames = Object.keys(featureLabels) as Array<keyof FeatureFlags>;
+  const featureNames = Object.keys(featureLabels) as Array<keyof typeof featureLabels>;
   const checks: Stage5AcceptanceCheck[] = featureNames.flatMap((name) => [
     {
       id: `default-${name}`,

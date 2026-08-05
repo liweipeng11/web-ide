@@ -11,6 +11,7 @@ export type FeatureFlags = {
   taskRuntimeEvidencePersistence: boolean;
   completionRejectionConvergence: boolean;
   structuredCompletionRejection: boolean;
+  progressiveDelivery: boolean;
 };
 
 export type FeatureImplementations = Record<keyof FeatureFlags, boolean>;
@@ -29,7 +30,8 @@ const featureFlagEnvironmentNames: Record<keyof FeatureFlags, string> = {
   explicitCompletionTool: "AGENT_EXPLICIT_COMPLETION_TOOL",
   taskRuntimeEvidencePersistence: "AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE",
   completionRejectionConvergence: "AGENT_COMPLETION_REJECTION_CONVERGENCE",
-  structuredCompletionRejection: "AGENT_STRUCTURED_COMPLETION_REJECTION"
+  structuredCompletionRejection: "AGENT_STRUCTURED_COMPLETION_REJECTION",
+  progressiveDelivery: "AGENT_PROGRESSIVE_DELIVERY_ENABLED"
 };
 
 export const defaultFeatureFlags: FeatureFlags = {
@@ -44,7 +46,9 @@ export const defaultFeatureFlags: FeatureFlags = {
   explicitCompletionTool: true,
   taskRuntimeEvidencePersistence: true,
   completionRejectionConvergence: true,
-  structuredCompletionRejection: true
+  structuredCompletionRejection: true,
+  // 渐进交付尚未接管 Runtime，阶段 0 必须保持默认关闭以固定既有行为。
+  progressiveDelivery: false
 };
 
 export type FeatureDecisionDifference = {
@@ -220,5 +224,7 @@ export const implementedFeatures: FeatureImplementations = {
   explicitCompletionTool: true,
   taskRuntimeEvidencePersistence: true,
   completionRejectionConvergence: true,
-  structuredCompletionRejection: true
+  structuredCompletionRejection: true,
+  // 阶段 0 只有解析与观测夹具，尚未提供可切换的新执行路径。
+  progressiveDelivery: false
 };

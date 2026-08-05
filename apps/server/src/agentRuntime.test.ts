@@ -51,6 +51,17 @@ function createModelToolCall(id: string, name: string, args: Record<string, unkn
   };
 }
 
+/** 阶段 0 离线夹具：按固定顺序重放模型响应，不访问网络或真实模型。 */
+function createScriptedModel(script: AgentCompletionResponse[]) {
+  let cursor = 0;
+  return async () => {
+    const response = script[cursor];
+    cursor += 1;
+    if (!response) throw new Error("测试模型脚本已耗尽");
+    return response;
+  };
+}
+
 test("启用显式完成协议后，自然停止不能直接 completed", async () => {
   let completionCount = 0;
   const result = await runAgentRuntime({
@@ -640,6 +651,100 @@ test("只读任务不会把完整未命中提升为创建意图", async () => {
   });
 
   assert.equal(result.agentContext.createIntents?.length ?? 0, 0);
+});
+
+test("阶段零脚本夹具可重放发现后空搜索，并断言无进展停止基线", async () => {
+  let searchCount = 0;
+  let capturedMetrics: RunMetrics | undefined;
+  const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [], (runtime) => {
+    searchCount += 1;
+    if (searchCount === 1) runtime.agentContext.searchResultFiles.push("src/first.ts", "src/second.ts");
+  })]);
+  const script = Array.from({ length: 5 }, (_, index) => ({
+    choices: [{ message: { role: "assistant" as const, content: null, tool_calls: [
+      createModelToolCall(`baseline-empty-${index}`, "searchCode", { query: `missing-${index}` })
+    ] } }]
+  }));
+
+  const result = await runAgentRuntime({
+    userRequest: "离线基线：发现后空搜索",
+    registry,
+    maxNoProgressSteps: 2,
+    recoveryAttempts: 1,
+    requestCompletion: createScriptedModel(script),
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; }
+  });
+
+  assert.equal(result.status, "no_progress");
+  assert.deepEqual(result.agentContext.searchResultFiles, ["src/first.ts", "src/second.ts"]);
+  assert.equal(capturedMetrics?.result.patchFileCount, 0);
+  assert.equal(capturedMetrics?.result.stopReason, "no_progress");
+  assert.equal(capturedMetrics?.tools.maxConsecutiveNoProgressSteps, 2);
+});
+
+test("阶段零脚本夹具可重放工具失败后生成补丁，保留既有 Runtime 行为", async () => {
+  let patchId: string | undefined;
+  let capturedMetrics: RunMetrics | undefined;
+  let execution = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("lookup", { error: "temporary failure", errorCode: "TEMPORARY", retryable: true }),
+    {
+      name: "proposePatch",
+      description: "Generate a controlled pending patch",
+      parameters: { type: "object", properties: {}, additionalProperties: true },
+      async execute(_args, runtime) {
+        execution += 1;
+        const patch = createTestPendingPatch();
+        patchId = patch.patchId;
+        runtime.generatedPatchIds?.push(patch.patchId);
+        return { patchId: patch.patchId };
+      },
+      summarize(value, cached) { return { cached, value }; }
+    }
+  ]);
+  const result = await runAgentRuntime({
+    userRequest: "离线基线：失败后生成补丁",
+    mode: "act",
+    registry,
+    requestCompletion: createScriptedModel([
+      { choices: [{ message: { role: "assistant", content: null, tool_calls: [createModelToolCall("baseline-failure", "lookup", {})] } }] },
+      { choices: [{ message: { role: "assistant", content: null, tool_calls: [createModelToolCall("baseline-patch", "proposePatch", {})] } }] },
+      { choices: [{ message: { role: "assistant", content: "补丁已生成，等待审批。" } }] }
+    ]),
+    metricsRecorder: async (metrics) => { capturedMetrics = metrics; }
+  });
+
+  assert.equal(result.status, "awaiting_approval");
+  assert.equal(execution, 1);
+  assert.deepEqual(result.generatedPatchIds, [patchId]);
+  assert.equal(capturedMetrics?.tools.failedCalls, 1);
+  assert.equal(capturedMetrics?.result.patchFileCount, 1);
+  if (patchId) deletePendingPatch(patchId);
+});
+
+test("阶段零脚本夹具在上下文压缩后保留待办计划提示和完整历史", async () => {
+  const messages = [
+    { id: "baseline-system", role: "system" as const, content: "安全规则" },
+    { id: "baseline-history", role: "user" as const, content: "历史上下文 ".repeat(500) },
+    { id: "baseline-current", role: "user" as const, content: "继续待办计划项" }
+  ];
+  const result = await runAgentRuntime({
+    userRequest: "继续待办计划项",
+    messages,
+    workflow: createTaskWorkflow("继续后续计划项"),
+    registry: createAgentToolRegistry([]),
+    contextBudgetEnabled: true,
+    contextWindowTokens: 1_200,
+    maxOutputTokens: 200,
+    contextSafetyMarginTokens: 100,
+    completeModel: async () => ({ message: { role: "assistant", content: "已保留后续计划。" }, usage: { inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cachedInputTokens: 0 } }),
+    metricsRecorder: async () => undefined
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.contextBudgetSnapshot?.automaticCompression, true);
+  assert.equal(result.contextSummary?.planStatus.some((item) => item.startsWith("pending:")), true);
+  assert.equal(result.messages.some((message) => message.id === "baseline-history"), true);
 });
 
 test("context budget v2 compresses the model view while preserving the full runtime history", async () => {
