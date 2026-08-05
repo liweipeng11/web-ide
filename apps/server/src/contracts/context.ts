@@ -43,4 +43,21 @@ export type ContextBudgetSnapshot = {
   automaticCompression: boolean;
   generatedAt: number;
   estimator: "provider" | "conservative" | "unknown";
+  /** 当前交付单元的预算归因；旧会话没有该字段时按全局预算兼容处理。 */
+  deliveryUnit?: ContextBudgetUnitSnapshot;
+};
+
+/** 解释单个交付单元的上下文消耗，避免历史完整内容再次注入。 */
+export type ContextBudgetUnitSnapshot = {
+  deliveryUnitId?: string;
+  inputTokens: number;
+  currentUnitContentTokens: number;
+  historicalUnitSummaryTokens: number;
+  globalRuleTokens: number;
+  toolResultTokens: number;
+  otherTokens: number;
+  toolCallCount: number;
+  compressionCount: number;
+  warning: boolean;
+  generatedAt: number;
 };

@@ -440,6 +440,12 @@ function normalizeDeliveryUnits(value: unknown): DeliveryUnit[] {
       completionCriteria: unique(normalizeStringArray(item.completionCriteria).map((entry) => sanitizeSessionSummary(entry, 300)).filter(Boolean)),
       candidateFiles: unique(normalizeStringArray(item.candidateFiles)), filesRead: unique(normalizeStringArray(item.filesRead)), plannedFiles: unique(normalizeStringArray(item.plannedFiles)),
       dependencyUnitIds: unique(normalizeStringArray(item.dependencyUnitIds)), checkpointIds: unique(normalizeStringArray(item.checkpointIds)), verificationCommands: unique(normalizeStringArray(item.verificationCommands).map((entry) => sanitizeSessionSummary(entry, 300)).filter(Boolean)),
+      contextMetrics: item.contextMetrics && typeof item.contextMetrics === "object" ? {
+        inputTokens: Math.max(0, Number(item.contextMetrics.inputTokens) || 0), compressionCount: Math.max(0, Number(item.contextMetrics.compressionCount) || 0),
+        toolCallCount: Math.max(0, Number(item.contextMetrics.toolCallCount) || 0), changedFileCount: Math.max(0, Number(item.contextMetrics.changedFileCount) || 0),
+        validationResult: (item.contextMetrics.validationResult === "passed" || item.contextMetrics.validationResult === "failed" ? item.contextMetrics.validationResult : "not_run") as "passed" | "failed" | "not_run",
+        updatedAt: typeof item.contextMetrics.updatedAt === "number" ? item.contextMetrics.updatedAt : Date.now()
+      } : undefined,
       createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now(), updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : Date.now()
     }))
     .filter((item) => item.title && item.sourcePlanItemIds.length);
@@ -1908,6 +1914,19 @@ export async function recordTaskSessionContextBudget(taskSessionId: string | nul
     contextBudgetSnapshot: snapshot,
     // 没有发生历史压缩时保留上一份摘要，便于用户继续查看最近一次压缩状态。
     contextSummary: summary ?? session.contextSummary,
+    // 仅聚合单元指标，确保会话文件不持久化完整上下文或工具输出。
+    deliveryUnits: normalizeDeliveryUnits(session.deliveryUnits).map((unit) => unit.id !== snapshot.deliveryUnit?.deliveryUnitId ? unit : {
+      ...unit,
+      contextMetrics: {
+        inputTokens: snapshot.deliveryUnit.inputTokens,
+        compressionCount: snapshot.deliveryUnit.compressionCount,
+        toolCallCount: snapshot.deliveryUnit.toolCallCount,
+        changedFileCount: (session.filesChanged ?? []).length,
+        validationResult: session.runtimeEvidence?.lastValidationStatus === "success" ? "passed" : session.runtimeEvidence?.lastValidationStatus === "failed" ? "failed" : "not_run",
+        updatedAt: snapshot.generatedAt
+      },
+      updatedAt: Date.now()
+    }),
     updatedAt: Date.now()
   }));
 }

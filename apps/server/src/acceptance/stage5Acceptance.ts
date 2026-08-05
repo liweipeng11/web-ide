@@ -28,7 +28,7 @@ export type Stage5AcceptanceReport = {
 };
 
 // 阶段 5 的历史验收仅覆盖当时已发布能力；阶段 0 的默认关闭开关由专用夹具验收。
-const featureLabels: Record<Exclude<keyof FeatureFlags, "progressiveDelivery" | "progressiveRecovery">, string> = {
+const featureLabels: Record<Exclude<keyof FeatureFlags, "progressiveDelivery" | "progressiveRecovery" | "unitContextBudget">, string> = {
   contextBudgetV2: "Context Budget V2",
   modelProviderGateway: "Model Provider Gateway",
   lsp: "Language Service / LSP",

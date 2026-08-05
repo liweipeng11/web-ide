@@ -251,6 +251,7 @@ export type AgentStep = {
         | "completion_recovery"
         | "budget_convergence"
         | "no_progress_stop"
+        | "unit_context_exploration_blocked"
         | "budget_stop";
       message: string;
       toolName?: string;
@@ -412,6 +413,15 @@ export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "bloc
 // 渐进交付的最小执行边界；阶段 1 仅持久化，不改变 Runtime 的调度决策。
 export type DeliveryUnitStatus = "pending" | "active" | "validated" | "blocked" | "deferred";
 
+export type DeliveryUnitContextMetrics = {
+  inputTokens: number;
+  compressionCount: number;
+  toolCallCount: number;
+  changedFileCount: number;
+  validationResult: "not_run" | "passed" | "failed";
+  updatedAt: number;
+};
+
 export type DeliveryUnit = {
   version: 1;
   id: string;
@@ -425,6 +435,8 @@ export type DeliveryUnit = {
   dependencyUnitIds: string[];
   checkpointIds: string[];
   verificationCommands: string[];
+  /** 单元级上下文与交付结果指标，不保存源码、完整提示词或工具原始输出。 */
+  contextMetrics?: DeliveryUnitContextMetrics;
   createdAt: number;
   updatedAt: number;
 };

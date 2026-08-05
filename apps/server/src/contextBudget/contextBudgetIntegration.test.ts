@@ -7,7 +7,7 @@ import { runAgentRuntime } from "../agentRuntime.js";
 import { createAgentToolRegistry } from "../agentToolRegistry.js";
 import { readonlyAgentToolDefinitions } from "../agentTools.js";
 import { evaluateAgentToolApproval } from "../agentPermissions.js";
-import { addTaskSessionFilesChanged, createTaskSession, getTaskSession, setTaskPlanItems } from "../taskSessionStore.js";
+import { addTaskSessionFilesChanged, createTaskSession, getTaskSession, setActiveTaskSessionDeliveryUnit, setTaskPlanItems, setTaskSessionDeliveryUnits } from "../taskSessionStore.js";
 import { setWorkspaceRoot } from "../workspaceStore.js";
 import { recoverStoredContextArtifact, storeContextArtifact } from "./artifactStore.js";
 import { mergeContextBudgetSession } from "../../../web/src/contextBudgetState.js";
@@ -202,4 +202,43 @@ test("前端上下文事件以服务端 null 摘要清理旧审批状态", () =>
   const merged = mergeContextBudgetSession(session, { taskSessionId: session.id, snapshot, summary: null });
   assert.equal(merged.contextSummary, undefined);
   assert.equal(mergeContextBudgetSession(session, { taskSessionId: "another-task", snapshot, summary: null }), session);
+});
+
+test("单元上下文预警阻止宽泛搜索并写入可恢复的重规划决策", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "unit-context-budget-"));
+  try {
+    await setWorkspaceRoot(workspaceRoot, { persist: false });
+    const session = await createTaskSession("在当前单元完成修改");
+    const planned = await setTaskPlanItems(session.id, [{ title: "修改当前模块", status: "in_progress" }]);
+    await setTaskSessionDeliveryUnits(session.id, [{
+      id: "unit-current", title: "修改当前模块", sourcePlanItemIds: [planned!.planItems![0]!.id], status: "active", completionCriteria: ["生成补丁或验证结果"],
+      candidateFiles: ["src/current.ts"], filesRead: [], plannedFiles: ["src/current.ts"], dependencyUnitIds: [], checkpointIds: [], verificationCommands: []
+    }]);
+    await setActiveTaskSessionDeliveryUnit(session.id, "unit-current");
+    assert.equal((await getTaskSession(session.id)).activeDeliveryUnitId, "unit-current");
+    let searchExecuted = false;
+    let warningVisible = false;
+    const registry = createAgentToolRegistry([{
+      name: "searchCode", description: "宽泛搜索", parameters: { type: "object", properties: {} },
+      async execute() { searchExecuted = true; return { files: [] }; }, summarize(result) { return result; }
+    }]);
+    await runAgentRuntime({
+      taskSessionId: session.id, userRequest: "继续", registry, contextBudgetEnabled: true, unitContextBudgetEnabled: true,
+      contextWindowTokens: 1_600, maxOutputTokens: 200, contextSafetyMarginTokens: 100, maxSteps: 2,
+      messages: [{ role: "system", content: "安全规则" }, { role: "user", content: "历史上下文".repeat(3_000) }, { role: "user", content: "继续当前单元" }],
+      completeModel: async (request) => {
+        warningVisible ||= JSON.stringify(request.messages).includes("上下文预警阈值");
+        return { message: { role: "assistant", toolCalls: [{ id: "broad-search", name: "searchCode", arguments: {} }] }, usage: { inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cachedInputTokens: 0 } };
+      },
+      metricsRecorder: async () => undefined
+    });
+    const updated = await getTaskSession(session.id);
+    assert.equal(warningVisible, true);
+    assert.equal(searchExecuted, false);
+    assert.equal(updated.recoveryHistory?.at(-1)?.triggerSignal, "context_budget_compressed");
+    assert.equal(updated.continuation?.nextStep, "replan");
+    assert.ok(updated.deliveryUnits?.[0]?.contextMetrics?.inputTokens);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
 });

@@ -49,7 +49,7 @@ import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
 import { adaptOpenAiCompletionResponse, toOpenAiChatCompletionBody, type ModelDescriptor, type ModelMessage, type ModelRequest, type ModelResponse, type ModelToolCall } from "./contracts/index.js";
 import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "./observability/index.js";
 import { getPendingPatch } from "./patchStore.js";
-import { ConservativeTokenEstimator, prepareContextBudget } from "./contextBudget/index.js";
+import { ConservativeTokenEstimator, isUnitContextBudgetWarning, prepareContextBudget } from "./contextBudget/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { implementedFeatures, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, type CompletionPolicyFeatureFlags, type CompletionPolicyRolloutConfig, type ExplicitCompletionRolloutConfig } from "./featureFlags.js";
 import { appendTaskSessionRecoveryDecision, appendTaskSessionToolFailureDiagnostic, getTaskSessionContextState, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, setTaskSessionContinuation, setTaskSessionRuntimeEvidence } from "./taskSessionStore.js";
@@ -102,6 +102,8 @@ export type AgentRuntimeOptions = {
   providerId?: string;
   modelId?: string;
   contextBudgetEnabled?: boolean;
+  /** 单元级预算编排的灰度开关；未提供时读取服务端 Feature Flag。 */
+  unitContextBudgetEnabled?: boolean;
   /** 仅供离线验收覆盖灰度阶段；生产默认读取集中配置。 */
   explicitCompletionRollout?: ExplicitCompletionRolloutConfig;
   /** 仅供验收覆盖独立回滚开关，生产环境默认读取集中配置。 */
@@ -739,6 +741,22 @@ function getToolFailureDiagnosis(content: ModelMessage["content"]): ToolFailureD
 
 function isFileReadTool(toolName: string) {
   return ["readFile", "readFileChunk", "readFileRange"].includes(toolName);
+}
+
+/** 预算预警后只禁止会扩大范围的探索，不能阻断精确读取、补丁、计划和验证。 */
+function isBroadContextExplorationTool(toolName: string) {
+  return /^(search|find|list|discover|scan)/i.test(toolName) || ["searchCode", "searchFiles", "listFiles", "findFiles"].includes(toolName);
+}
+
+function createUnitContextBudgetWarningMessage(unit: DeliveryUnit): ModelMessage {
+  return {
+    role: "user",
+    content: [
+      `当前交付单元“${unit.title}”已达到上下文预警阈值。`,
+      "停止广泛目录枚举和模糊搜索；只能进行精确文件读取、更新计划、生成或应用补丁、运行验证，以及生成结构化上下文摘要。",
+      "请基于当前已知事实完成该单元；若完成条件仍无法满足，请明确请求重规划，不要继续读取无关文件。"
+    ].join("\n")
+  };
 }
 
 const LARGE_TASK_DISCOVERED_FILE_THRESHOLD = 12;
@@ -1382,6 +1400,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let latestContextBudgetSnapshot: ContextBudgetSnapshot | undefined;
   let latestContextSummary: StructuredContextSummary | null = null;
   const contextBudgetEnabled = options.contextBudgetEnabled ?? (config.featureFlags.contextBudgetV2 && implementedFeatures.contextBudgetV2);
+  const unitContextBudgetEnabled = options.unitContextBudgetEnabled ?? (config.featureFlags.unitContextBudget && implementedFeatures.unitContextBudget);
+  let unitContextWarningActive = false;
+  let unitContextBoundaryDecisionRecorded = false;
   const metrics = new RunMetricsTracker(
     {
       runId,
@@ -1439,9 +1460,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const budgetPhase = getAgentBudgetPhase(remainingSteps, budgetPolicy);
       const visibleToolSchemas = filterToolSchemasForBudgetPhase(registry.schemas, budgetPhase)
         .filter((schema) => explicitCompletionToolEnabled || schema.function.name !== "completeTask");
-      const availableToolSchemas = autoReadLimitReached
+      const availableToolSchemas = (autoReadLimitReached
         ? visibleToolSchemas.filter((schema) => !isFileReadTool(schema.function.name))
-        : visibleToolSchemas;
+        : visibleToolSchemas)
+        .filter((schema) => !unitContextWarningActive || !isBroadContextExplorationTool(schema.function.name));
       const currentAvailableToolNames = new Set(availableToolSchemas.map((schema) => schema.function.name));
 
     if (!budgetWarningSent && budgetPhase === "convergence") {
@@ -1494,6 +1516,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         planStatus: taskContextState.planStatus.length ? taskContextState.planStatus : options.workflow?.steps.map((workflowStep) => `pending: ${workflowStep.title}`),
         filesModified: taskContextState.filesModified,
         unresolvedQuestions: taskContextState.unresolvedQuestions,
+        activeDeliveryUnit: unitContextBudgetEnabled ? taskContextState.activeDeliveryUnit : undefined,
         options: {
           contextWindowTokens: options.contextWindowTokens ?? selectedModelDescriptor?.capabilities.contextWindowTokens ?? config.aiContextWindowTokens,
           reservedOutputTokens: options.maxOutputTokens ?? selectedModelDescriptor?.capabilities.maxOutputTokens ?? config.aiMaxOutputTokens,
@@ -1508,6 +1531,24 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         systemPrompt: separatedPrepared.systemPrompt || undefined,
         messages: separatedPrepared.conversationMessages
       };
+      if (unitContextBudgetEnabled && isUnitContextBudgetWarning(prepared.snapshot) && taskContextState.activeDeliveryUnit) {
+        unitContextWarningActive = true;
+        const unitWarningMessage = createUnitContextBudgetWarningMessage(taskContextState.activeDeliveryUnit);
+        // 当前轮在计算预算后立即注入收敛指令；下一轮同时从 schema 层移除宽泛探索工具。
+        modelRequest = { ...modelRequest, messages: [...modelRequest.messages, unitWarningMessage] };
+        if (!unitContextBoundaryDecisionRecorded && prepared.snapshot.automaticCompression && !generatedPatchIds.length && !directAppliedFiles.size && !(agentContext.commandsRun ?? []).length) {
+          const reason = "上下文压缩后仍缺少当前交付单元的变更或验证证据，需要按当前事实重规划。";
+          await appendTaskSessionRecoveryDecision(options.taskSessionId, {
+            triggerSignal: "context_budget_compressed", candidateActions: ["replan", "defer"], finalAction: "replan", reason,
+            evidence: [`交付单元: ${taskContextState.activeDeliveryUnit.title}`, `上下文使用率: ${prepared.snapshot.usageRatio}`], deliveryUnitId: taskContextState.activeDeliveryUnit.id
+          });
+          await setTaskSessionContinuation(options.taskSessionId, {
+            nextStep: "replan", requiredUserInputs: [], autoContinueConditions: ["补充当前单元的精确文件范围或确认重规划"], message: reason,
+            deliveryUnitId: taskContextState.activeDeliveryUnit.id
+          });
+          unitContextBoundaryDecisionRecorded = true;
+        }
+      }
       metrics.recordContextEstimate(prepared.snapshot.estimatedInputTokensBeforeCompression, prepared.snapshot.estimatedInputTokensAfterCompression, prepared.snapshot.automaticCompression);
       // 每次都传播当前有效摘要，避免新 Runtime 丢失上一次压缩状态或保留已经清理的审批。
       await recordTaskSessionContextBudget(options.taskSessionId, prepared.snapshot, latestContextSummary);
@@ -1981,6 +2022,15 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
         logAi(runId, "runtime.budgetToolBlocked", { step, remainingSteps, budgetPhase, toolName: toolCall.name });
+        continue;
+      }
+      if (unitContextWarningActive && isBroadContextExplorationTool(toolCall.name)) {
+        metrics.recordToolResult({ signature, noProgress: true });
+        consecutiveNoProgressSteps += 1;
+        const blockedMessage: ModelMessage = { role: "tool", toolCallId: toolCall.id, content: "当前交付单元处于上下文预警状态，已阻止广泛探索；请改用精确读取、计划、补丁或验证。" };
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        options.onAgentStep?.(createAgentStep({ type: "strategy", event: "unit_context_exploration_blocked", message: blockedMessage.content || "已阻止广泛探索", toolName: toolCall.name, currentStep: step + 1, maxSteps }));
         continue;
       }
       const createIntentSearchBlockReason = getCreateIntentSearchBlockReason(toolCall, agentContext);

@@ -1,7 +1,7 @@
-import type { ContextBudgetSnapshot, StructuredContextSummary } from "../contracts/context.js";
+import type { ContextBudgetSnapshot, ContextBudgetUnitSnapshot, StructuredContextSummary } from "../contracts/context.js";
 import type { ModelMessage } from "../contracts/model.js";
 import type { AgentContext } from "../agentToolTypes.js";
-import type { PendingAgentToolCall } from "../types.js";
+import type { DeliveryUnit, PendingAgentToolCall } from "../types.js";
 import { normalizeToolArtifacts } from "./artifactNormalizer.js";
 import { createStructuredContextSummary } from "./summary.js";
 import { ConservativeTokenEstimator, type TokenEstimator } from "./tokenEstimator.js";
@@ -10,6 +10,8 @@ export type ContextBudgetOptions = {
   contextWindowTokens: number;
   reservedOutputTokens: number;
   safetyMarginTokens: number;
+  /** 达到该比例后，Runtime 收紧宽泛探索并引导收敛当前交付单元。 */
+  unitWarningRatio?: number;
 };
 
 export type ContextBudgetResult = {
@@ -87,6 +89,63 @@ function removeLowestPriorityGroup(messages: ModelMessage[]) {
   return messages.filter((_, index) => !removed.has(index));
 }
 
+function isSummaryMessage(message: ModelMessage) {
+  return message.role === "system" && /结构化任务状态|structured task state/i.test(message.content || "");
+}
+
+function messageReferencesUnitFile(message: ModelMessage, unitFiles: Set<string>) {
+  if (!unitFiles.size || !message.content) return false;
+  return [...unitFiles].some((filePath) => message.content!.includes(filePath));
+}
+
+function createUnitBudgetSnapshot(input: {
+  messages: ModelMessage[];
+  estimator: TokenEstimator;
+  unit?: DeliveryUnit;
+  compressionCount: number;
+  usageRatio: number;
+  warningRatio: number;
+}): ContextBudgetUnitSnapshot | undefined {
+  if (!input.unit) return undefined;
+  const unitFiles = new Set([...input.unit.candidateFiles, ...input.unit.filesRead, ...input.unit.plannedFiles]);
+  let currentUnitContentTokens = 0;
+  let historicalUnitSummaryTokens = 0;
+  let globalRuleTokens = 0;
+  let toolResultTokens = 0;
+  let otherTokens = 0;
+  let toolCallCount = 0;
+  for (const message of input.messages) {
+    const tokens = input.estimator.estimateMessages([message]);
+    if (isSummaryMessage(message)) historicalUnitSummaryTokens += tokens;
+    else if (message.role === "system") globalRuleTokens += tokens;
+    else if (message.role === "tool") {
+      toolResultTokens += tokens;
+      if (messageReferencesUnitFile(message, unitFiles)) currentUnitContentTokens += tokens;
+    } else if (messageReferencesUnitFile(message, unitFiles)) currentUnitContentTokens += tokens;
+    else otherTokens += tokens;
+    toolCallCount += message.toolCalls?.length ?? 0;
+  }
+  return {
+    deliveryUnitId: input.unit.id,
+    inputTokens: input.estimator.estimateMessages(input.messages),
+    currentUnitContentTokens,
+    historicalUnitSummaryTokens,
+    globalRuleTokens,
+    toolResultTokens,
+    otherTokens,
+    toolCallCount,
+    compressionCount: input.compressionCount,
+    // 即使压缩后的视图已回落，也必须把“本轮曾超预算”传给编排器，避免恢复后继续漫游。
+    warning: input.compressionCount > 0 || input.usageRatio >= input.warningRatio,
+    generatedAt: Date.now()
+  };
+}
+
+/** 单元预算预警只约束宽泛探索，精确读取、补丁和验证仍应可用。 */
+export function isUnitContextBudgetWarning(snapshot: ContextBudgetSnapshot) {
+  return Boolean(snapshot.deliveryUnit?.warning);
+}
+
 /** 每次请求前计算预算，并在超限时用结构化摘要替换旧历史。 */
 export function prepareContextBudget(input: {
   messages: ModelMessage[];
@@ -98,6 +157,7 @@ export function prepareContextBudget(input: {
   filesModified?: string[];
   unresolvedQuestions?: string[];
   estimator?: TokenEstimator;
+  activeDeliveryUnit?: DeliveryUnit;
 }): ContextBudgetResult {
   const estimator = input.estimator ?? new ConservativeTokenEstimator();
   const toolSchemaTokens = estimator.estimateValue(input.tools ?? []);
@@ -138,6 +198,7 @@ export function prepareContextBudget(input: {
     }
   }
 
+  const usageRatio = availableInputTokens > 0 ? Number(Math.min(1, after / availableInputTokens).toFixed(4)) : 1;
   const snapshot: ContextBudgetSnapshot = {
     modelContextWindowTokens: input.options.contextWindowTokens,
     reservedOutputTokens: input.options.reservedOutputTokens,
@@ -152,10 +213,18 @@ export function prepareContextBudget(input: {
       ...input.agentContext.filesRead,
       ...normalized.artifacts.filter((artifact) => artifact.kind === "file" && artifact.source !== "unknown").map((artifact) => artifact.source)
     ]).size,
-    usageRatio: availableInputTokens > 0 ? Number(Math.min(1, after / availableInputTokens).toFixed(4)) : 1,
+    usageRatio,
     automaticCompression: compressionCount > 0,
     generatedAt: Date.now(),
-    estimator: estimator.kind
+    estimator: estimator.kind,
+    deliveryUnit: createUnitBudgetSnapshot({
+      messages: selected,
+      estimator,
+      unit: input.activeDeliveryUnit,
+      compressionCount,
+      usageRatio,
+      warningRatio: input.options.unitWarningRatio ?? 0.8
+    })
   };
 
   return { messages: selected, snapshot, summary };

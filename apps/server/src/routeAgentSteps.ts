@@ -22,6 +22,7 @@ export type AgentStepPayload =
         | "completion_recovery"
         | "budget_convergence"
         | "no_progress_stop"
+        | "unit_context_exploration_blocked"
         | "budget_stop";
       message: string;
       toolName?: string;

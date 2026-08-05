@@ -87,3 +87,26 @@ test("成功命令长输出仅保留尾部，失败输出保留错误证据", ()
   assert.match(result.messages[3]?.content || "", /TS2322 failure/);
   assert.equal(result.truncatedArtifactCount, 2);
 });
+
+test("单元预算视图区分当前内容、历史摘要、全局规则和工具结果", () => {
+  const result = prepareContextBudget({
+    messages: [
+      { role: "system", content: "全局安全规则" },
+      { role: "system", content: "以下是被压缩历史的结构化任务状态。\n{\"filesRead\":[\"src/old.ts\"]}" },
+      { role: "assistant", toolCalls: [{ id: "read-current", name: "readFile", arguments: { filePath: "src/current.ts" } }] },
+      { role: "tool", toolCallId: "read-current", content: JSON.stringify({ filePath: "src/current.ts", content: "export const value = 1" }) }
+    ],
+    agentContext,
+    activeDeliveryUnit: {
+      version: 1, id: "unit-current", title: "修改当前模块", sourcePlanItemIds: ["plan-current"], status: "active", completionCriteria: ["生成变更"],
+      candidateFiles: ["src/current.ts"], filesRead: [], plannedFiles: [], dependencyUnitIds: [], checkpointIds: [], verificationCommands: [], createdAt: 1, updatedAt: 1
+    },
+    options: { contextWindowTokens: 4_000, reservedOutputTokens: 300, safetyMarginTokens: 100, unitWarningRatio: 0 }
+  });
+
+  assert.equal(result.snapshot.deliveryUnit?.deliveryUnitId, "unit-current");
+  assert.ok(result.snapshot.deliveryUnit!.globalRuleTokens > 0);
+  assert.ok(result.snapshot.deliveryUnit!.historicalUnitSummaryTokens > 0);
+  assert.ok(result.snapshot.deliveryUnit!.toolResultTokens > 0);
+  assert.equal(result.snapshot.deliveryUnit?.warning, true);
+});
