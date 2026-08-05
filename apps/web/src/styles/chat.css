@@ -2333,6 +2333,20 @@
 .task-runtime-status.status-step_limit_reached,
 .task-runtime-status.status-no_progress { background: #fef2f2; border-color: #ef4444; }
 
+/* 任务结束后固定展示累计用量，避免用户只能进入历史详情才能确认资源消耗。 */
+.task-token-usage {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+}
+
+.task-token-usage strong { color: #1f2937; font-size: 12px; }
+.task-token-usage span,
+.task-token-usage small { color: #596575; font-size: 10px; line-height: 1.45; }
+
 .agent-workflow-decision {
   background: #f8fafc;
   border: 1px solid #cbd5e1;

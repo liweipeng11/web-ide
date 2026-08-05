@@ -60,6 +60,19 @@ export type AgentProgressSnapshot = {
   completedWorkflowSteps: number;
 };
 
+/**
+ * 大范围任务的单个实施批次读取预算。
+ *
+ * 全量文件清单仍保留在 searchResultFiles 中；这里仅记录当前批次已经完整读取的文件，
+ * 避免把整个迁移任务错误地当作一轮上下文处理。
+ */
+export type AgentReadBatch = {
+  index: number;
+  maxFiles: number;
+  discoveredFileCount: number;
+  filesRead: string[];
+};
+
 /** Runtime 推进持久化任务计划时附带的可审计执行证据。 */
 export type TaskProgressEvidence = {
   source: "runtime" | "approval_resume";
@@ -87,6 +100,8 @@ export type AgentContext = {
   searchQueries: string[];
   searchResultFiles: string[];
   relevantFiles: string[];
+  /** 大范围任务启用后，读取额度按当前实施批次单独计算。 */
+  readBatch?: AgentReadBatch;
   /** 完整搜索得到的未命中事实；Runtime 会把它作为后续决策依据，避免重复搜索。 */
   negativeEvidence?: NegativeEvidence[];
   /** 权威存在性检查对旧缺失结论的纠正记录，供日志和恢复诊断使用。 */

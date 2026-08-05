@@ -1448,6 +1448,72 @@ test("agent runtime recovers once and then stops after another no-progress windo
   assert.equal(steps.some((step) => step.type === "strategy" && step.event === "no_progress_stop"), true);
 });
 
+test("读取额度触顶后从后续模型工具列表移除读取工具", async () => {
+  const requests: Record<string, unknown>[] = [];
+  let modelStep = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("readFile", {
+      error: "Automatic file read limit reached.",
+      errorCode: "AUTO_READ_LIMIT_REACHED",
+      retryable: false,
+      suggestedAction: "停止读取新的文件。"
+    }),
+    createRuntimeTestTool("writeFile", { filePath: "src/result.vue", changed: true })
+  ]);
+
+  await runAgentRuntime({
+    userRequest: "迁移页面",
+    mode: "act",
+    registry,
+    maxSteps: 2,
+    contextBudgetEnabled: false,
+    requestCompletion: async (body) => {
+      requests.push(body as Record<string, unknown>);
+      modelStep += 1;
+      return modelStep === 1
+        ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [createModelToolCall("read-limit", "readFile", { filePath: "legacy.jsp" })] } }] }
+        : { choices: [{ message: { role: "assistant", content: "已切换为当前批次实施。" } }] };
+    }
+  });
+
+  const secondTools = requests[1]?.tools as Array<{ function: { name: string } }>;
+  const secondMessages = requests[1]?.messages as Array<{ content?: string }>;
+  assert.equal(secondTools.some((tool) => tool.function.name === "readFile"), false);
+  assert.equal(secondMessages.some((message) => message.content?.includes("自动读取文件上限")), true);
+});
+
+test("同一轮的后续读文件调用会在额度触顶后被 Runtime 硬拦截", async () => {
+  let readExecutionCount = 0;
+  let modelStep = 0;
+  const registry = createAgentToolRegistry([
+    createRuntimeTestTool("readFile", {
+      error: "Automatic file read limit reached.",
+      errorCode: "AUTO_READ_LIMIT_REACHED",
+      retryable: false,
+      suggestedAction: "停止读取新的文件。"
+    }, () => { readExecutionCount += 1; })
+  ]);
+
+  await runAgentRuntime({
+    userRequest: "迁移页面",
+    mode: "act",
+    registry,
+    maxSteps: 2,
+    contextBudgetEnabled: false,
+    requestCompletion: async () => {
+      modelStep += 1;
+      return modelStep === 1
+        ? { choices: [{ message: { role: "assistant", content: null, tool_calls: [
+            createModelToolCall("read-limit-first", "readFile", { filePath: "legacy-a.jsp" }),
+            createModelToolCall("read-limit-second", "readFile", { filePath: "legacy-b.jsp" })
+          ] } }] }
+        : { choices: [{ message: { role: "assistant", content: "已切换为当前批次实施。" } }] };
+    }
+  });
+
+  assert.equal(readExecutionCount, 1);
+});
+
 test("newly discovered files reset the no-progress counter", async () => {
   let execution = 0;
   const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [], (runtime) => {
@@ -2279,6 +2345,29 @@ test("act mode exposes edit, patch, and command tools to the model", async () =>
   // patch 工具排在直接编辑工具前面，引导常规修改先进入 diff 审核。
   assert.ok(toolNames.indexOf("proposePatch") < toolNames.indexOf("replaceInFile"));
   assert.ok(toolNames.indexOf("applyPatch") < toolNames.indexOf("writeFile"));
+});
+
+test("act mode 将当前命令 Shell 语法约束交给模型", async () => {
+  const requests: Record<string, unknown>[] = [];
+
+  await runAgentRuntime({
+    userRequest: "运行构建命令",
+    runId: "test-runtime-command-shell-prompt",
+    mode: "act",
+    requestCompletion: async (body) => {
+      requests.push(body);
+      return { choices: [{ message: { role: "assistant", content: "无需执行命令。" } }] };
+    }
+  });
+
+  const messages = requests[0]?.messages as Array<{ role: string; content?: string }>;
+  const systemPrompt = messages.find((message) => message.role === "system")?.content || "";
+  if (process.platform === "win32") {
+    assert.match(systemPrompt, /Windows PowerShell/);
+    assert.match(systemPrompt, /\$LASTEXITCODE/);
+  } else {
+    assert.match(systemPrompt, /命令执行环境/);
+  }
 });
 
 test("act mode blocks edits until Pattern Finder has been called", async () => {

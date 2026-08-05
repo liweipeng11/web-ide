@@ -1,6 +1,7 @@
 ﻿import { useEffect, useState } from "react";
 import type { AgentMode, AgentRuntimeStatus, TaskPlanItem, TaskPlanItemStatus, TaskSession, TaskWorkflowType } from "../api";
 import Icon from "./Icon";
+import { getTaskTokenUsageText } from "./taskTokenUsage";
 
 type Props = {
   session: TaskSession | null;
@@ -99,6 +100,8 @@ export default function TaskPlanPanel({
   const blockedCount = countByStatus(planItems, "blocked");
   const runtimeStatus = session?.runtimeStatus;
   const completionEvidence = session?.completionEvidence;
+  const tokenUsage = getTaskTokenUsageText(session?.modelUsage);
+  const taskFinished = session ? ["success", "incomplete", "blocked", "failed", "cancelled"].includes(session.status) : false;
 
   useEffect(() => {
     setEditingItemId("");
@@ -177,6 +180,14 @@ export default function TaskPlanPanel({
               待处理 {completionEvidence.pendingPlanCount} · 阻塞 {completionEvidence.blockedPlanCount}
             </small>
           )}
+        </div>
+      )}
+
+      {taskFinished && tokenUsage && (
+        <div className="task-token-usage" aria-label="本次任务 Token 消耗">
+          <strong>本次任务 Token 消耗</strong>
+          <span>{tokenUsage.summary}</span>
+          <small>{tokenUsage.detail}</small>
         </div>
       )}
 

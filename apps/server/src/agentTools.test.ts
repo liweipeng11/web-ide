@@ -92,6 +92,49 @@ test("readFile returns the first chunk instead of the entire long file", async (
   assert.equal((data.content as string).split("\n").at(-1), "line 200");
 });
 
+test("readFile 达到自动读取上限时返回不可重试的结构化错误", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  const agentContext = createAgentContext();
+  const runtime = createAgentToolRuntime({ agentContext, runId: "test-read-limit" });
+
+  for (let index = 0; index < 9; index += 1) {
+    await fs.writeFile(path.join(workspaceRoot, `file-${index}.txt`), `file ${index}`, "utf8");
+  }
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  for (let index = 0; index < 8; index += 1) {
+    await executeAgentToolCall(createToolCall("readFile", { filePath: `file-${index}.txt` }), runtime);
+  }
+  const response = await executeAgentToolCall(createToolCall("readFile", { filePath: "file-8.txt" }), runtime);
+  const data = JSON.parse(response.content) as Record<string, unknown>;
+
+  assert.equal(data.errorCode, "AUTO_READ_LIMIT_REACHED");
+  assert.equal(data.retryable, false);
+  assert.match(String(data.suggestedAction), /停止读取/);
+});
+
+test("readFile 按实施批次而非整个任务累计读取额度", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  const agentContext = createAgentContext();
+  agentContext.readBatch = { index: 1, maxFiles: 2, discoveredFileCount: 13, filesRead: [] };
+  const runtime = createAgentToolRuntime({ agentContext, runId: "test-read-batch-limit" });
+
+  for (let index = 0; index < 3; index += 1) {
+    await fs.writeFile(path.join(workspaceRoot, `batch-${index}.txt`), `file ${index}`, "utf8");
+  }
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  await executeAgentToolCall(createToolCall("readFile", { filePath: "batch-0.txt" }), runtime);
+  await executeAgentToolCall(createToolCall("readFile", { filePath: "batch-1.txt" }), runtime);
+  const blocked = await executeAgentToolCall(createToolCall("readFile", { filePath: "batch-2.txt" }), runtime);
+  assert.equal((JSON.parse(blocked.content) as Record<string, unknown>).errorCode, "AUTO_READ_LIMIT_REACHED");
+
+  agentContext.readBatch = { ...agentContext.readBatch, index: 2, filesRead: [] };
+  const nextBatch = await executeAgentToolCall(createToolCall("readFile", { filePath: "batch-2.txt" }), runtime);
+  assert.equal((JSON.parse(nextBatch.content) as Record<string, unknown>).filePath, "batch-2.txt");
+  assert.deepEqual(agentContext.readBatch.filesRead, ["batch-2.txt"]);
+});
+
 test("readFileChunk reads follow-up chunks with continuation metadata", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   const content = Array.from({ length: 5 }, (_item, index) => `line ${index + 1}`).join("\n");

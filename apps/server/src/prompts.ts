@@ -14,6 +14,7 @@ export const AI_AGENT_CONTEXT_BUDGET_PROMPT = `Context budget rules:
 - Infer 1 to 4 concise discovery terms before using search tools; never pass the full user request as a query.
 - Prefer directory and definition summaries before reading file contents; use analyzeSymbolGraph for exact definitions, references, dependencies, calls, and type propagation; use analyzeImpact for planned shared-symbol or multi-file changes.
 - Read at most 8 files automatically, and prefer fewer whenever the target is clear.
+- When discovery reveals a scope larger than the current context budget, create an implementation batch from strongly related files. Finish and validate that batch before moving to the next one; do not rely on request keywords to decide this.
 - Read only the smallest useful chunks. If hasMoreAfter is true, continue only when the missing section is necessary.
 - Do not call searchFilesByName, searchCode, or searchCodeRegex with an empty query.
 - Do not call readFile more than once for the same path; use readFileChunk only for missing ranges.

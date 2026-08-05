@@ -28,7 +28,7 @@ import {
 import { evaluateAgentToolApproval } from "./agentPermissions.js";
 import type { AgentToolRegistry } from "./agentToolRegistry.js";
 import type { AgentCompletionResponse, AgentContext, AgentProgressSnapshot, AgentToolCall, TaskProgressCallback, TaskProgressEvidence } from "./agentToolTypes.js";
-import { createAgentToolRuntime, executeAgentToolCall } from "./agentTools.js";
+import { AUTO_READ_LIMIT_REACHED, DEFAULT_AUTO_READ_BATCH_FILES, createAgentToolRuntime, executeAgentToolCall } from "./agentTools.js";
 import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
 import { createAgentStep } from "./routeAgentSteps.js";
@@ -57,6 +57,7 @@ import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
 import { parseCompleteTaskInput, type CompleteTaskInput } from "./agentCompletionTools.js";
 import { getDependencyOperationEditBlockReason } from "./dependencyOperationPolicy.js";
+import { createAgentCommandShellPrompt } from "./commandExecution/shellCapability.js";
 
 export type AgentRuntimeResult = {
   status: AgentRuntimeStatus;
@@ -171,6 +172,7 @@ function snapshotAgentContext(agentContext: AgentContext): AgentContext {
     searchQueries: [...agentContext.searchQueries],
     searchResultFiles: [...agentContext.searchResultFiles],
     relevantFiles: [...agentContext.relevantFiles],
+    readBatch: agentContext.readBatch ? { ...agentContext.readBatch, filesRead: [...agentContext.readBatch.filesRead] } : undefined,
     negativeEvidence: agentContext.negativeEvidence ? agentContext.negativeEvidence.map((evidence) => ({ ...evidence })) : undefined,
     evidenceCorrections: agentContext.evidenceCorrections ? agentContext.evidenceCorrections.map((event) => ({ ...event })) : undefined,
     createIntents: agentContext.createIntents ? agentContext.createIntents.map((intent) => ({ ...intent })) : undefined,
@@ -712,6 +714,61 @@ function getToolFailureDiagnosis(content: ModelMessage["content"]): ToolFailureD
   }
 }
 
+function isFileReadTool(toolName: string) {
+  return ["readFile", "readFileChunk", "readFileRange"].includes(toolName);
+}
+
+const LARGE_TASK_DISCOVERED_FILE_THRESHOLD = 12;
+
+/** 根据已发现的候选文件规模启用批次读取预算，不依赖用户提示中的业务关键词。 */
+function ensureReadBatchForLargeTask(agentContext: AgentContext) {
+  const discoveredFileCount = new Set(agentContext.searchResultFiles).size;
+  if (discoveredFileCount < LARGE_TASK_DISCOVERED_FILE_THRESHOLD || agentContext.readBatch) return null;
+
+  agentContext.readBatch = {
+    index: 1,
+    maxFiles: DEFAULT_AUTO_READ_BATCH_FILES,
+    discoveredFileCount,
+    filesRead: []
+  };
+  return agentContext.readBatch;
+}
+
+function createLargeTaskBatchMessage(agentContext: AgentContext): ModelMessage | null {
+  const batch = agentContext.readBatch;
+  if (!batch) return null;
+
+  return {
+    role: "user",
+    content: [
+      `已发现 ${batch.discoveredFileCount} 个候选文件，当前进入第 ${batch.index} 个实施批次。`,
+      `本批最多完整读取 ${batch.maxFiles} 个强关联文件；目录和文件名清单不占读取额度。`,
+      "请先选择一个可独立验证的功能域，完成补丁与验证后再进入下一批。不要把全部候选文件放入同一轮上下文，也不要在没有逐项证据时宣称整体完整度。"
+    ].join("\n")
+  };
+}
+
+/** 当前批次完成一次与修改关联的验证后，才开放下一批的读取额度。 */
+function advanceReadBatch(agentContext: AgentContext) {
+  const batch = agentContext.readBatch;
+  if (!batch) return null;
+  const nextBatch = { ...batch, index: batch.index + 1, filesRead: [] };
+  agentContext.readBatch = nextBatch;
+  return nextBatch;
+}
+
+/** 读取额度触顶后，强制收敛到补丁、验证或任务拆分，避免模型反复撞同一硬限制。 */
+function createAutoReadLimitRecoveryMessage(agentContext: AgentContext): ModelMessage {
+  return {
+    role: "user",
+    content: [
+      "已达到自动读取文件上限；本次运行后续不得再调用 readFile、readFileChunk 或 readFileRange。",
+      `已读取文件：${agentContext.filesRead.join("、") || "无"}。`,
+      "请基于现有证据立即选择一种行动：为当前功能批次创建补丁并运行验证，或输出按功能域拆分的后续迁移计划。不要再尝试读取新的文件。"
+    ].join("\n")
+  };
+}
+
 function createToolFailureRecoveryMessage(toolCall: ModelToolCall, diagnosis: ToolFailureDiagnosis): ModelMessage {
   const target = diagnosis.filePath || String(toolCall.arguments.filePath || "").trim();
   const readInstruction = diagnosis.errorCode === "SEARCH_BLOCK_NOT_FOUND" && target
@@ -1228,6 +1285,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     : undefined);
   const agentContext = options.agentContext || createDefaultAgentContext(options.userRequest);
   const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt(options.userRequest, agentContext));
+  // 运行时按当前操作系统生成命令约束，保证模型看到的语法与 runCommand 的真实 Shell 一致。
+  const commandShellPrompt = registry.get("runCommand") ? createAgentCommandShellPrompt() : "";
   const messages: ModelMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
   messages.forEach((message, index) => {
     message.id ??= `runtime-${runId}-${index + 1}`;
@@ -1263,6 +1322,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let consecutiveNoProgressSteps = 0;
   let recoveryAttempts = 0;
   let completionRecoveryAttempted = false;
+  let autoReadLimitReached = false;
+  let lastReadBatchValidationFingerprint = "";
   let completionRejectionState: CompletionRejectionState | undefined;
   const directAppliedFiles = new Set([
     ...(restoredRuntimeEvidence?.appliedFilePaths ?? []),
@@ -1351,7 +1412,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const budgetPhase = getAgentBudgetPhase(remainingSteps, budgetPolicy);
       const visibleToolSchemas = filterToolSchemasForBudgetPhase(registry.schemas, budgetPhase)
         .filter((schema) => explicitCompletionToolEnabled || schema.function.name !== "completeTask");
-      const currentAvailableToolNames = new Set(visibleToolSchemas.map((schema) => schema.function.name));
+      const availableToolSchemas = autoReadLimitReached
+        ? visibleToolSchemas.filter((schema) => !isFileReadTool(schema.function.name))
+        : visibleToolSchemas;
+      const currentAvailableToolNames = new Set(availableToolSchemas.map((schema) => schema.function.name));
 
     if (!budgetWarningSent && budgetPhase === "convergence") {
       const warningMessage = createToolBudgetWarningMessage(remainingSteps, generatedPatchIds.length > 0);
@@ -1377,15 +1441,17 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     const forceFinalMessage = budgetPhase === "force_final"
       ? createForceFinalMessage(agentContext, generatedPatchIds)
       : null;
-    const transientDecisionMessages = [negativeEvidenceMessage, forceFinalMessage].filter((message): message is ModelMessage => Boolean(message));
-    const separatedRequest = separateRuntimeSystemPrompt(messages, [workflowProgressPrompt]);
+    const autoReadLimitMessage = autoReadLimitReached ? createAutoReadLimitRecoveryMessage(agentContext) : null;
+    const largeTaskBatchMessage = createLargeTaskBatchMessage(agentContext);
+    const transientDecisionMessages = [negativeEvidenceMessage, forceFinalMessage, autoReadLimitMessage, largeTaskBatchMessage].filter((message): message is ModelMessage => Boolean(message));
+    const separatedRequest = separateRuntimeSystemPrompt(messages, [workflowProgressPrompt, commandShellPrompt]);
     const fullModelRequest: ModelRequest = {
       model: modelId,
       systemPrompt: separatedRequest.systemPrompt || undefined,
       temperature: config.aiChatTemperature,
       messages: transientDecisionMessages.length ? [...separatedRequest.conversationMessages, ...transientDecisionMessages] : separatedRequest.conversationMessages,
-      tools: visibleToolSchemas,
-      toolChoice: visibleToolSchemas.length ? "auto" : "none"
+      tools: availableToolSchemas,
+      toolChoice: availableToolSchemas.length ? "auto" : "none"
     };
     let modelRequest = fullModelRequest;
     if (contextBudgetEnabled) {
@@ -1839,6 +1905,26 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const signature = getToolCallSignature(toolCall);
       const repeatCount = repeatCountsByToolCall.get(toolCall) ?? 1;
 
+      // 同一模型响应可能携带多个读取调用；首个调用触顶后必须立即在 Runtime 层拦截余下调用。
+      if (autoReadLimitReached && isFileReadTool(toolCall.name)) {
+        const blockedMessage: ModelMessage = {
+          role: "tool",
+          toolCallId: toolCall.id,
+          content: JSON.stringify({
+            error: "auto_read_limit_reached",
+            errorCode: AUTO_READ_LIMIT_REACHED,
+            retryable: false,
+            toolName: toolCall.name,
+            instruction: "读取额度已用尽。本轮禁止继续读取；请基于已有证据创建补丁、运行验证，或输出分批计划。"
+          })
+        };
+        metrics.recordToolResult({ signature, noProgress: false });
+        messages.push(blockedMessage);
+        await persistAgentMessage(options.taskSessionId, blockedMessage);
+        options.onAgentStep?.(createAgentStep({ type: "tool_blocked", toolName: toolCall.name, message: "读取额度已用尽，已阻止同轮后续读取调用。" }));
+        continue;
+      }
+
       // 第三次及后续完全相同的调用由 Runtime 直接拦截，但保留本轮其他工具继续执行。
       if (repeatCount >= config.aiAgentRepeatBlockThreshold) {
         metrics.recordToolResult({ signature, noProgress: true });
@@ -2126,6 +2212,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           }
         }
         const failureDiagnosis = resultMetrics.failed ? getToolFailureDiagnosis(result.content) : null;
+        if (failureDiagnosis?.errorCode === AUTO_READ_LIMIT_REACHED) {
+          autoReadLimitReached = true;
+        }
         if (failureDiagnosis && toolCall.name === "replaceInFile" && failureDiagnosis.retryable) {
           const failedFilePath = failureDiagnosis.filePath || String(toolCall.arguments.filePath || "").trim();
           if (failedFilePath) pendingEditFailureDiagnoses.set(failedFilePath, failureDiagnosis);
@@ -2135,6 +2224,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           workflowType,
           workspaceMutationAuthorized
         });
+        ensureReadBatchForLargeTask(agentContext);
         const progressAfter = await createProgressSnapshot(agentContext, generatedPatchIds, options.taskSessionId, readScopes);
         // 结果是否为空只用于诊断；新增负面证据等状态变化仍然属于有效进展。
         const progressed = hasAgentProgress(progressBefore, progressAfter);
@@ -2149,6 +2239,23 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         messages.push(result);
         await persistAgentMessage(options.taskSessionId, result);
         const latestValidation = getLatestValidationCommand(agentContext);
+        const validationFingerprint = getCommandFingerprint(latestValidation);
+        if (
+          agentContext.readBatch
+          && latestValidation?.status === "success"
+          && validationFingerprint !== lastReadBatchValidationFingerprint
+          && (generatedPatchIds.length > 0 || directAppliedFiles.size > 0)
+        ) {
+          const nextBatch = advanceReadBatch(agentContext);
+          autoReadLimitReached = false;
+          lastReadBatchValidationFingerprint = validationFingerprint;
+          const batchMessage: ModelMessage = {
+            role: "user",
+            content: `当前实施批次已通过验证，已进入第 ${nextBatch?.index} 批。请从尚未读取的候选文件中选择下一个强关联功能域。`
+          };
+          messages.push(batchMessage);
+          await persistAgentMessage(options.taskSessionId, batchMessage);
+        }
         if (
           latestValidation?.status === "failed"
           && getCommandFingerprint(latestValidation) !== getCommandFingerprint(validationBefore)

@@ -5,6 +5,7 @@ import { formatMessageForDisplay, parseCommandSuggestion, type CommandRunState, 
 import Icon from "./Icon";
 import MarkdownPreview from "./MarkdownPreview";
 import TaskPlanPanel from "./TaskPlanPanel";
+import { getTaskTokenUsageText } from "./taskTokenUsage";
 
 type Props = {
   chatId: string;
@@ -245,6 +246,7 @@ export default function ChatPanel({
   const contextBudget = contextStatusSession?.contextBudgetSnapshot;
   const contextSummary = contextStatusSession?.contextSummary;
   const contextUsagePercent = contextBudget ? Math.min(100, Math.max(0, Math.round(contextBudget.usageRatio * 100))) : 0;
+  const selectedTaskTokenUsage = getTaskTokenUsageText(selectedTaskSession?.modelUsage);
   const selectableModels = useMemo(
     () => (modelCatalog?.providers || []).flatMap((provider) => provider.models.map((model) => ({ provider, model }))),
     [modelCatalog]
@@ -770,7 +772,12 @@ export default function ChatPanel({
               <section>
                 <h3>完整过程</h3>
                 {selectedTaskSession.modelSelection ? <p>模型：{selectedTaskSession.modelSelection.providerId} / {selectedTaskSession.modelSelection.modelId}</p> : null}
-                {selectedTaskSession.modelUsage ? <p>Usage：输入 {selectedTaskSession.modelUsage.inputTokens.toLocaleString()} / 输出 {selectedTaskSession.modelUsage.outputTokens.toLocaleString()} tokens；{selectedTaskSession.estimatedCostUsd === null || selectedTaskSession.estimatedCostUsd === undefined ? "费用无法估算" : `约 $${selectedTaskSession.estimatedCostUsd.toFixed(6)}`}</p> : null}
+                {selectedTaskTokenUsage ? (
+                  <p>
+                    本次任务 Token 消耗：{selectedTaskTokenUsage.summary}；{selectedTaskTokenUsage.detail}；
+                    {selectedTaskSession.estimatedCostUsd === null || selectedTaskSession.estimatedCostUsd === undefined ? "费用无法估算" : `约 $${selectedTaskSession.estimatedCostUsd.toFixed(6)}`}
+                  </p>
+                ) : null}
                 <AgentStepsPanel steps={selectedTaskSession.steps} disabled={disabled || loading} onDecideApproval={onDecideApproval} onRollbackCheckpoint={onRollbackCheckpoint} />
               </section>
             </div>

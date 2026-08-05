@@ -26,9 +26,12 @@ type ToolFailurePayload = {
   status?: number;
 };
 
+/** 自动读取额度已经用完时的稳定错误码，供 Runtime 切换到实施策略。 */
+export const AUTO_READ_LIMIT_REACHED = "AUTO_READ_LIMIT_REACHED";
+
 // 中等复杂度任务经常需要同时比对多个入口、路由和组件文件，5 个文件的上限过于激进，
 // 容易在真正进入修改/审批前就提前失败。
-const MAX_AUTO_READ_FILES = 8;
+export const DEFAULT_AUTO_READ_BATCH_FILES = 8;
 const MAX_READ_FILE_CHARS = 20_000;
 const DEFAULT_READ_CHUNK_LINES = 200;
 const MAX_READ_RANGE_LINES = 240;
@@ -37,6 +40,42 @@ const MAX_FILE_SEARCH_RESULTS = 2000;
 
 function uniquePush(values: string[], value: string) {
   if (value && !values.includes(value)) values.push(value);
+}
+
+/**
+ * 读取额度是策略边界而非临时 I/O 异常。携带结构化字段后，Runtime 可禁止继续读文件，
+ * 并要求模型使用已获得的证据开始实施或拆分任务。
+ */
+function getReadBudget(runtime: AgentToolRuntime) {
+  const batch = runtime.agentContext.readBatch;
+  return {
+    maxFiles: batch?.maxFiles ?? DEFAULT_AUTO_READ_BATCH_FILES,
+    filesRead: batch?.filesRead ?? runtime.agentContext.filesRead,
+    batchIndex: batch?.index
+  };
+}
+
+function recordFileRead(runtime: AgentToolRuntime, filePath: string) {
+  uniquePush(runtime.agentContext.filesRead, filePath);
+  uniquePush(runtime.agentContext.relevantFiles, filePath);
+  if (runtime.agentContext.readBatch) uniquePush(runtime.agentContext.readBatch.filesRead, filePath);
+}
+
+function assertReadBudget(runtime: AgentToolRuntime, filePath: string) {
+  const budget = getReadBudget(runtime);
+  if (!budget.filesRead.includes(filePath) && budget.filesRead.length >= budget.maxFiles) {
+    throw createAutoReadLimitError(filePath, budget.maxFiles, budget.batchIndex);
+  }
+}
+
+function createAutoReadLimitError(filePath: string, maxFiles: number, batchIndex?: number) {
+  const batchLabel = batchIndex ? ` for batch ${batchIndex}` : "";
+  return Object.assign(new Error(`Automatic file read limit reached${batchLabel}. You may read at most ${maxFiles} files.`), {
+    errorCode: AUTO_READ_LIMIT_REACHED,
+    retryable: false,
+    filePath,
+    suggestedAction: "停止读取新的文件；基于已读取的文件创建当前批次的补丁并验证。若当前批次无法安全实施，请输出分批迁移计划。"
+  });
 }
 
 /**
@@ -937,14 +976,11 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
     async execute(args, runtime) {
       const filePath = requiredString(args, "filePath");
 
-      if (!runtime.agentContext.filesRead.includes(filePath) && runtime.agentContext.filesRead.length >= MAX_AUTO_READ_FILES) {
-        throw new Error(`Automatic file read limit reached. You may read at most ${MAX_AUTO_READ_FILES} files.`);
-      }
+      assertReadBudget(runtime, filePath);
 
       const chunk = await readWorkspaceFileChunk(filePath, 1, DEFAULT_READ_CHUNK_LINES);
       const charTruncated = chunk.content.length > MAX_READ_FILE_CHARS;
-      uniquePush(runtime.agentContext.filesRead, filePath);
-      uniquePush(runtime.agentContext.relevantFiles, filePath);
+      recordFileRead(runtime, filePath);
 
       return {
         filePath,
@@ -1003,14 +1039,11 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         throw new Error("endLine must be greater than or equal to startLine");
       }
 
-      if (!runtime.agentContext.filesRead.includes(filePath) && runtime.agentContext.filesRead.length >= MAX_AUTO_READ_FILES) {
-        throw new Error(`Automatic file read limit reached. You may read at most ${MAX_AUTO_READ_FILES} files.`);
-      }
+      assertReadBudget(runtime, filePath);
 
       const chunk = await readWorkspaceFileChunk(filePath, startLine, endLine);
       const charTruncated = chunk.content.length > MAX_READ_FILE_CHARS;
-      uniquePush(runtime.agentContext.filesRead, filePath);
-      uniquePush(runtime.agentContext.relevantFiles, filePath);
+      recordFileRead(runtime, filePath);
 
       return {
         filePath,
@@ -1072,14 +1105,11 @@ export const readonlyAgentToolDefinitions: AgentToolDefinition[] = [
         throw new Error("endLine must be greater than or equal to startLine");
       }
 
-      if (!runtime.agentContext.filesRead.includes(filePath) && runtime.agentContext.filesRead.length >= MAX_AUTO_READ_FILES) {
-        throw new Error(`Automatic file read limit reached. You may read at most ${MAX_AUTO_READ_FILES} files.`);
-      }
+      assertReadBudget(runtime, filePath);
 
       const range = await readWorkspaceFileRange(filePath, startLine, endLine);
       const charTruncated = range.content.length > MAX_READ_FILE_CHARS;
-      uniquePush(runtime.agentContext.filesRead, filePath);
-      uniquePush(runtime.agentContext.relevantFiles, filePath);
+      recordFileRead(runtime, filePath);
 
       return {
         filePath,
@@ -1446,10 +1476,26 @@ function createToolFailurePayload(toolName: string, args: Record<string, unknown
   const exception = error instanceof Error ? error : null;
   const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const status = typeof record.status === "number" ? record.status : undefined;
+  const errorCode = typeof record.errorCode === "string" ? record.errorCode : undefined;
+  const retryable = record.retryable === true;
+  const suggestedAction = typeof record.suggestedAction === "string" ? record.suggestedAction : undefined;
   const filePath = typeof record.filePath === "string"
     ? record.filePath
     : typeof args.filePath === "string" ? args.filePath : undefined;
   const message = exception?.message || `${toolName} failed`;
+
+  if (errorCode === AUTO_READ_LIMIT_REACHED) {
+    return {
+      ...args,
+      error: message,
+      errorCode,
+      retryable,
+      suggestedAction: suggestedAction || "停止读取新的文件，并基于已读取证据实施当前批次或拆分任务。",
+      toolName,
+      status,
+      ...(filePath ? { filePath } : {})
+    };
+  }
 
   if (exception?.name === "SearchReplaceMismatchError") {
     return {
