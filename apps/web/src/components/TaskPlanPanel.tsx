@@ -41,7 +41,8 @@ const runtimeStatusView: Record<AgentRuntimeStatus, { label: string; detail: str
   incomplete: { label: "尚未完成，可继续", detail: "仍有可执行的恢复动作" },
   blocked: { label: "已阻塞，需要处理", detail: "需要用户、权限或外部条件介入" },
   step_limit_reached: { label: "达到步骤上限", detail: "本轮已停止，可继续任务" },
-  no_progress: { label: "无进展停止", detail: "策略恢复后仍未获得新进展" }
+  no_progress: { label: "无进展停止", detail: "策略恢复后仍未获得新进展" },
+  failed: { label: "执行失败", detail: "出现无法安全恢复的内部错误" }
 };
 
 function getRevisionTriggerText(trigger: string) {

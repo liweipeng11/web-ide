@@ -8,7 +8,7 @@ import type { AgentCompletionResponse, AgentToolDefinition, AgentToolRuntime } f
 import type { AgentStep } from "./types.js";
 import { createTaskWorkflow } from "./taskWorkflow/index.js";
 import type { RunMetrics } from "./observability/index.js";
-import { resolveAgentNoProgressPolicy, resolveAgentRepeatToolCallThresholds } from "./config.js";
+import { config, resolveAgentNoProgressPolicy, resolveAgentRepeatToolCallThresholds } from "./config.js";
 import { completionAgentToolDefinitions } from "./agentCompletionTools.js";
 import { createPendingPatch, deletePendingPatch } from "./patchStore.js";
 
@@ -680,6 +680,53 @@ test("阶段零脚本夹具可重放发现后空搜索，并断言无进展停�
   assert.equal(capturedMetrics?.result.patchFileCount, 0);
   assert.equal(capturedMetrics?.result.stopReason, "no_progress");
   assert.equal(capturedMetrics?.tools.maxConsecutiveNoProgressSteps, 2);
+});
+
+test("渐进恢复开关开启后，无进展会返回可继续的不完整状态", async () => {
+  const previousFlag = config.featureFlags.progressiveRecovery;
+  config.featureFlags.progressiveRecovery = true;
+  try {
+    const registry = createAgentToolRegistry([createRuntimeTestTool("searchCode", [])]);
+    const result = await runAgentRuntime({
+      userRequest: "离线渐进恢复夹具",
+      registry,
+      contextBudgetEnabled: false,
+      maxNoProgressSteps: 2,
+      recoveryAttempts: 0,
+      requestCompletion: createScriptedModel(Array.from({ length: 3 }, (_, index) => ({
+        choices: [{ message: { role: "assistant" as const, content: null, tool_calls: [createModelToolCall(`progressive-${index}`, "searchCode", { query: `missing-${index}` })] } }]
+      })))
+    });
+    assert.equal(result.status, "incomplete");
+    assert.match(result.statusReason || "", /停止本次运行|重新规划/);
+  } finally {
+    config.featureFlags.progressiveRecovery = previousFlag;
+  }
+});
+
+test("渐进恢复将不可安全恢复的内部错误标记为 failed", async () => {
+  const previousFlag = config.featureFlags.progressiveRecovery;
+  config.featureFlags.progressiveRecovery = true;
+  try {
+    const registry = createAgentToolRegistry([createRuntimeTestTool("brokenTool", {
+      error: "internal runtime failure",
+      errorCode: "INTERNAL_ERROR",
+      retryable: false
+    })]);
+    const result = await runAgentRuntime({
+      userRequest: "离线内部错误夹具",
+      registry,
+      contextBudgetEnabled: false,
+      maxNoProgressSteps: 1,
+      recoveryAttempts: 0,
+      requestCompletion: createScriptedModel([{
+        choices: [{ message: { role: "assistant" as const, content: null, tool_calls: [createModelToolCall("internal-error", "brokenTool", {})] } }]
+      }])
+    });
+    assert.equal(result.status, "failed");
+  } finally {
+    config.featureFlags.progressiveRecovery = previousFlag;
+  }
 });
 
 test("阶段零脚本夹具可重放工具失败后生成补丁，保留既有 Runtime 行为", async () => {

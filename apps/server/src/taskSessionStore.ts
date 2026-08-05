@@ -450,7 +450,7 @@ function normalizeToolFailureDiagnostics(value: unknown): ToolFailureDiagnostic[
   return value.filter((item): item is Partial<ToolFailureDiagnostic> => Boolean(item && typeof item === "object" && !Array.isArray(item))).map((item) => ({
     version: 1 as const, id: typeof item.id === "string" && item.id.trim() ? item.id : `tool-failure-${crypto.randomUUID()}`,
     toolName: sanitizeSessionSummary(item.toolName, 100) || "unknown", parameterSummary: sanitizeSessionSummary(item.parameterSummary),
-    errorCode: sanitizeSessionSummary(item.errorCode, 100) || undefined, errorCategory: sanitizeSessionSummary(item.errorCategory, 100) || "unknown",
+    errorCode: sanitizeSessionSummary(item.errorCode, 100) || undefined, errorSignature: sanitizeSessionSummary(item.errorSignature, 240) || undefined, errorCategory: sanitizeSessionSummary(item.errorCategory, 100) || "unknown",
     retryable: Boolean(item.retryable), deliveryUnitId: typeof item.deliveryUnitId === "string" && item.deliveryUnitId.trim() ? item.deliveryUnitId : undefined,
     createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now()
   })).sort((left, right) => left.createdAt - right.createdAt).slice(-100);
@@ -1581,7 +1581,9 @@ export async function getTaskSessionContextState(taskSessionId: string) {
     filesChanged: session.filesChanged,
     contextSummary: session.contextSummary,
     pendingToolCall: session.pendingToolCall,
-    runtimeEvidence: session.runtimeEvidence
+    runtimeEvidence: session.runtimeEvidence,
+    deliveryUnits: session.deliveryUnits ?? [],
+    activeDeliveryUnitId: session.activeDeliveryUnitId
   };
 }
 

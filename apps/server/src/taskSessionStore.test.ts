@@ -36,7 +36,7 @@ test("阶段 1 状态可持久化、脱敏并与计划双向同步", async () =>
 
     const active = await setActiveTaskSessionDeliveryUnit(session.id, "unit-service");
     assert.equal(active?.planItems?.[0]?.status, "in_progress");
-    await appendTaskSessionToolFailureDiagnostic(session.id, { toolName: "runCommand", parameterSummary: "token=secret-value", errorCategory: "transient", retryable: true, deliveryUnitId: "unit-service" });
+    await appendTaskSessionToolFailureDiagnostic(session.id, { toolName: "runCommand", parameterSummary: "token=secret-value", errorSignature: "raw-token=secret-value", errorCategory: "transient", retryable: true, deliveryUnitId: "unit-service" });
     await appendTaskSessionRecoveryDecision(session.id, { triggerSignal: "no_progress", candidateActions: ["retry", "replan"], finalAction: "replan", reason: "需要更多上下文", evidence: ["无新增文件"], deliveryUnitId: "unit-service" });
     await setTaskSessionContinuation(session.id, { nextStep: "replan", requiredUserInputs: [], autoContinueConditions: ["补齐文件范围"], message: "建议重新规划", deliveryUnitId: "unit-service" });
 
@@ -46,6 +46,7 @@ test("阶段 1 状态可持久化、脱敏并与计划双向同步", async () =>
     const restored = await getTaskSession(session.id);
     assert.equal(restored.activeDeliveryUnitId, undefined);
     assert.equal(restored.toolFailureDiagnostics?.[0]?.parameterSummary.includes("secret-value"), false);
+    assert.equal(restored.toolFailureDiagnostics?.[0]?.errorSignature?.includes("secret-value"), false);
     assert.equal(restored.recoveryHistory?.[0]?.finalAction, "replan");
     assert.equal(restored.continuation?.nextStep, "replan");
   } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }

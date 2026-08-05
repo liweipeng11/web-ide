@@ -534,7 +534,8 @@ export type AgentRuntimeStatus =
   | "incomplete"
   | "blocked"
   | "step_limit_reached"
-  | "no_progress";
+  | "no_progress"
+  | "failed";
 
 export type ReferenceResolutionStatus =
   | "existing"

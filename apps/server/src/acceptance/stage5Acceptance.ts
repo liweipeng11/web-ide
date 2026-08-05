@@ -28,7 +28,7 @@ export type Stage5AcceptanceReport = {
 };
 
 // 阶段 5 的历史验收仅覆盖当时已发布能力；阶段 0 的默认关闭开关由专用夹具验收。
-const featureLabels: Record<Exclude<keyof FeatureFlags, "progressiveDelivery">, string> = {
+const featureLabels: Record<Exclude<keyof FeatureFlags, "progressiveDelivery" | "progressiveRecovery">, string> = {
   contextBudgetV2: "Context Budget V2",
   modelProviderGateway: "Model Provider Gateway",
   lsp: "Language Service / LSP",
@@ -55,7 +55,9 @@ const disabledEnvironment: NodeJS.ProcessEnv = {
   AGENT_EXPLICIT_COMPLETION_TOOL: "0",
   AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE: "0",
   AGENT_COMPLETION_REJECTION_CONVERGENCE: "0",
-  AGENT_STRUCTURED_COMPLETION_REJECTION: "0"
+  AGENT_STRUCTURED_COMPLETION_REJECTION: "0",
+  AGENT_PROGRESSIVE_DELIVERY_ENABLED: "0",
+  AGENT_PROGRESSIVE_RECOVERY_ENABLED: "0"
 };
 
 /**

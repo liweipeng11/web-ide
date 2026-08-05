@@ -31,8 +31,8 @@ import type { AgentCompletionResponse, AgentContext, AgentProgressSnapshot, Agen
 import { AUTO_READ_LIMIT_REACHED, DEFAULT_AUTO_READ_BATCH_FILES, createAgentToolRuntime, executeAgentToolCall } from "./agentTools.js";
 import { createAiRunId, logAi, requestChatCompletion } from "./aiHttp.js";
 import { config } from "./config.js";
-import { createAgentStep } from "./routeAgentSteps.js";
-import type { AgentMessage as PersistedAgentMessage, AgentRuntimeStatus, AgentStep, CompletionRejectionCode, PendingAgentToolCall, TaskPlanItem, TaskRuntimeEvidence } from "./types.js";
+import { createAgentStep, createProgressiveDeliveryStep } from "./routeAgentSteps.js";
+import type { AgentMessage as PersistedAgentMessage, AgentRuntimeStatus, AgentStep, CompletionRejectionCode, DeliveryUnit, PendingAgentToolCall, TaskPlanItem, TaskRuntimeEvidence, ToolFailureDiagnostic } from "./types.js";
 import {
   buildTaskWorkflowProgressPrompt,
   buildTaskWorkflowRuntimePrompt,
@@ -52,7 +52,8 @@ import { getPendingPatch } from "./patchStore.js";
 import { ConservativeTokenEstimator, prepareContextBudget } from "./contextBudget/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { implementedFeatures, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, type CompletionPolicyFeatureFlags, type CompletionPolicyRolloutConfig, type ExplicitCompletionRolloutConfig } from "./featureFlags.js";
-import { getTaskSessionContextState, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, setTaskSessionRuntimeEvidence } from "./taskSessionStore.js";
+import { appendTaskSessionRecoveryDecision, appendTaskSessionToolFailureDiagnostic, getTaskSessionContextState, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, setTaskSessionContinuation, setTaskSessionRuntimeEvidence } from "./taskSessionStore.js";
+import { decideRecovery, evaluateProgress } from "./progressRecovery.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
 import { providerGateway } from "./providers/index.js";
 import { parseCompleteTaskInput, type CompleteTaskInput } from "./agentCompletionTools.js";
@@ -119,7 +120,7 @@ export type AgentRuntimeOptions = {
 };
 
 async function loadRuntimeContextState(taskSessionId: string | null | undefined) {
-  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined };
+  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, activeDeliveryUnit: undefined as DeliveryUnit | undefined };
   try {
     const session = await getTaskSessionContextState(taskSessionId);
     return {
@@ -132,11 +133,12 @@ async function loadRuntimeContextState(taskSessionId: string | null | undefined)
       unresolvedQuestions: (session.planItems ?? []).filter((item) => item.status === "blocked").map((item) => item.note || item.title),
       contextSummary: session.contextSummary ?? null,
       pendingToolCall: session.pendingToolCall ?? null,
-      runtimeEvidence: session.runtimeEvidence
+      runtimeEvidence: session.runtimeEvidence,
+      activeDeliveryUnit: session.deliveryUnits?.find((unit) => unit.id === session.activeDeliveryUnitId)
     };
   } catch {
     // 无持久化任务的单元调用继续使用 Runtime 内存状态。
-    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined };
+    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, activeDeliveryUnit: undefined as DeliveryUnit | undefined };
   }
 }
 
@@ -658,6 +660,14 @@ function getToolCallSignature(toolCall: ModelToolCall) {
   return `${toolCall.name}:${stableStringify(toolCall.arguments)}`;
 }
 
+/** 仅持久化不可逆摘要，避免错误重试去重逻辑把原始工具参数写入任务会话。 */
+function createToolFailureSignature(toolCall: ModelToolCall, errorCode: string) {
+  return crypto.createHash("sha256")
+    .update(`${getToolCallSignature(toolCall)}:${errorCode}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
 function analyzeToolResult(content: ModelMessage["content"]) {
   if (typeof content !== "string") return { cached: false, empty: false, failed: false };
 
@@ -692,6 +702,19 @@ type ToolFailureDiagnosis = {
   suggestedAction: string;
   filePath?: string;
 };
+
+/** 将工具错误码归类为恢复策略可消费的通用类别，未知错误仍按普通工具失败处理。 */
+function classifyToolFailureCategory(diagnosis: ToolFailureDiagnosis): ToolFailureDiagnostic["errorCategory"] {
+  if (diagnosis.retryable) return "transient";
+  const errorCode = diagnosis.errorCode.toUpperCase();
+  if (errorCode.includes("STORAGE") && (errorCode.includes("CORRUPT") || errorCode.includes("INTEGRITY"))) return "storage_corruption";
+  if (errorCode.includes("INTERNAL")) return "internal";
+  if (errorCode.includes("PERMISSION") || errorCode.includes("UNAUTHORIZED") || errorCode.includes("FORBIDDEN")) return "permission";
+  if (errorCode.includes("DEPENDENCY")) return "dependency";
+  if (errorCode.includes("CONFLICT")) return "conflict";
+  if (errorCode.includes("EXTERNAL")) return "external";
+  return "tool_error";
+}
 
 /** 从结构化工具错误中提取恢复决策；兼容历史仅含 error 字段的工具结果。 */
 function getToolFailureDiagnosis(content: ModelMessage["content"]): ToolFailureDiagnosis | null {
@@ -1321,6 +1344,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let budgetWarningSent = false;
   let consecutiveNoProgressSteps = 0;
   let recoveryAttempts = 0;
+  let lastFailureDiagnostic: ToolFailureDiagnostic | undefined;
+  // 同一错误签名独立计数，防止一次可重试标记被不同错误无限复用。
+  const transientFailureRetryCounts = new Map<string, number>();
+  let lastProgressFacts: string[] = [];
   let completionRecoveryAttempted = false;
   let autoReadLimitReached = false;
   let lastReadBatchValidationFingerprint = "";
@@ -2227,7 +2254,10 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         ensureReadBatchForLargeTask(agentContext);
         const progressAfter = await createProgressSnapshot(agentContext, generatedPatchIds, options.taskSessionId, readScopes);
         // 结果是否为空只用于诊断；新增负面证据等状态变化仍然属于有效进展。
-        const progressed = hasAgentProgress(progressBefore, progressAfter);
+        const activeDeliveryUnit = (await loadRuntimeContextState(options.taskSessionId)).activeDeliveryUnit;
+        const progressEvaluation = evaluateProgress(progressBefore, progressAfter, activeDeliveryUnit);
+        const progressed = progressEvaluation.progressed;
+        lastProgressFacts = progressEvaluation.facts;
         if (resultMetrics.failed) metrics.recordToolFailure();
         metrics.recordToolResult({
           signature,
@@ -2292,9 +2322,35 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
           }));
         }
         if (failureDiagnosis) {
+          const errorSignature = createToolFailureSignature(toolCall, failureDiagnosis.errorCode);
+          lastFailureDiagnostic = {
+            version: 1,
+            id: `runtime-failure-${crypto.randomUUID()}`,
+            toolName: toolCall.name,
+            parameterSummary: String(toolCall.arguments.filePath || toolCall.arguments.query || toolCall.arguments.command || "").slice(0, 200),
+            errorCode: failureDiagnosis.errorCode,
+            errorSignature,
+            errorCategory: classifyToolFailureCategory(failureDiagnosis),
+            retryable: failureDiagnosis.retryable,
+            deliveryUnitId: activeDeliveryUnit?.id,
+            createdAt: Date.now()
+          };
+          await appendTaskSessionToolFailureDiagnostic(options.taskSessionId, lastFailureDiagnostic);
+          options.onAgentStep?.(createProgressiveDeliveryStep({
+            event: "tool_failure_recorded",
+            details: {
+              toolName: lastFailureDiagnostic.toolName,
+              errorCode: lastFailureDiagnostic.errorCode,
+              errorCategory: lastFailureDiagnostic.errorCategory,
+              retryable: lastFailureDiagnostic.retryable
+            }
+          }));
           const recoveryMessage = createToolFailureRecoveryMessage(toolCall, failureDiagnosis);
           messages.push(recoveryMessage);
           await persistAgentMessage(options.taskSessionId, recoveryMessage);
+        } else if (!resultMetrics.failed) {
+          // 后续成功或非失败结果不能继承早先临时错误的自动重试资格。
+          lastFailureDiagnostic = undefined;
         }
         const newEvidence = (agentContext.negativeEvidence || []).filter((item) => {
           if (!item.exhaustive) return false;
@@ -2396,6 +2452,59 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     }
 
     if (consecutiveNoProgressSteps >= maxNoProgressSteps) {
+      if (config.featureFlags.progressiveRecovery && implementedFeatures.progressiveRecovery) {
+        const taskStateForRecovery = await loadRuntimeContextState(options.taskSessionId);
+        const decision = decideRecovery({
+          consecutiveNoProgressSteps,
+          maxNoProgressSteps,
+          recoveryAttempts,
+          allowedRecoveryAttempts,
+          remainingSteps: maxSteps - step - 1,
+          activeDeliveryUnit: taskStateForRecovery.activeDeliveryUnit,
+          hasDeliverable: generatedPatchIds.length > 0 || directAppliedFiles.size > 0,
+          pendingPlanCount: taskStateForRecovery.planItems.filter((item) => item.status === "pending" || item.status === "in_progress").length,
+          sameFailureRetryCount: lastFailureDiagnostic?.errorSignature ? transientFailureRetryCounts.get(lastFailureDiagnostic.errorSignature) ?? 0 : 0,
+          lastFailure: lastFailureDiagnostic
+        });
+        const facts = [...new Set([...lastProgressFacts, ...buildRecoveryFacts(agentContext, generatedPatchIds)])];
+        await appendTaskSessionRecoveryDecision(options.taskSessionId, { triggerSignal: "no_progress", candidateActions: decision.candidateActions, finalAction: decision.action, reason: decision.reason, evidence: facts, deliveryUnitId: taskStateForRecovery.activeDeliveryUnit?.id });
+        await setTaskSessionContinuation(options.taskSessionId, {
+          nextStep: decision.continuation,
+          requiredUserInputs: decision.action === "await_user" ? [{ field: "recovery_decision", label: "请提供继续执行所需的权限、依赖或目标选择", required: true }] : [],
+          autoContinueConditions: decision.action === "switch_strategy" || decision.action === "retry_transient" ? ["必须使用与失败调用不同的工具参数或策略"] : ["保留已记录事实、补丁和验证结果"],
+          message: decision.reason,
+          deliveryUnitId: taskStateForRecovery.activeDeliveryUnit?.id
+        });
+        if (decision.action === "retry_transient" || decision.action === "switch_strategy") {
+          if (decision.action === "retry_transient" && lastFailureDiagnostic?.errorSignature) {
+            transientFailureRetryCounts.set(
+              lastFailureDiagnostic.errorSignature,
+              (transientFailureRetryCounts.get(lastFailureDiagnostic.errorSignature) ?? 0) + 1
+            );
+          }
+          recoveryAttempts += 1;
+          consecutiveNoProgressSteps = 0;
+          metrics.recordStrategyRecovery();
+          const recoveryMessage = createNoProgressRecoveryMessage(maxNoProgressSteps, recoveryAttempts, agentContext, generatedPatchIds);
+          messages.push(recoveryMessage);
+          await persistAgentMessage(options.taskSessionId, recoveryMessage);
+          options.onAgentStep?.(createAgentStep({ type: "strategy", event: "no_progress_recovery", message: `${decision.reason}（${recoveryAttempts}/${allowedRecoveryAttempts}）。`, currentStep: step + 1, maxSteps, facts }));
+          continue;
+        }
+        const content = `${decision.reason}\n\n已保存的事实：\n${facts.map((fact) => `- ${fact}`).join("\n")}`;
+        if (decision.action === "replan") {
+          options.onAgentStep?.(createProgressiveDeliveryStep({ event: "replan_requested", details: { deliveryUnitId: taskStateForRecovery.activeDeliveryUnit?.id, facts } }));
+        }
+        if (decision.action === "await_user") {
+          options.onAgentStep?.(createProgressiveDeliveryStep({ event: "awaiting_user_decision", details: { deliveryUnitId: taskStateForRecovery.activeDeliveryUnit?.id, facts } }));
+        }
+        options.onAgentStep?.(createAgentStep({ type: "strategy", event: "no_progress_stop", message: content, currentStep: step + 1, maxSteps, facts }));
+        if (decision.action === "fail") options.onAgentStep?.(createAgentStep({ type: "error", message: content }));
+        const status: AgentRuntimeStatus = decision.action === "fail" ? "failed" : "incomplete";
+        await metrics.finish({ status: decision.action === "fail" ? "failed" : "incomplete", stopReason: decision.action === "fail" ? "no_progress" : "incomplete", failureCategory: decision.action === "fail" ? "tool_error" : "none", patchFileCount: countGeneratedPatchFiles(generatedPatchIds) });
+        await persistRuntimeEvidence();
+        return { status, runId, content, messages, agentContext, generatedPatchIds, runtimeEvidence: snapshotRuntimeEvidence(), pendingToolCall: null, contextBudgetSnapshot: latestContextBudgetSnapshot, contextSummary: latestContextSummary, statusReason: decision.reason };
+      }
       if (recoveryAttempts < allowedRecoveryAttempts) {
         recoveryAttempts += 1;
         consecutiveNoProgressSteps = 0;

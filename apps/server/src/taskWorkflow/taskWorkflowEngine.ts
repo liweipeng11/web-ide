@@ -84,6 +84,7 @@ export function createTaskWorkflow(userGoal: string, classification?: AgentReque
 }
 
 export function resolveRuntimeTaskStatus(runtimeStatus: AgentRuntimeStatus): TaskSessionStatus {
+  if (runtimeStatus === "failed") return "failed";
   if (runtimeStatus === "completed") return "success";
   if (runtimeStatus === "awaiting_approval") return "awaiting_approval";
   if (runtimeStatus === "incomplete") return "incomplete";

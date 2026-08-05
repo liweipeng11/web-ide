@@ -255,6 +255,12 @@ stateDiagram-v2
 - 没有补丁但存在明确待处理计划时，最终状态为 `awaiting_replan` 或 `incomplete`，不是伪完成。
 - 真正内部错误仍可靠地返回 `failed`。
 
+### 实施记录
+
+- 已新增独立的进展向量与恢复决策纯函数，覆盖新文件、负面证据、补丁、变更、验证和工作流推进。
+- 已通过 `AGENT_PROGRESSIVE_RECOVERY_ENABLED` 灰度接入 Runtime；默认关闭时继续执行原有 `no_progress` 路径。
+- 开关启用后，恢复决策、脱敏工具诊断和继续建议会写入任务会话；重规划或延后返回 `incomplete`，不再伪装为失败。
+
 ## 阶段 4：将上下文预算纳入批次编排
 
 ### 目标

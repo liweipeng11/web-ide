@@ -161,6 +161,7 @@ test("resolves Plan mode completion without claiming edit workflows succeeded", 
   assert.equal(resolvePlanModeTaskStatus("analysis-only", "incomplete"), "incomplete");
   assert.equal(resolvePlanModeTaskStatus("analysis-only", "blocked"), "blocked");
   assert.equal(resolveRuntimeTaskStatus("completed"), "success");
+  assert.equal(resolveRuntimeTaskStatus("failed"), "failed");
   assert.equal(resolveRuntimeTaskStatus("incomplete"), "incomplete");
   assert.equal(resolveRuntimeTaskStatus("blocked"), "blocked");
   assert.equal(isTerminalTaskSessionStatus("success"), true);

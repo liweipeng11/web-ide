@@ -404,7 +404,8 @@ export type AgentRuntimeStatus =
   | "incomplete"
   | "blocked"
   | "step_limit_reached"
-  | "no_progress";
+  | "no_progress"
+  | "failed";
 
 export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
 
@@ -435,6 +436,8 @@ export type ToolFailureDiagnostic = {
   toolName: string;
   parameterSummary: string;
   errorCode?: string;
+  /** 工具名、脱敏参数摘要和错误码构成的稳定签名，用于限制同类临时错误重试。 */
+  errorSignature?: string;
   errorCategory: string;
   retryable: boolean;
   deliveryUnitId?: string;
