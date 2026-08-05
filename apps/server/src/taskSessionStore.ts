@@ -5,7 +5,7 @@ import { getCheckpoint } from "./checkpointStore.js";
 import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
 import { readJsonStateFile, writeJsonStateFile } from "./stateFileStorage.js";
-import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskRuntimeEvidence, TaskSession, TaskSessionFinalizationSource, TaskSessionTerminalStatus } from "./types.js";
+import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, DeliveryUnit, DeliveryUnitStatus, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, RecoveryDecision, TaskContinuation, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskRuntimeEvidence, TaskSession, TaskSessionFinalizationSource, TaskSessionTerminalStatus, ToolFailureDiagnostic } from "./types.js";
 import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
@@ -417,6 +417,72 @@ function normalizeStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())) : [];
 }
 
+function isDeliveryUnitStatus(value: unknown): value is DeliveryUnitStatus {
+  return value === "pending" || value === "active" || value === "validated" || value === "blocked" || value === "deferred";
+}
+
+function sanitizeSessionSummary(value: unknown, maxLength = 500) {
+  if (typeof value !== "string") return "";
+  // 避免诊断摘要意外持久化常见密钥字段；完整参数和错误输出不允许进入会话。
+  return value.replace(/(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+/gi, "$1=[已脱敏]").replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function normalizeDeliveryUnits(value: unknown): DeliveryUnit[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Partial<DeliveryUnit> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      version: 1 as const,
+      id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : `unit-${crypto.randomUUID()}`,
+      title: sanitizeSessionSummary(item.title, 160),
+      sourcePlanItemIds: unique(normalizeStringArray(item.sourcePlanItemIds)),
+      status: isDeliveryUnitStatus(item.status) ? item.status : "pending",
+      completionCriteria: unique(normalizeStringArray(item.completionCriteria).map((entry) => sanitizeSessionSummary(entry, 300)).filter(Boolean)),
+      candidateFiles: unique(normalizeStringArray(item.candidateFiles)), filesRead: unique(normalizeStringArray(item.filesRead)), plannedFiles: unique(normalizeStringArray(item.plannedFiles)),
+      dependencyUnitIds: unique(normalizeStringArray(item.dependencyUnitIds)), checkpointIds: unique(normalizeStringArray(item.checkpointIds)), verificationCommands: unique(normalizeStringArray(item.verificationCommands).map((entry) => sanitizeSessionSummary(entry, 300)).filter(Boolean)),
+      createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now(), updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : Date.now()
+    }))
+    .filter((item) => item.title && item.sourcePlanItemIds.length);
+}
+
+function normalizeToolFailureDiagnostics(value: unknown): ToolFailureDiagnostic[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Partial<ToolFailureDiagnostic> => Boolean(item && typeof item === "object" && !Array.isArray(item))).map((item) => ({
+    version: 1 as const, id: typeof item.id === "string" && item.id.trim() ? item.id : `tool-failure-${crypto.randomUUID()}`,
+    toolName: sanitizeSessionSummary(item.toolName, 100) || "unknown", parameterSummary: sanitizeSessionSummary(item.parameterSummary),
+    errorCode: sanitizeSessionSummary(item.errorCode, 100) || undefined, errorCategory: sanitizeSessionSummary(item.errorCategory, 100) || "unknown",
+    retryable: Boolean(item.retryable), deliveryUnitId: typeof item.deliveryUnitId === "string" && item.deliveryUnitId.trim() ? item.deliveryUnitId : undefined,
+    createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now()
+  })).sort((left, right) => left.createdAt - right.createdAt).slice(-100);
+}
+
+function normalizeRecoveryHistory(value: unknown): RecoveryDecision[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Partial<RecoveryDecision> => Boolean(item && typeof item === "object" && !Array.isArray(item))).map((item) => ({
+    version: 1 as const, id: typeof item.id === "string" && item.id.trim() ? item.id : `recovery-${crypto.randomUUID()}`,
+    triggerSignal: sanitizeSessionSummary(item.triggerSignal, 120), candidateActions: unique(normalizeStringArray(item.candidateActions).map((entry) => sanitizeSessionSummary(entry, 120)).filter(Boolean)),
+    finalAction: sanitizeSessionSummary(item.finalAction, 120), reason: sanitizeSessionSummary(item.reason), evidence: unique(normalizeStringArray(item.evidence).map((entry) => sanitizeSessionSummary(entry, 300)).filter(Boolean)),
+    deliveryUnitId: typeof item.deliveryUnitId === "string" && item.deliveryUnitId.trim() ? item.deliveryUnitId : undefined, createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now()
+  })).filter((item) => item.triggerSignal && item.finalAction).sort((left, right) => left.createdAt - right.createdAt).slice(-100);
+}
+
+function normalizeTaskContinuation(value: unknown): TaskContinuation | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Partial<TaskContinuation>;
+  if (item.nextStep !== "continue_current_unit" && item.nextStep !== "select_next_unit" && item.nextStep !== "replan" && item.nextStep !== "await_user_input" && item.nextStep !== "resume_validation") return undefined;
+  return { version: 1, nextStep: item.nextStep, requiredUserInputs: Array.isArray(item.requiredUserInputs) ? item.requiredUserInputs.filter((input): input is { field: string; label: string; required: boolean } => Boolean(input && typeof input.field === "string" && typeof input.label === "string")).map((input) => ({ field: sanitizeSessionSummary(input.field, 80), label: sanitizeSessionSummary(input.label, 120), required: Boolean(input.required) })).filter((input) => input.field && input.label) : [], autoContinueConditions: unique(normalizeStringArray(item.autoContinueConditions).map((entry) => sanitizeSessionSummary(entry, 300)).filter(Boolean)), message: sanitizeSessionSummary(item.message), deliveryUnitId: typeof item.deliveryUnitId === "string" && item.deliveryUnitId.trim() ? item.deliveryUnitId : undefined, updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : Date.now() };
+}
+
+function syncPlanItemsAndDeliveryUnits(planItems: TaskPlanItem[], deliveryUnits: DeliveryUnit[]) {
+  const unitByPlanItemId = new Map(deliveryUnits.flatMap((unit) => unit.sourcePlanItemIds.map((id) => [id, unit] as const)));
+  return planItems.map((item) => {
+    const unit = unitByPlanItemId.get(item.id);
+    if (!unit) return item;
+    const status: TaskPlanItemStatus = unit.status === "validated" ? "completed" : unit.status === "blocked" || unit.status === "deferred" ? "blocked" : unit.status === "active" ? "in_progress" : "pending";
+    return item.status === status ? item : { ...item, status, updatedAt: Date.now() };
+  });
+}
+
 function isPatchLifecycleEventType(value: unknown): value is PatchLifecycleEventType {
   return value === "patch_created" || value === "patch_filtered" || value === "patch_file_applied" || value === "patch_file_rejected" || value === "patch_completed" || value === "patch_superseded" || value === "auto_fix_patch_created";
 }
@@ -680,6 +746,10 @@ function normalizePendingToolCall(value: unknown): PendingAgentToolCall | null {
 }
 
 function normalizeTaskSession(session: TaskSession): TaskSession {
+  const deliveryUnits = normalizeDeliveryUnits(session.deliveryUnits);
+  const activeDeliveryUnitId = typeof session.activeDeliveryUnitId === "string" && deliveryUnits.some((unit) => unit.id === session.activeDeliveryUnitId)
+    ? session.activeDeliveryUnitId
+    : undefined;
   return {
     ...session,
     // 未识别的历史状态回退为 failed，避免损坏记录被误显示为成功。
@@ -708,6 +778,11 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     pendingToolCall: normalizePendingToolCall(session.pendingToolCall),
     planItems: normalizeTaskPlanItems(session.planItems),
     planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
+    deliveryUnits,
+    activeDeliveryUnitId,
+    toolFailureDiagnostics: normalizeToolFailureDiagnostics(session.toolFailureDiagnostics),
+    recoveryHistory: normalizeRecoveryHistory(session.recoveryHistory),
+    continuation: normalizeTaskContinuation(session.continuation),
     modificationPlan: normalizeStructuredModificationPlan(session.modificationPlan) || undefined,
     patchDiagnostics: normalizePatchDiagnostics(session.patchDiagnostics),
     contextSelectionSnapshots: normalizeContextSelectionSnapshots(session.contextSelectionSnapshots),
@@ -832,6 +907,11 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     planItems: [],
     planRevisions: [],
     planApproval: { required: false, status: "not_required" },
+    deliveryUnits: [],
+    activeDeliveryUnitId: undefined,
+    toolFailureDiagnostics: [],
+    recoveryHistory: [],
+    continuation: undefined,
     modificationPlan: undefined,
     checkpointIds: [],
     patchDiagnostics: [],
@@ -956,6 +1036,63 @@ export async function approveTaskSessionPlan(taskSessionId: string | null | unde
     },
     updatedAt: Date.now()
   }));
+}
+
+type DeliveryUnitInput = Omit<DeliveryUnit, "version" | "id" | "createdAt" | "updatedAt"> & Partial<Pick<DeliveryUnit, "id" | "createdAt" | "updatedAt">>;
+type ToolFailureDiagnosticInput = Omit<ToolFailureDiagnostic, "version" | "id" | "createdAt"> & Partial<Pick<ToolFailureDiagnostic, "id" | "createdAt">>;
+type RecoveryDecisionInput = Omit<RecoveryDecision, "version" | "id" | "createdAt"> & Partial<Pick<RecoveryDecision, "id" | "createdAt">>;
+type TaskContinuationInput = Omit<TaskContinuation, "version" | "updatedAt"> & Partial<Pick<TaskContinuation, "updatedAt">>;
+
+/** 仅接受结构化单元快照，并在同一写队列中将关联计划状态同步到界面。 */
+export async function setTaskSessionDeliveryUnits(taskSessionId: string | null | undefined, units: DeliveryUnitInput[]) {
+  if (!taskSessionId) return null;
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const normalizedUnits = normalizeDeliveryUnits(units.map((unit) => ({ ...unit, version: 1, id: unit.id || `unit-${crypto.randomUUID()}`, createdAt: unit.createdAt || Date.now(), updatedAt: Date.now() })));
+    const activeDeliveryUnitId = normalizedUnits.some((unit) => unit.id === session.activeDeliveryUnitId) ? session.activeDeliveryUnitId : normalizedUnits.find((unit) => unit.status === "active")?.id;
+    return { ...session, deliveryUnits: normalizedUnits, activeDeliveryUnitId, planItems: syncPlanItemsAndDeliveryUnits(normalizeTaskPlanItems(session.planItems), normalizedUnits), updatedAt: Date.now() };
+  });
+}
+
+/** 设置当前执行单元；活跃单元必须存在，避免 Runtime 写入悬空 ID。 */
+export async function setActiveTaskSessionDeliveryUnit(taskSessionId: string | null | undefined, deliveryUnitId: string | null) {
+  if (!taskSessionId) return null;
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const units = normalizeDeliveryUnits(session.deliveryUnits);
+    if (deliveryUnitId && !units.some((unit) => unit.id === deliveryUnitId)) throw new HttpError(404, "交付单元不存在");
+    const nextUnits = units.map((unit) => deliveryUnitId && unit.id === deliveryUnitId ? { ...unit, status: "active" as const, updatedAt: Date.now() } : unit.status === "active" ? { ...unit, status: "pending" as const, updatedAt: Date.now() } : unit);
+    return { ...session, deliveryUnits: nextUnits, activeDeliveryUnitId: deliveryUnitId || undefined, planItems: syncPlanItemsAndDeliveryUnits(normalizeTaskPlanItems(session.planItems), nextUnits), updatedAt: Date.now() };
+  }, { flushImmediately: true });
+}
+
+/** 只有显式提供验证结论且不存在待审批操作时，才允许把单元推进为已验证。 */
+export async function completeTaskSessionDeliveryUnit(taskSessionId: string | null | undefined, deliveryUnitId: string, validationEvidence: string) {
+  if (!taskSessionId) return null;
+  if (!sanitizeSessionSummary(validationEvidence)) throw new HttpError(400, "交付单元完成必须提供验证结论");
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    if (session.pendingToolCall) throw new HttpError(409, "存在待审批操作，不能完成交付单元");
+    const units = normalizeDeliveryUnits(session.deliveryUnits);
+    if (!units.some((unit) => unit.id === deliveryUnitId)) throw new HttpError(404, "交付单元不存在");
+    const nextUnits = units.map((unit) => unit.id === deliveryUnitId ? { ...unit, status: "validated" as const, completionCriteria: unique([...unit.completionCriteria, sanitizeSessionSummary(validationEvidence)]), updatedAt: Date.now() } : unit);
+    return { ...session, deliveryUnits: nextUnits, activeDeliveryUnitId: session.activeDeliveryUnitId === deliveryUnitId ? undefined : session.activeDeliveryUnitId, planItems: syncPlanItemsAndDeliveryUnits(normalizeTaskPlanItems(session.planItems), nextUnits), updatedAt: Date.now() };
+  }, { flushImmediately: true });
+}
+
+export async function appendTaskSessionToolFailureDiagnostic(taskSessionId: string | null | undefined, diagnostic: ToolFailureDiagnosticInput) {
+  if (!taskSessionId) return null;
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const next = normalizeToolFailureDiagnostics([...normalizeToolFailureDiagnostics(session.toolFailureDiagnostics), { ...diagnostic, version: 1, id: diagnostic.id || `tool-failure-${crypto.randomUUID()}`, createdAt: diagnostic.createdAt || Date.now() }]);
+    return { ...session, toolFailureDiagnostics: next, updatedAt: Date.now() };
+  });
+}
+
+export async function appendTaskSessionRecoveryDecision(taskSessionId: string | null | undefined, decision: RecoveryDecisionInput) {
+  if (!taskSessionId) return null;
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({ ...session, recoveryHistory: normalizeRecoveryHistory([...normalizeRecoveryHistory(session.recoveryHistory), { ...decision, version: 1, id: decision.id || `recovery-${crypto.randomUUID()}`, createdAt: decision.createdAt || Date.now() }]), updatedAt: Date.now() }));
+}
+
+export async function setTaskSessionContinuation(taskSessionId: string | null | undefined, continuation: TaskContinuationInput | null) {
+  if (!taskSessionId) return null;
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({ ...session, continuation: continuation ? normalizeTaskContinuation({ ...continuation, version: 1, updatedAt: continuation.updatedAt || Date.now() }) : undefined, updatedAt: Date.now() }), { flushImmediately: true });
 }
 
 // 执行中允许用户中断并进入重规划，保持与 Claude Code 相近的交互方式。
@@ -1319,19 +1456,29 @@ export async function updateTaskPlanItem(taskSessionId: string | null | undefine
     const now = Date.now();
     const status = updates.status || target.status;
 
-    return {
-      ...session,
-      planItems: items.map((item) =>
-        item.id === planItemId
-          ? {
-              ...item,
-              title,
-              status,
+    const planItems = items.map((item) =>
+      item.id === planItemId
+        ? {
+            ...item,
+            title,
+            status,
             note: updates.note === undefined ? item.note : updates.note.trim() || undefined,
             updatedAt: now
-            }
-          : item
-      ),
+          }
+        : item
+    );
+    // 计划侧只可驱动尚未完成的单元；完成状态仍需经过显式验证接口。
+    const deliveryUnits = normalizeDeliveryUnits(session.deliveryUnits).map((unit) => {
+      if (!unit.sourcePlanItemIds.includes(planItemId) || status === "completed") return unit;
+      const unitStatus: DeliveryUnitStatus = status === "in_progress" ? "active" : status === "blocked" ? "blocked" : "pending";
+      return unit.status === "validated" ? unit : { ...unit, status: unitStatus, updatedAt: now };
+    });
+
+    return {
+      ...session,
+      planItems,
+      deliveryUnits,
+      activeDeliveryUnitId: deliveryUnits.find((unit) => unit.status === "active")?.id,
       updatedAt: now
     };
   });

@@ -336,6 +336,11 @@ export type AgentStep = {
       toolName: string;
       message: string;
     }
+  | {
+      type: "delivery_unit_started" | "delivery_unit_completed" | "replan_requested" | "awaiting_user_decision" | "tool_failure_recorded";
+      message: string;
+      details: Record<string, unknown>;
+    }
 );
 
 export type AgentMessageRole = "system" | "user" | "assistant" | "tool";
@@ -402,6 +407,61 @@ export type AgentRuntimeStatus =
   | "no_progress";
 
 export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+// 渐进交付的最小执行边界；阶段 1 仅持久化，不改变 Runtime 的调度决策。
+export type DeliveryUnitStatus = "pending" | "active" | "validated" | "blocked" | "deferred";
+
+export type DeliveryUnit = {
+  version: 1;
+  id: string;
+  title: string;
+  sourcePlanItemIds: string[];
+  status: DeliveryUnitStatus;
+  completionCriteria: string[];
+  candidateFiles: string[];
+  filesRead: string[];
+  plannedFiles: string[];
+  dependencyUnitIds: string[];
+  checkpointIds: string[];
+  verificationCommands: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+// 只保存已经脱敏、截断的摘要，禁止把原始工具参数或完整错误输出写入会话文件。
+export type ToolFailureDiagnostic = {
+  version: 1;
+  id: string;
+  toolName: string;
+  parameterSummary: string;
+  errorCode?: string;
+  errorCategory: string;
+  retryable: boolean;
+  deliveryUnitId?: string;
+  createdAt: number;
+};
+
+export type RecoveryDecision = {
+  version: 1;
+  id: string;
+  triggerSignal: string;
+  candidateActions: string[];
+  finalAction: string;
+  reason: string;
+  evidence: string[];
+  deliveryUnitId?: string;
+  createdAt: number;
+};
+
+export type TaskContinuation = {
+  version: 1;
+  nextStep: "continue_current_unit" | "select_next_unit" | "replan" | "await_user_input" | "resume_validation";
+  requiredUserInputs: Array<{ field: string; label: string; required: boolean }>;
+  autoContinueConditions: string[];
+  message: string;
+  deliveryUnitId?: string;
+  updatedAt: number;
+};
 
 export type TaskPlanItem = {
   id: string;
@@ -519,6 +579,12 @@ export type TaskSession = {
   planItems?: TaskPlanItem[];
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
+  // 旧会话缺失阶段 1 字段时，读取层会补齐为空值，保持历史兼容。
+  deliveryUnits?: DeliveryUnit[];
+  activeDeliveryUnitId?: string;
+  toolFailureDiagnostics?: ToolFailureDiagnostic[];
+  recoveryHistory?: RecoveryDecision[];
+  continuation?: TaskContinuation;
   // 与步骤 Todo 分离保存文件级计划，避免展示计划被误当作安全范围证据。
   modificationPlan?: import("./safeEditor/index.js").StructuredModificationPlan;
   checkpointIds: string[];

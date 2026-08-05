@@ -82,7 +82,8 @@ export type AgentStepPayload =
       message: string;
     }
   | Omit<Extract<AgentStep, { type: "completion_rejected" }>, "id" | "createdAt">
-  | Omit<Extract<AgentStep, { type: "tool_blocked" }>, "id" | "createdAt">;
+  | Omit<Extract<AgentStep, { type: "tool_blocked" }>, "id" | "createdAt">
+  | Omit<Extract<AgentStep, { type: "delivery_unit_started" | "delivery_unit_completed" | "replan_requested" | "awaiting_user_decision" | "tool_failure_recorded" }>, "id" | "createdAt">;
 
 export function createAgentStep(step: AgentStepPayload): AgentStep {
   return {
@@ -90,6 +91,22 @@ export function createAgentStep(step: AgentStepPayload): AgentStep {
     createdAt: Date.now(),
     ...step
   };
+}
+
+/** 阶段 1 的交付编排事件统一提供中文说明，避免调用方遗漏可展示文本。 */
+export function createProgressiveDeliveryStep(input: {
+  event: "delivery_unit_started" | "delivery_unit_completed" | "replan_requested" | "awaiting_user_decision" | "tool_failure_recorded";
+  details: Record<string, unknown>;
+  message?: string;
+}) {
+  const defaultMessages = {
+    delivery_unit_started: "已开始执行当前交付单元。",
+    delivery_unit_completed: "当前交付单元已完成并通过验证。",
+    replan_requested: "当前信息不足，已请求重新规划。",
+    awaiting_user_decision: "任务需要你的决策后才能继续。",
+    tool_failure_recorded: "已记录工具调用失败诊断。"
+  } as const;
+  return createAgentStep({ type: input.event, message: input.message?.trim() || defaultMessages[input.event], details: input.details });
 }
 
 export function createApprovalRequestStep(input: {

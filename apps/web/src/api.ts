@@ -392,6 +392,11 @@ export type AgentStep = {
       toolName: string;
       message: string;
     }
+  | {
+      type: "delivery_unit_started" | "delivery_unit_completed" | "replan_requested" | "awaiting_user_decision" | "tool_failure_recorded";
+      message: string;
+      details: Record<string, unknown>;
+    }
 );
 
 export type CompletionRejectionCode =
@@ -407,6 +412,12 @@ export type CompletionRejectionCode =
   | "UNCHANGED_COMPLETION_EVIDENCE";
 
 export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export type DeliveryUnitStatus = "pending" | "active" | "validated" | "blocked" | "deferred";
+export type DeliveryUnit = { version: 1; id: string; title: string; sourcePlanItemIds: string[]; status: DeliveryUnitStatus; completionCriteria: string[]; candidateFiles: string[]; filesRead: string[]; plannedFiles: string[]; dependencyUnitIds: string[]; checkpointIds: string[]; verificationCommands: string[]; createdAt: number; updatedAt: number };
+export type ToolFailureDiagnostic = { version: 1; id: string; toolName: string; parameterSummary: string; errorCode?: string; errorCategory: string; retryable: boolean; deliveryUnitId?: string; createdAt: number };
+export type RecoveryDecision = { version: 1; id: string; triggerSignal: string; candidateActions: string[]; finalAction: string; reason: string; evidence: string[]; deliveryUnitId?: string; createdAt: number };
+export type TaskContinuation = { version: 1; nextStep: "continue_current_unit" | "select_next_unit" | "replan" | "await_user_input" | "resume_validation"; requiredUserInputs: Array<{ field: string; label: string; required: boolean }>; autoContinueConditions: string[]; message: string; deliveryUnitId?: string; updatedAt: number };
 
 export type TaskPlanItem = {
   id: string;
@@ -623,6 +634,11 @@ export type TaskSession = {
   planItems?: TaskPlanItem[];
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
+  deliveryUnits?: DeliveryUnit[];
+  activeDeliveryUnitId?: string;
+  toolFailureDiagnostics?: ToolFailureDiagnostic[];
+  recoveryHistory?: RecoveryDecision[];
+  continuation?: TaskContinuation;
   checkpointIds: string[];
   // 任务历史真实变更视图，历史 diff 展示优先以 checkpoint 为准。
   diffView?: TaskSessionDiffView;

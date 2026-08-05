@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setTaskPlanItems, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionRecoveryDecision, appendTaskSessionStep, appendTaskSessionToolFailureDiagnostic, approveTaskSessionPlan, completeTaskSessionDeliveryUnit, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setActiveTaskSessionDeliveryUnit, setTaskPlanItems, setTaskSessionContinuation, setTaskSessionDeliveryUnits, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics, RunMetricsTracker } from "./observability/index.js";
@@ -22,6 +22,49 @@ async function createIsolatedTaskSession(userGoal = "实现任务计划器") {
     session: await createTaskSession(userGoal)
   };
 }
+
+test("阶段 1 状态可持久化、脱敏并与计划双向同步", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("持久化交付单元");
+  try {
+    const planned = await setTaskPlanItems(session.id, [{ title: "实现服务" }]);
+    const planItemId = planned!.planItems![0]!.id;
+    const configured = await setTaskSessionDeliveryUnits(session.id, [{
+      id: "unit-service", title: "实现服务", sourcePlanItemIds: [planItemId], status: "pending",
+      completionCriteria: ["生成可审核补丁"], candidateFiles: ["src/service.ts"], filesRead: [], plannedFiles: ["src/service.ts"], dependencyUnitIds: [], checkpointIds: [], verificationCommands: ["pnpm test"]
+    }]);
+    assert.equal(configured?.deliveryUnits?.[0]?.version, 1);
+
+    const active = await setActiveTaskSessionDeliveryUnit(session.id, "unit-service");
+    assert.equal(active?.planItems?.[0]?.status, "in_progress");
+    await appendTaskSessionToolFailureDiagnostic(session.id, { toolName: "runCommand", parameterSummary: "token=secret-value", errorCategory: "transient", retryable: true, deliveryUnitId: "unit-service" });
+    await appendTaskSessionRecoveryDecision(session.id, { triggerSignal: "no_progress", candidateActions: ["retry", "replan"], finalAction: "replan", reason: "需要更多上下文", evidence: ["无新增文件"], deliveryUnitId: "unit-service" });
+    await setTaskSessionContinuation(session.id, { nextStep: "replan", requiredUserInputs: [], autoContinueConditions: ["补齐文件范围"], message: "建议重新规划", deliveryUnitId: "unit-service" });
+
+    const completed = await completeTaskSessionDeliveryUnit(session.id, "unit-service", "pnpm test 通过");
+    assert.equal(completed?.deliveryUnits?.[0]?.status, "validated");
+    assert.equal(completed?.planItems?.[0]?.status, "completed");
+    const restored = await getTaskSession(session.id);
+    assert.equal(restored.activeDeliveryUnitId, undefined);
+    assert.equal(restored.toolFailureDiagnostics?.[0]?.parameterSummary.includes("secret-value"), false);
+    assert.equal(restored.recoveryHistory?.[0]?.finalAction, "replan");
+    assert.equal(restored.continuation?.nextStep, "replan");
+  } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
+});
+
+test("旧会话缺失阶段 1 字段时保持可读", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("旧会话兼容");
+  try {
+    const filePath = path.join(projectRuntimeDirectory("task-sessions"), `${session.id}.json`);
+    const legacy = JSON.parse(await fs.readFile(filePath, "utf8")) as Record<string, unknown>;
+    delete legacy.deliveryUnits; delete legacy.activeDeliveryUnitId; delete legacy.toolFailureDiagnostics; delete legacy.recoveryHistory; delete legacy.continuation;
+    await fs.writeFile(filePath, JSON.stringify(legacy), "utf8");
+    const restored = await getTaskSession(session.id);
+    assert.deepEqual(restored.deliveryUnits, []);
+    assert.deepEqual(restored.toolFailureDiagnostics, []);
+    assert.deepEqual(restored.recoveryHistory, []);
+    assert.equal(restored.continuation, undefined);
+  } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
+});
 
 test("任务运行证据持久化后可恢复且新任务不会继承旧证据", async () => {
   const { workspaceRoot, session } = await createIsolatedTaskSession("跨审批保存完成证据");
