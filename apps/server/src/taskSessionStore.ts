@@ -483,6 +483,36 @@ function syncPlanItemsAndDeliveryUnits(planItems: TaskPlanItem[], deliveryUnits:
   });
 }
 
+// Runtime 触发重规划时同步补齐计划新增的单元；已验证单元始终保留原有状态和证据。
+function synchronizeDeliveryUnitsForPlanRevision(planItems: TaskPlanItem[], existingUnits: DeliveryUnit[], now: number) {
+  const existingByPlanItemId = new Map(existingUnits.flatMap((unit) => unit.sourcePlanItemIds.map((id) => [id, unit] as const)));
+  const units = planItems.map((item) => {
+    const existing = existingByPlanItemId.get(item.id);
+    if (existing) {
+      if (existing.status === "validated") return existing;
+      const status: DeliveryUnitStatus = item.status === "in_progress" ? "active" : item.status === "blocked" ? "blocked" : "pending";
+      return { ...existing, title: item.title, status, updatedAt: now };
+    }
+    return {
+      version: 1 as const,
+      id: `unit-${item.id}`,
+      title: item.title,
+      sourcePlanItemIds: [item.id],
+      status: item.status === "in_progress" ? "active" as const : item.status === "blocked" ? "blocked" as const : "pending" as const,
+      completionCriteria: ["已形成结构化结论或明确阻塞项"],
+      candidateFiles: item.evidence?.files || [],
+      filesRead: item.evidence?.files || [],
+      plannedFiles: [],
+      dependencyUnitIds: [],
+      checkpointIds: [],
+      verificationCommands: [],
+      createdAt: now,
+      updatedAt: now
+    };
+  });
+  return normalizeDeliveryUnits(units);
+}
+
 function isPatchLifecycleEventType(value: unknown): value is PatchLifecycleEventType {
   return value === "patch_created" || value === "patch_filtered" || value === "patch_file_applied" || value === "patch_file_rejected" || value === "patch_completed" || value === "patch_superseded" || value === "auto_fix_patch_created";
 }
@@ -971,31 +1001,37 @@ export async function addTaskPlanItem(taskSessionId: string | null | undefined, 
   });
 }
 
-export async function setTaskPlanItems(taskSessionId: string | null | undefined, items: { workflowStepId?: string; title: string; status?: TaskPlanItemStatus; note?: string }[], options: { requireApproval?: boolean; revision?: { trigger: TaskPlanRevisionTrigger; reason: string } } = {}) {
+export type TaskPlanItemInput = { id?: string; workflowStepId?: string; title: string; status?: TaskPlanItemStatus; note?: string };
+export type TaskPlanDeliveryUnitFactory = (planItems: TaskPlanItem[], previousUnits: DeliveryUnit[], now: number) => DeliveryUnit[];
+
+export async function setTaskPlanItems(taskSessionId: string | null | undefined, items: TaskPlanItemInput[], options: { requireApproval?: boolean; revision?: { trigger: TaskPlanRevisionTrigger; reason: string }; deliveryUnitFactory?: TaskPlanDeliveryUnitFactory } = {}) {
   if (!taskSessionId) return null;
 
   const now = Date.now();
-  const planItems = items
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const previousItems = normalizeTaskPlanItems(session.planItems);
+    const previousById = new Map(previousItems.map((item) => [item.id, item]));
+    const planItems = items
     .map((item, index): TaskPlanItem | null => {
       const title = item.title.trim();
 
       if (!title) return null;
 
+      // 重写计划时仅复用显式传入的稳定 ID，避免按标题猜测并误关联已完成证据。
+      const previous = item.id ? previousById.get(item.id) : undefined;
+
       return {
-        id: `plan-${now.toString(36)}-${index}-${crypto.randomUUID()}`,
+        id: previous?.id || `plan-${now.toString(36)}-${index}-${crypto.randomUUID()}`,
         workflowStepId: item.workflowStepId?.trim() || undefined,
         title,
-      status: item.status || (index === 0 ? "in_progress" : "pending"),
-      note: item.note?.trim() || undefined,
-      evidence: { stepIds: [], files: [], commands: [] },
-      createdAt: now,
-      updatedAt: now
+        status: item.status || previous?.status || (index === 0 ? "in_progress" : "pending"),
+        note: item.note?.trim() || undefined,
+        evidence: previous?.evidence || { stepIds: [], files: [], commands: [] },
+        createdAt: previous?.createdAt || now,
+        updatedAt: now
       };
     })
     .filter((item): item is TaskPlanItem => Boolean(item));
-
-  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
-    const previousItems = normalizeTaskPlanItems(session.planItems);
     const revision = options.revision
       ? createTaskPlanRevision({
           trigger: options.revision.trigger,
@@ -1005,9 +1041,16 @@ export async function setTaskPlanItems(taskSessionId: string | null | undefined,
         })
       : null;
 
+    const deliveryUnits = options.deliveryUnitFactory
+      ? normalizeDeliveryUnits(options.deliveryUnitFactory(planItems, normalizeDeliveryUnits(session.deliveryUnits), now))
+      : normalizeDeliveryUnits(session.deliveryUnits);
+    const activeDeliveryUnitId = deliveryUnits.some((unit) => unit.id === session.activeDeliveryUnitId)
+      ? session.activeDeliveryUnitId
+      : deliveryUnits.find((unit) => unit.status === "active")?.id;
+
     return {
       ...session,
-      planItems,
+      planItems: options.deliveryUnitFactory ? syncPlanItemsAndDeliveryUnits(planItems, deliveryUnits) : planItems,
       planRevisions: revision ? [revision, ...normalizeTaskPlanRevisions(session.planRevisions)].slice(0, 20) : normalizeTaskPlanRevisions(session.planRevisions),
       planApproval: options.requireApproval
         ? {
@@ -1016,6 +1059,8 @@ export async function setTaskPlanItems(taskSessionId: string | null | undefined,
             requestedAt: now
           }
         : session.planApproval || { required: false, status: "not_required" },
+      deliveryUnits,
+      activeDeliveryUnitId,
       updatedAt: now
     };
   });
@@ -1072,8 +1117,18 @@ export async function completeTaskSessionDeliveryUnit(taskSessionId: string | nu
     if (session.pendingToolCall) throw new HttpError(409, "存在待审批操作，不能完成交付单元");
     const units = normalizeDeliveryUnits(session.deliveryUnits);
     if (!units.some((unit) => unit.id === deliveryUnitId)) throw new HttpError(404, "交付单元不存在");
-    const nextUnits = units.map((unit) => unit.id === deliveryUnitId ? { ...unit, status: "validated" as const, completionCriteria: unique([...unit.completionCriteria, sanitizeSessionSummary(validationEvidence)]), updatedAt: Date.now() } : unit);
-    return { ...session, deliveryUnits: nextUnits, activeDeliveryUnitId: session.activeDeliveryUnitId === deliveryUnitId ? undefined : session.activeDeliveryUnitId, planItems: syncPlanItemsAndDeliveryUnits(normalizeTaskPlanItems(session.planItems), nextUnits), updatedAt: Date.now() };
+    const now = Date.now();
+    const validatedUnits = units.map((unit) => unit.id === deliveryUnitId ? { ...unit, status: "validated" as const, completionCriteria: unique([...unit.completionCriteria, sanitizeSessionSummary(validationEvidence)]), updatedAt: now } : unit);
+    // 当前单元完成后仅按既有工作流顺序激活下一个待办单元，不凭标题推断额外依赖。
+    const canActivateNext = session.activeDeliveryUnitId === deliveryUnitId || !validatedUnits.some((unit) => unit.status === "active");
+    const nextPendingUnit = canActivateNext ? validatedUnits.find((unit) => unit.status === "pending") : undefined;
+    const nextUnits = nextPendingUnit
+      ? validatedUnits.map((unit) => unit.id === nextPendingUnit.id ? { ...unit, status: "active" as const, updatedAt: now } : unit)
+      : validatedUnits;
+    const activeDeliveryUnitId = session.activeDeliveryUnitId === deliveryUnitId
+      ? nextPendingUnit?.id
+      : nextPendingUnit?.id || session.activeDeliveryUnitId;
+    return { ...session, deliveryUnits: nextUnits, activeDeliveryUnitId, planItems: syncPlanItemsAndDeliveryUnits(normalizeTaskPlanItems(session.planItems), nextUnits), updatedAt: now };
   }, { flushImmediately: true });
 }
 
@@ -1303,10 +1358,13 @@ function applyTaskPlanFailureProgress(
     });
   }
 
+  const deliveryUnits = synchronizeDeliveryUnitsForPlanRevision(nextItems, normalizeDeliveryUnits(session.deliveryUnits), now);
   return {
     ...session,
-    planItems: nextItems,
+    planItems: syncPlanItemsAndDeliveryUnits(nextItems, deliveryUnits),
     planRevisions: revision ? [revision, ...normalizeTaskPlanRevisions(session.planRevisions)].slice(0, 20) : normalizeTaskPlanRevisions(session.planRevisions),
+    deliveryUnits,
+    activeDeliveryUnitId: deliveryUnits.find((unit) => unit.status === "active")?.id,
     updatedAt: now
   };
 }
@@ -1471,7 +1529,7 @@ export async function updateTaskPlanItem(taskSessionId: string | null | undefine
     const deliveryUnits = normalizeDeliveryUnits(session.deliveryUnits).map((unit) => {
       if (!unit.sourcePlanItemIds.includes(planItemId) || status === "completed") return unit;
       const unitStatus: DeliveryUnitStatus = status === "in_progress" ? "active" : status === "blocked" ? "blocked" : "pending";
-      return unit.status === "validated" ? unit : { ...unit, status: unitStatus, updatedAt: now };
+      return unit.status === "validated" ? { ...unit, title, updatedAt: now } : { ...unit, title, status: unitStatus, updatedAt: now };
     });
 
     return {

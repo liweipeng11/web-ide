@@ -9,7 +9,7 @@ import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
 import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionRecoveryDecision, appendTaskSessionStep, appendTaskSessionToolFailureDiagnostic, approveTaskSessionPlan, completeTaskSessionDeliveryUnit, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setActiveTaskSessionDeliveryUnit, setTaskPlanItems, setTaskSessionContinuation, setTaskSessionDeliveryUnits, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
-import { createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
+import { buildDeliveryUnitsFromTaskPlan, createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics, RunMetricsTracker } from "./observability/index.js";
 import { finalizeTaskSession } from "./taskSessionFinalizer.js";
 import type { TaskSession } from "./types.js";
@@ -1342,5 +1342,62 @@ test("rewrites task plans from natural language instructions with fallback rules
     assert.deepEqual(rewritten?.planItems?.map((item) => item.title), ["第一步", "第三步"]);
   } finally {
     config.aiApiKey = previousAiApiKey;
+  }
+});
+
+test("阶段 2 将计划按顺序转换为交付单元，且不猜测文件范围或依赖", () => {
+  const planItems = [
+    { id: "plan-analyze", workflowStepId: "analyze-project", title: "分析项目", status: "in_progress" as const, evidence: { stepIds: [], files: [], commands: [] }, createdAt: 1, updatedAt: 1 },
+    { id: "plan-implement", workflowStepId: "implement", title: "实现变更", status: "pending" as const, evidence: { stepIds: [], files: [], commands: [] }, createdAt: 1, updatedAt: 1 },
+    { id: "plan-validate", workflowStepId: "validate", title: "运行验证", status: "pending" as const, evidence: { stepIds: [], files: [], commands: [] }, createdAt: 1, updatedAt: 1 }
+  ];
+  const units = buildDeliveryUnitsFromTaskPlan(planItems, undefined, [], 2);
+
+  assert.deepEqual(units.map((unit) => unit.sourcePlanItemIds), [["plan-analyze"], ["plan-implement"], ["plan-validate"]]);
+  assert.deepEqual(units.map((unit) => unit.status), ["active", "pending", "pending"]);
+  assert.deepEqual(units.flatMap((unit) => unit.dependencyUnitIds), []);
+  assert.deepEqual(units.flatMap((unit) => unit.candidateFiles), []);
+  assert.match(units[1]!.completionCriteria[0]!, /补丁|变更/);
+  assert.match(units[2]!.completionCriteria[0]!, /验证命令/);
+});
+
+test("阶段 2 初始化和重写计划会同步交付单元并保留已完成单元证据", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("实现交付单元计划");
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+  try {
+    const initialized = await initializeTaskPlan(session, { intent: "edit", confidence: 1, normalizedGoal: session.userGoal, reason: "test" });
+    assert.equal(initialized?.deliveryUnits?.length, initialized?.planItems?.length);
+    assert.equal(initialized?.deliveryUnits?.[0]?.status, "active");
+
+    const firstUnit = initialized!.deliveryUnits![0]!;
+    const firstPlan = initialized!.planItems![0]!;
+    const completed = await completeTaskSessionDeliveryUnit(session.id, firstUnit.id, "已形成并验证分析结论");
+    const rewritten = await rewriteTaskPlanWithInstruction(completed!, "将第 2 步提前");
+    const preservedUnit = rewritten?.deliveryUnits?.find((unit) => unit.sourcePlanItemIds.includes(firstPlan.id));
+
+    assert.equal(preservedUnit?.id, firstUnit.id);
+    assert.equal(preservedUnit?.status, "validated");
+    assert.equal(rewritten?.planRevisions?.[0]?.reason, "将第 2 步提前");
+    assert.equal(rewritten?.activeDeliveryUnitId, rewritten?.deliveryUnits?.find((unit) => unit.status === "active")?.id);
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("阶段 2 验证失败重规划会新增交付单元且保留已验证单元", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("验证失败重规划");
+  try {
+    const planned = await setTaskPlanItems(session.id, [{ title: "分析" }, { title: "验证", status: "in_progress" }]);
+    const firstPlan = planned!.planItems![0]!;
+    await setTaskSessionDeliveryUnits(session.id, [{ id: "unit-analysis", title: "分析", sourcePlanItemIds: [firstPlan.id], status: "validated", completionCriteria: ["已验证"], candidateFiles: [], filesRead: [], plannedFiles: [], dependencyUnitIds: [], checkpointIds: [], verificationCommands: [] }]);
+    const replan = await advanceTaskPlanProgress(session.id, "validation_failed");
+
+    assert.equal(replan?.deliveryUnits?.find((unit) => unit.id === "unit-analysis")?.status, "validated");
+    assert.equal(replan?.deliveryUnits?.some((unit) => unit.title.includes("根据验证反馈")), true);
+    assert.equal(replan?.planRevisions?.[0]?.trigger, "validation");
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
   }
 });

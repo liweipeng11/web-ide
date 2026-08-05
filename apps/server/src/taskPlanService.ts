@@ -6,15 +6,66 @@ import { AI_TASK_PLAN_REWRITE_SYSTEM_PROMPT, AI_TASK_PLAN_SYSTEM_PROMPT } from "
 import { setTaskPlanItems, setTaskSessionWorkflow } from "./taskSessionStore.js";
 import { createTaskWorkflow, getTaskWorkflowSteps, type TaskWorkflowSnapshot, type TaskWorkflowType } from "./taskWorkflow/index.js";
 import type { AgentIntent, AgentRequestClassification } from "./aiClient.js";
-import type { TaskPlanItem, TaskPlanItemStatus, TaskSession } from "./types.js";
+import type { DeliveryUnit, TaskPlanItem, TaskPlanItemStatus, TaskSession } from "./types.js";
 import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
 
 type GeneratedPlanItem = {
+  id?: string;
   workflowStepId?: string;
   title: string;
   status?: TaskPlanItemStatus;
   note?: string;
 };
+
+const validationWorkflowStepIds = new Set(["validate", "regression-validation", "regression"]);
+const changeWorkflowStepIds = new Set(["implement", "minimal-fix", "refactor"]);
+
+/**
+ * 将计划项转换为 Runtime 可消费的最小交付边界。
+ * 当前阶段严格按工作流顺序一项一单元；没有明确依赖证据时不虚构 DAG 或文件范围。
+ */
+export function buildDeliveryUnitsFromTaskPlan(
+  planItems: TaskPlanItem[],
+  workflow?: TaskWorkflowSnapshot,
+  previousUnits: DeliveryUnit[] = [],
+  now = Date.now()
+): DeliveryUnit[] {
+  const previousByPlanItemId = new Map(previousUnits.flatMap((unit) => unit.sourcePlanItemIds.map((id) => [id, unit] as const)));
+
+  return planItems.map((item) => {
+    const previous = previousByPlanItemId.get(item.id);
+    const stepId = item.workflowStepId || "";
+    const isValidation = validationWorkflowStepIds.has(stepId);
+    const isChange = changeWorkflowStepIds.has(stepId);
+    const completionCriteria = isValidation
+      ? ["已记录对应验证命令的执行结果"]
+      : isChange
+        ? ["已生成可审查补丁或已应用文件变更"]
+        : ["已形成结构化结论或明确阻塞项"];
+    const candidateFiles = item.evidence?.files || [];
+    const status = previous?.status
+      || (item.status === "in_progress" ? "active" : "pending");
+
+    return {
+      version: 1 as const,
+      // 复用已有单元 ID，确保计划重写后完成证据仍可追溯。
+      id: previous?.id || `unit-${item.id}`,
+      title: item.title,
+      sourcePlanItemIds: [item.id],
+      status,
+      completionCriteria: previous?.completionCriteria.length ? previous.completionCriteria : completionCriteria,
+      candidateFiles: previous?.candidateFiles.length ? previous.candidateFiles : candidateFiles,
+      filesRead: previous?.filesRead.length ? previous.filesRead : candidateFiles,
+      plannedFiles: previous?.plannedFiles.length ? previous.plannedFiles : [],
+      // 仅消费已有计划/影响分析证据；工作流顺序本身不等于显式依赖关系。
+      dependencyUnitIds: previous?.dependencyUnitIds || [],
+      checkpointIds: previous?.checkpointIds || [],
+      verificationCommands: previous?.verificationCommands || [],
+      createdAt: previous?.createdAt || now,
+      updatedAt: now
+    };
+  });
+}
 
 const explicitPlanPatterns = [/计划|步骤|todo|待办|plan|steps/i];
 const complexGoalPatterns = [/修复|实现|新增|添加|重构|迁移|优化|升级|多文件|测试失败|构建失败|报错|错误|fix|implement|refactor|migrate|optimize|error|failed|failure/i];
@@ -152,7 +203,7 @@ export function reconcileRewrittenTaskPlanWorkflowIds(currentItems: TaskPlanItem
     const workflowStepId = requestedId || titleMatchedId;
 
     if (workflowStepId) usedIds.add(workflowStepId);
-    return { ...item, workflowStepId };
+    return { ...item, workflowStepId, id: workflowStepId ? currentItems.find((current) => current.workflowStepId === workflowStepId)?.id : undefined };
   });
   const unresolvedIndexes = reconciled.flatMap((item, index) => item.workflowStepId ? [] : [index]);
   const remainingIds = currentItems.map((item) => item.workflowStepId).filter((value): value is string => typeof value === "string" && !usedIds.has(value));
@@ -161,6 +212,7 @@ export function reconcileRewrittenTaskPlanWorkflowIds(currentItems: TaskPlanItem
   if (unresolvedIndexes.length === remainingIds.length) {
     unresolvedIndexes.forEach((itemIndex, index) => {
       reconciled[itemIndex] = { ...reconciled[itemIndex], workflowStepId: remainingIds[index] };
+      reconciled[itemIndex].id = currentItems.find((current) => current.workflowStepId === remainingIds[index])?.id;
     });
   }
 
@@ -257,12 +309,16 @@ export async function initializeTaskPlan(session: TaskSession, classification?: 
   const items = await generateTaskPlan(classification?.normalizedGoal || session.userGoal, classification, workflow);
 
   // 新任务创建后立即写入计划，第一步默认进入“进行中”。
-  return setTaskPlanItems(session.id, items, { requireApproval: shouldRequirePlanApproval(classification, options) });
+  return setTaskPlanItems(session.id, items, {
+    requireApproval: shouldRequirePlanApproval(classification, options),
+    deliveryUnitFactory: (planItems, previousUnits, now) => buildDeliveryUnitsFromTaskPlan(planItems, workflow, previousUnits, now)
+  });
 }
 
 function rewritePlanFallback(items: TaskPlanItem[], instruction: string): GeneratedPlanItem[] {
   const normalized = instruction.trim();
   const nextItems = items.map((item) => ({
+    id: item.id,
     workflowStepId: item.workflowStepId,
     title: item.title,
     status: item.status,
@@ -293,7 +349,7 @@ export async function rewriteTaskPlanWithInstruction(session: TaskSession, instr
   const fallback = rewritePlanFallback(currentItems, instruction);
 
   if (!config.aiApiKey) {
-    return setTaskPlanItems(session.id, fallback, { requireApproval: session.planApproval?.status === "pending", revision: { trigger: "user", reason: instruction.trim() } });
+    return persistRewrittenTaskPlan(session, fallback, instruction);
   }
 
   const runId = createAiRunId("task-plan-rewrite");
@@ -335,11 +391,20 @@ export async function rewriteTaskPlanWithInstruction(session: TaskSession, instr
     if (items.length) {
       const reconciledItems = reconcileRewrittenTaskPlanWorkflowIds(currentItems, items);
       logAi(runId, "done", { count: reconciledItems.length });
-      return setTaskPlanItems(session.id, reconciledItems, { requireApproval: session.planApproval?.status === "pending", revision: { trigger: "user", reason: instruction.trim() } });
+      return persistRewrittenTaskPlan(session, reconciledItems, instruction);
     }
   } catch (error) {
     logAi(runId, "fallback", { error: error instanceof Error ? error.message : String(error) });
   }
 
-  return setTaskPlanItems(session.id, fallback, { requireApproval: session.planApproval?.status === "pending", revision: { trigger: "user", reason: instruction.trim() } });
+  return persistRewrittenTaskPlan(session, fallback, instruction);
+}
+
+// 用户与验证触发的计划修订均通过同一原子写入路径同步交付单元。
+function persistRewrittenTaskPlan(session: TaskSession, items: GeneratedPlanItem[], instruction: string) {
+  return setTaskPlanItems(session.id, items, {
+    requireApproval: session.planApproval?.status === "pending",
+    revision: { trigger: "user", reason: instruction.trim() },
+    deliveryUnitFactory: (planItems, previousUnits, now) => buildDeliveryUnitsFromTaskPlan(planItems, session.workflow, previousUnits, now)
+  });
 }
