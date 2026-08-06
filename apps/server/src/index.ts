@@ -26,7 +26,7 @@ import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
 import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
-import { buildTaskPlanContinuationRequest, decideTaskPlanContinuation } from "./taskPlanContinuation.js";
+import { buildTaskPlanContinuationRequest, decideTaskPlanContinuation, MAX_AUTOMATIC_PLAN_CONTINUATIONS } from "./taskPlanContinuation.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
@@ -1130,21 +1130,22 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         });
 
       let runtimeResult = await runTaskRuntime(editRequest, taskSession.runtimeEvidence);
-      const sessionAfterFirstRun = await getTaskSession(taskSession.id);
-      const continuation = decideTaskPlanContinuation({
-        runtimeStatus: runtimeResult.status,
-        continuationCount: 0,
-        hasPendingToolCall: Boolean(runtimeResult.pendingToolCall),
-        generatedPatchCount: runtimeResult.generatedPatchIds.length,
-        planItems: sessionAfterFirstRun.planItems
-      });
+      for (let continuationCount = 0; continuationCount < MAX_AUTOMATIC_PLAN_CONTINUATIONS; continuationCount += 1) {
+        const sessionAfterRun = await getTaskSession(taskSession.id);
+        const continuation = decideTaskPlanContinuation({
+          runtimeStatus: runtimeResult.status,
+          continuationCount,
+          hasPendingToolCall: Boolean(runtimeResult.pendingToolCall),
+          generatedPatchCount: runtimeResult.generatedPatchIds.length,
+          planItems: sessionAfterRun.planItems
+        });
+        if (!continuation.shouldContinue || !continuation.planItem) break;
 
-      if (continuation.shouldContinue && continuation.planItem) {
-        // Runtime 的 incomplete 只是本轮未交付；仍有计划项时应聚焦当前步骤续跑一次。
+        // incomplete 仅代表本轮未交付；计划已推进时继续执行新的当前步骤。
         pushAgentStep(createAgentStep({
           type: "strategy",
           event: "no_progress_recovery",
-          message: `上一轮未形成可交付结果，正在继续执行计划步骤：${continuation.planItem.title}`
+          message: `上一轮未形成可交付结果，正在继续执行计划步骤：${continuation.planItem.title}（${continuationCount + 1}/${MAX_AUTOMATIC_PLAN_CONTINUATIONS}）`
         }));
         runtimeResult = await runTaskRuntime(
           buildTaskPlanContinuationRequest(editRequest, continuation.planItem),

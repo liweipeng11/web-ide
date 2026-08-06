@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionRecoveryDecision, appendTaskSessionStep, appendTaskSessionToolFailureDiagnostic, approveTaskSessionPlan, completeTaskSessionDeliveryUnit, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setActiveTaskSessionDeliveryUnit, setTaskPlanItems, setTaskSessionContinuation, setTaskSessionDeliveryUnits, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionRecoveryDecision, appendTaskSessionStep, appendTaskSessionToolFailureDiagnostic, approveTaskSessionPlan, completeTaskSessionDeliveryUnit, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setActiveTaskSessionDeliveryUnit, setTaskPlanItems, setTaskSessionContinuation, setTaskSessionDeliveryUnits, setTaskSessionModificationPlan, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { buildDeliveryUnitsFromTaskPlan, createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics, RunMetricsTracker } from "./observability/index.js";
@@ -50,6 +50,29 @@ test("阶段 1 状态可持久化、脱敏并与计划双向同步", async () =>
     assert.equal(restored.recoveryHistory?.[0]?.finalAction, "replan");
     assert.equal(restored.continuation?.nextStep, "replan");
   } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
+});
+
+test("文件级修改计划已落库时进入实现步骤", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("移动页面并更新路由");
+  try {
+    await fs.writeFile(path.join(workspaceRoot, "router.ts"), "export {};\n", "utf8");
+    await setTaskPlanItems(session.id, [
+      { workflowStepId: "analyze-project", title: "分析项目", status: "in_progress" },
+      { workflowStepId: "find-patterns", title: "查找模式" },
+      { workflowStepId: "plan-files", title: "确认文件计划" },
+      { workflowStepId: "implement", title: "实现变更" },
+      { workflowStepId: "validate", title: "验证" }
+    ]);
+
+    const updated = await setTaskSessionModificationPlan(session.id, {
+      id: "plan-relocate", taskDescription: "更新路由", createdAt: Date.now(),
+      files: [{ filePath: "router.ts", changeKind: "modify", reason: "更新导入路径" }]
+    });
+
+    assert.deepEqual(updated?.planItems?.map((item) => item.status), ["completed", "completed", "completed", "in_progress", "pending"]);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
 });
 
 test("旧会话缺失阶段 1 字段时保持可读", async () => {

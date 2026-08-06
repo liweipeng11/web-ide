@@ -64,6 +64,26 @@ export async function validateAgentGeneratedPatchImports(
   return config.featureFlags.plannedFileResolution ? plannedValidation : legacyValidation;
 }
 
+/** 为文件迁移失败提供可执行的恢复信息，避免模型只重复分析原始计划。 */
+function buildRelocationImportRecoveryHint(
+  modificationPlan: StructuredModificationPlan,
+  unresolved: Awaited<ReturnType<typeof validateAgentGeneratedPatchImports>>["unresolved"]
+) {
+  const renamedSourceNames = new Set(
+    modificationPlan.files
+      .filter((file) => file.changeKind === "rename")
+      .map((file) => file.filePath.split("/").at(-1)?.toLowerCase())
+      .filter((fileName): fileName is string => Boolean(fileName))
+  );
+  const relocationTargets = unresolved
+    .map(({ check }) => check.target.value.split("/").at(-1)?.toLowerCase())
+    .filter((fileName): fileName is string => typeof fileName === "string")
+    .filter((fileName) => renamedSourceNames.has(fileName));
+
+  if (!relocationTargets.length) return "请修正导入路径或将缺失目标作为实际 create 补丁文件生成后再重试。";
+  return "检测到文件迁移：请将每个迁移目标作为 status=create 的实际补丁文件生成，并在同一补丁中更新导入；补丁应用后再通过已审批命令删除旧文件，不要只声明 rename。";
+}
+
 export const patchAgentToolDefinitions: AgentToolDefinition[] = [
   {
     name: "proposePatch",
@@ -136,7 +156,7 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
         throw new Error(
           `Generated patch contains unresolved import references: ${importValidation.unresolved
             .map(({ filePath: sourcePath, check }) => `${sourcePath}: ${check.target.value} (${check.resolution.status})`)
-            .join(", ")}`
+            .join(", ")}. ${buildRelocationImportRecoveryHint(modificationPlan, importValidation.unresolved)}`
         );
       }
       runtime.generatedPatchIds?.push(patch.patchId);

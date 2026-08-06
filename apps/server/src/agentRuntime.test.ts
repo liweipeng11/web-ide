@@ -1164,6 +1164,9 @@ test("agent runtime dynamically narrows tools while keeping precise edit and ver
 
   const normalTools = ((requests[0].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
   const convergenceTools = ((requests[1].tools as Array<{ function: { name: string } }>) || []).map((tool) => tool.function.name);
+  const convergenceSystemPrompt = ((requests[1].messages as Array<{ role?: string; content?: string }> | undefined) || [])
+    .find((message) => message.role === "system")?.content || "";
+  const convergenceToolContract = convergenceSystemPrompt.split("\n").find((line) => line.startsWith("本轮可调用工具："));
   assert.equal(result.status, "incomplete");
   assert.equal(normalTools.includes("searchCode"), true);
   assert.equal(convergenceTools.includes("searchFilesByName"), false);
@@ -1175,6 +1178,9 @@ test("agent runtime dynamically narrows tools while keeping precise edit and ver
   assert.equal(convergenceTools.includes("replaceInFile"), true);
   assert.equal(convergenceTools.includes("writeFile"), true);
   assert.equal(convergenceTools.includes("runCommand"), true);
+  assert.ok(convergenceToolContract);
+  assert.equal(convergenceToolContract?.includes("listFiles"), false);
+  assert.equal(convergenceToolContract?.includes("readFile"), true);
 });
 
 test("agent runtime hard-blocks hidden broad searches during convergence", async () => {

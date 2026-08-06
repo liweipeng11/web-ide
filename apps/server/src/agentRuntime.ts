@@ -335,6 +335,24 @@ function separateRuntimeSystemPrompt(messages: ModelMessage[], additionalSystemP
   };
 }
 
+/**
+ * 每轮工具集合会随着预算、上下文和任务模式收缩。显式重申当前集合，
+ * 避免模型继续沿用系统提示或历史消息里已经被 Runtime 隐藏的工具名。
+ */
+function createAvailableToolContractPrompt(toolSchemas: Array<{ function: { name: string } }>) {
+  const toolNames = toolSchemas.map((schema) => schema.function.name);
+
+  if (!toolNames.length) {
+    return "当前轮次没有可调用工具。不要返回任何工具调用；请仅基于已有上下文给出答复。";
+  }
+
+  return [
+    "当前轮次工具契约：只允许调用本条规则中列出的精确工具名。",
+    `本轮可调用工具：${toolNames.join(", ")}。`,
+    "即使系统提示、历史消息或工具结果提到其他工具，也不得调用未列出的工具、工具别名或大小写变体。"
+  ].join("\n");
+}
+
 function toAgentToolCall(toolCall: ModelToolCall): AgentToolCall {
   return {
     id: toolCall.id,
@@ -760,18 +778,13 @@ function canReadAfterAutoLimit(toolName: string, agentContext: AgentContext) {
   return toolName === "readFile" && Boolean(getUnreadPatternCandidate(agentContext));
 }
 
-/** 预算预警后只禁止会扩大范围的探索，不能阻断精确读取、补丁、计划和验证。 */
-function isBroadContextExplorationTool(toolName: string) {
-  return /^(search|find|list|discover|scan)/i.test(toolName) || ["searchCode", "searchFiles", "listFiles", "findFiles"].includes(toolName);
-}
-
 function createUnitContextBudgetWarningMessage(unit: DeliveryUnit): ModelMessage {
   return {
     role: "user",
     content: [
       `当前交付单元“${unit.title}”已达到上下文预警阈值。`,
-      "停止广泛目录枚举和模糊搜索；只能进行精确文件读取、更新计划、生成或应用补丁、运行验证，以及生成结构化上下文摘要。",
-      "请基于当前已知事实完成该单元；若完成条件仍无法满足，请明确请求重规划，不要继续读取无关文件。"
+      "Runtime 已压缩较早上下文，但不会移除本轮已注册的工具。继续使用工具时必须收紧范围：搜索和列举必须提供明确 path、尽量提供 filePattern，并使用较小 limit；优先读取已定位文件的必要片段。",
+      "请基于当前已知事实完成该单元；若完成条件仍无法满足，请明确请求重规划。不要进行无路径的大范围枚举、模糊搜索或读取无关文件。"
     ].join("\n")
   };
 }
@@ -1439,7 +1452,6 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let latestContextSummary: StructuredContextSummary | null = null;
   const contextBudgetEnabled = options.contextBudgetEnabled ?? (config.featureFlags.contextBudgetV2 && implementedFeatures.contextBudgetV2);
   const unitContextBudgetEnabled = options.unitContextBudgetEnabled ?? (progressiveDeliveryFlags.unitContextBudget && implementedFeatures.unitContextBudget);
-  let unitContextWarningActive = false;
   let unitContextBoundaryDecisionRecorded = false;
   const metrics = new RunMetricsTracker(
     {
@@ -1499,10 +1511,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const budgetPhase = getAgentBudgetPhase(remainingSteps, budgetPolicy);
       const visibleToolSchemas = filterToolSchemasForBudgetPhase(registry.schemas, budgetPhase)
         .filter((schema) => explicitCompletionToolEnabled || schema.function.name !== "completeTask");
-      const availableToolSchemas = (autoReadLimitReached
+      const availableToolSchemas = autoReadLimitReached
         ? visibleToolSchemas.filter((schema) => !isFileReadTool(schema.function.name) || canReadAfterAutoLimit(schema.function.name, agentContext))
-        : visibleToolSchemas)
-        .filter((schema) => !unitContextWarningActive || !isBroadContextExplorationTool(schema.function.name));
+        : visibleToolSchemas;
       const currentAvailableToolNames = new Set(availableToolSchemas.map((schema) => schema.function.name));
 
     if (!budgetWarningSent && budgetPhase === "convergence") {
@@ -1532,7 +1543,9 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     const autoReadLimitMessage = autoReadLimitReached ? createAutoReadLimitRecoveryMessage(agentContext) : null;
     const largeTaskBatchMessage = createLargeTaskBatchMessage(agentContext);
     const transientDecisionMessages = [negativeEvidenceMessage, forceFinalMessage, autoReadLimitMessage, largeTaskBatchMessage].filter((message): message is ModelMessage => Boolean(message));
-    const separatedRequest = separateRuntimeSystemPrompt(messages, [workflowProgressPrompt, commandShellPrompt]);
+    // 工具契约必须与本轮实际下发的 schema 同步，不能复用全局提示中的静态工具描述。
+    const availableToolContractPrompt = createAvailableToolContractPrompt(availableToolSchemas);
+    const separatedRequest = separateRuntimeSystemPrompt(messages, [workflowProgressPrompt, commandShellPrompt, availableToolContractPrompt]);
     const fullModelRequest: ModelRequest = {
       model: modelId,
       systemPrompt: separatedRequest.systemPrompt || undefined,
@@ -1571,9 +1584,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         messages: separatedPrepared.conversationMessages
       };
       if (unitContextBudgetEnabled && isUnitContextBudgetWarning(prepared.snapshot) && taskContextState.activeDeliveryUnit) {
-        unitContextWarningActive = true;
         const unitWarningMessage = createUnitContextBudgetWarningMessage(taskContextState.activeDeliveryUnit);
-        // 当前轮在计算预算后立即注入收敛指令；下一轮同时从 schema 层移除宽泛探索工具。
+        // 当前轮在计算预算后立即注入收敛指令。工具集合保持稳定，避免静态提示词与动态 schema 产生冲突。
         modelRequest = { ...modelRequest, messages: [...modelRequest.messages, unitWarningMessage] };
         if (!unitContextBoundaryDecisionRecorded && prepared.snapshot.automaticCompression && !generatedPatchIds.length && !directAppliedFiles.size && !(agentContext.commandsRun ?? []).length) {
           const reason = "上下文压缩后仍缺少当前交付单元的变更或验证证据，需要按当前事实重规划。";
@@ -2061,15 +2073,6 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         messages.push(blockedMessage);
         await persistAgentMessage(options.taskSessionId, blockedMessage);
         logAi(runId, "runtime.budgetToolBlocked", { step, remainingSteps, budgetPhase, toolName: toolCall.name });
-        continue;
-      }
-      if (unitContextWarningActive && isBroadContextExplorationTool(toolCall.name)) {
-        metrics.recordToolResult({ signature, noProgress: true });
-        consecutiveNoProgressSteps += 1;
-        const blockedMessage: ModelMessage = { role: "tool", toolCallId: toolCall.id, content: "当前交付单元处于上下文预警状态，已阻止广泛探索；请改用精确读取、计划、补丁或验证。" };
-        messages.push(blockedMessage);
-        await persistAgentMessage(options.taskSessionId, blockedMessage);
-        options.onAgentStep?.(createAgentStep({ type: "strategy", event: "unit_context_exploration_blocked", message: blockedMessage.content || "已阻止广泛探索", toolName: toolCall.name, currentStep: step + 1, maxSteps }));
         continue;
       }
       const createIntentSearchBlockReason = getCreateIntentSearchBlockReason(toolCall, agentContext);

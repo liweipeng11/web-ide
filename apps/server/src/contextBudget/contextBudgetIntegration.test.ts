@@ -204,7 +204,7 @@ test("前端上下文事件以服务端 null 摘要清理旧审批状态", () =>
   assert.equal(mergeContextBudgetSession(session, { taskSessionId: "another-task", snapshot, summary: null }), session);
 });
 
-test("单元上下文预警阻止宽泛搜索并写入可恢复的重规划决策", async () => {
+test("单元上下文预警保留精确搜索工具并写入可恢复的重规划决策", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "unit-context-budget-"));
   try {
     await setWorkspaceRoot(workspaceRoot, { persist: false });
@@ -218,8 +218,9 @@ test("单元上下文预警阻止宽泛搜索并写入可恢复的重规划决�
     assert.equal((await getTaskSession(session.id)).activeDeliveryUnitId, "unit-current");
     let searchExecuted = false;
     let warningVisible = false;
+    let searchVisibleInSchema = false;
     const registry = createAgentToolRegistry([{
-      name: "searchCode", description: "宽泛搜索", parameters: { type: "object", properties: {} },
+      name: "searchCode", description: "精确代码搜索", parameters: { type: "object", properties: {} },
       async execute() { searchExecuted = true; return { files: [] }; }, summarize(result) { return result; }
     }]);
     await runAgentRuntime({
@@ -228,13 +229,26 @@ test("单元上下文预警阻止宽泛搜索并写入可恢复的重规划决�
       messages: [{ role: "system", content: "安全规则" }, { role: "user", content: "历史上下文".repeat(3_000) }, { role: "user", content: "继续当前单元" }],
       completeModel: async (request) => {
         warningVisible ||= JSON.stringify(request.messages).includes("上下文预警阈值");
-        return { message: { role: "assistant", toolCalls: [{ id: "broad-search", name: "searchCode", arguments: {} }] }, usage: { inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cachedInputTokens: 0 } };
+        const toolSchemas = (request.tools as Array<{ function: { name: string } }> | undefined) || [];
+        searchVisibleInSchema ||= toolSchemas.some((tool) => tool.function.name === "searchCode");
+        return {
+          message: {
+            role: "assistant",
+            toolCalls: [{
+              id: "targeted-search",
+              name: "searchCode",
+              arguments: { query: "router", path: "src", filePattern: "*.ts", limit: 20 }
+            }]
+          },
+          usage: { inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cachedInputTokens: 0 }
+        };
       },
       metricsRecorder: async () => undefined
     });
     const updated = await getTaskSession(session.id);
     assert.equal(warningVisible, true);
-    assert.equal(searchExecuted, false);
+    assert.equal(searchVisibleInSchema, true);
+    assert.equal(searchExecuted, true);
     assert.equal(updated.recoveryHistory?.at(-1)?.triggerSignal, "context_budget_compressed");
     assert.equal(updated.continuation?.nextStep, "replan");
     assert.ok(updated.deliveryUnits?.[0]?.contextMetrics?.inputTokens);

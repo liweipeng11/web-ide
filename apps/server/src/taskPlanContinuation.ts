@@ -1,7 +1,10 @@
 import type { AgentRuntimeStatus, TaskPlanItem } from "./types.js";
 
-/** 单次请求内最多额外续跑一次，避免工具失败时形成无限循环。 */
-export const MAX_AUTOMATIC_PLAN_CONTINUATIONS = 1;
+/**
+ * 单次请求内最多额外续跑两次：一次用于切换策略，另一次用于执行切换后的具体步骤。
+ * 每轮仍要求没有补丁和待审批操作，避免工具失败时形成无限循环。
+ */
+export const MAX_AUTOMATIC_PLAN_CONTINUATIONS = 2;
 
 export type TaskPlanContinuationDecision = {
   shouldContinue: boolean;

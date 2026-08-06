@@ -23,6 +23,18 @@ test("未完成且仍有计划步骤时自动续跑当前步骤", () => {
   assert.match(buildTaskPlanContinuationRequest("修复任务执行", decision.planItem!), /禁止重复宽泛搜索/);
 });
 
+test("在续跑额度内允许第二次策略切换后的执行", () => {
+  const decision = decideTaskPlanContinuation({
+    runtimeStatus: "incomplete",
+    continuationCount: MAX_AUTOMATIC_PLAN_CONTINUATIONS - 1,
+    hasPendingToolCall: false,
+    generatedPatchCount: 0,
+    planItems
+  });
+
+  assert.equal(decision.shouldContinue, true);
+});
+
 test("审批、补丁、完成状态或超过上限时不能自动续跑", () => {
   for (const input of [
     { runtimeStatus: "awaiting_approval" as const, continuationCount: 0, hasPendingToolCall: true, generatedPatchCount: 0 },

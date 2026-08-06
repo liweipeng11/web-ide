@@ -1433,6 +1433,12 @@ function getPatchGeneratedTargetIndex(items: TaskPlanItem[]) {
   return activeIndex === -1 ? 0 : Math.min(activeIndex + 2, items.length - 1);
 }
 
+/** 文件级修改计划已确认时，调研与文件规划阶段已经具备完成证据，应进入实现阶段。 */
+function getModificationPlanReadyTargetIndex(items: TaskPlanItem[]) {
+  const implementationIndex = findWorkflowPlanItemIndex(items, ["implement", "minimal-fix", "refactor"]);
+  return implementationIndex > 0 ? implementationIndex - 1 : -1;
+}
+
 function getPatchAppliedTargetIndex(items: TaskPlanItem[]) {
   const implementationIndex = findWorkflowPlanItemIndex(items, ["implement", "minimal-fix", "refactor"]);
 
@@ -1842,11 +1848,19 @@ export async function addTaskSessionFilesRead(taskSessionId: string | null | und
 export async function setTaskSessionModificationPlan(taskSessionId: string | null | undefined, plan: StructuredModificationPlan) {
   if (!taskSessionId) return null;
 
-  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
-    ...session,
-    modificationPlan: structuredClone(plan),
-    updatedAt: Date.now()
-  }));
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const now = Date.now();
+    const items = normalizeTaskPlanItems(session.planItems);
+    const nextItems = items.map((item) => ({ ...item }));
+    advancePlanToIndex(nextItems, getModificationPlanReadyTargetIndex(nextItems), now);
+
+    return {
+      ...session,
+      modificationPlan: structuredClone(plan),
+      ...(hasTaskPlanProgressChanged(items, nextItems) ? { planItems: nextItems } : {}),
+      updatedAt: now
+    };
+  });
 }
 
 export async function addTaskSessionFilesChanged(taskSessionId: string | null | undefined, files: string[]) {
