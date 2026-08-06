@@ -53,10 +53,10 @@ export const defaultFeatureFlags: FeatureFlags = {
   structuredCompletionRejection: true,
   // 渐进交付尚未接管 Runtime，阶段 0 必须保持默认关闭以固定既有行为。
   progressiveDelivery: false,
-  // 阶段 3 默认继续使用旧的无进展终止路径，按开关灰度启用分级恢复。
-  progressiveRecovery: false,
-  // 单元级预算编排默认关闭，可安全回退到已有的全局上下文预算。
-  unitContextBudget: false
+  // 分级恢复已具备完整实现，默认将可恢复阻塞保留为可继续状态；可通过环境变量立即回退。
+  progressiveRecovery: true,
+  // 单元级上下文预算已具备完整实现，默认避免大任务在上下文压力下继续无边界探索。
+  unitContextBudget: true
 };
 
 export type FeatureDecisionDifference = {

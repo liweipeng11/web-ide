@@ -746,6 +746,15 @@ function isFileReadTool(toolName: string) {
   return ["readFile", "readFileChunk", "readFileRange"].includes(toolName);
 }
 
+/** 读取额度触顶后，仅保留工作流门禁要求的一个模式候选文件读取入口。 */
+function getUnreadPatternCandidate(agentContext: AgentContext) {
+  return agentContext.patternCandidateFiles?.find((filePath) => !agentContext.filesRead.includes(filePath)) || null;
+}
+
+function canReadAfterAutoLimit(toolName: string, agentContext: AgentContext) {
+  return toolName === "readFile" && Boolean(getUnreadPatternCandidate(agentContext));
+}
+
 /** 预算预警后只禁止会扩大范围的探索，不能阻断精确读取、补丁、计划和验证。 */
 function isBroadContextExplorationTool(toolName: string) {
   return /^(search|find|list|discover|scan)/i.test(toolName) || ["searchCode", "searchFiles", "listFiles", "findFiles"].includes(toolName);
@@ -1470,7 +1479,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const visibleToolSchemas = filterToolSchemasForBudgetPhase(registry.schemas, budgetPhase)
         .filter((schema) => explicitCompletionToolEnabled || schema.function.name !== "completeTask");
       const availableToolSchemas = (autoReadLimitReached
-        ? visibleToolSchemas.filter((schema) => !isFileReadTool(schema.function.name))
+        ? visibleToolSchemas.filter((schema) => !isFileReadTool(schema.function.name) || canReadAfterAutoLimit(schema.function.name, agentContext))
         : visibleToolSchemas)
         .filter((schema) => !unitContextWarningActive || !isBroadContextExplorationTool(schema.function.name));
       const currentAvailableToolNames = new Set(availableToolSchemas.map((schema) => schema.function.name));
@@ -1983,7 +1992,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
       const repeatCount = repeatCountsByToolCall.get(toolCall) ?? 1;
 
       // 同一模型响应可能携带多个读取调用；首个调用触顶后必须立即在 Runtime 层拦截余下调用。
-      if (autoReadLimitReached && isFileReadTool(toolCall.name)) {
+      if (autoReadLimitReached && isFileReadTool(toolCall.name) && !canReadAfterAutoLimit(toolCall.name, agentContext)) {
         const blockedMessage: ModelMessage = {
           role: "tool",
           toolCallId: toolCall.id,

@@ -63,7 +63,10 @@ function recordFileRead(runtime: AgentToolRuntime, filePath: string) {
 
 function assertReadBudget(runtime: AgentToolRuntime, filePath: string) {
   const budget = getReadBudget(runtime);
-  if (!budget.filesRead.includes(filePath) && budget.filesRead.length >= budget.maxFiles) {
+  const unreadPatternCandidate = runtime.agentContext.patternCandidateFiles?.includes(filePath)
+    && !runtime.agentContext.patternCandidateFiles.some((candidate) => runtime.agentContext.filesRead.includes(candidate));
+  // 模式检索命中后必须至少读取一个候选文件才能编辑。为该唯一前置证据保留一次读取机会，避免读取额度与编辑门禁互相阻塞。
+  if (!budget.filesRead.includes(filePath) && budget.filesRead.length >= budget.maxFiles && !unreadPatternCandidate) {
     throw createAutoReadLimitError(filePath, budget.maxFiles, budget.batchIndex);
   }
 }

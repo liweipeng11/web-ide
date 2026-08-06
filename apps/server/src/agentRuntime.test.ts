@@ -675,10 +675,10 @@ test("阶段零脚本夹具可重放发现后空搜索，并断言无进展停�
     metricsRecorder: async (metrics) => { capturedMetrics = metrics; }
   });
 
-  assert.equal(result.status, "no_progress");
+  assert.equal(result.status, "incomplete");
   assert.deepEqual(result.agentContext.searchResultFiles, ["src/first.ts", "src/second.ts"]);
   assert.equal(capturedMetrics?.result.patchFileCount, 0);
-  assert.equal(capturedMetrics?.result.stopReason, "no_progress");
+  assert.equal(capturedMetrics?.result.stopReason, "incomplete");
   assert.equal(capturedMetrics?.tools.maxConsecutiveNoProgressSteps, 2);
 });
 
@@ -1586,16 +1586,13 @@ test("agent runtime recovers once and then stops after another no-progress windo
   });
 
   const recoveryPrompt = requests[2]?.messages as Array<{ role: string; content?: string }>;
-  assert.equal(result.status, "no_progress");
-  assert.match(result.content, /连续工具调用未取得进展/);
-  assert.match(result.content, /模型轮次：4\/24/);
-  assert.match(result.content, /工具调用：4/);
-  assert.match(result.content, /建议下一步/);
+  assert.equal(result.status, "incomplete");
+  assert.match(result.content, /已停止本次运行/);
   assert.equal(modelStep, 4);
   assert.equal(recoveryPrompt.some((message) => message.content?.includes("策略恢复")), true);
   assert.equal(capturedMetrics?.tools.recoveryAttempts, 1);
   assert.equal(capturedMetrics?.tools.maxConsecutiveNoProgressSteps, 2);
-  assert.equal(capturedMetrics?.result.stopReason, "no_progress");
+  assert.equal(capturedMetrics?.result.stopReason, "incomplete");
   assert.equal(steps.some((step) => step.type === "strategy" && step.event === "no_progress_recovery"), true);
   assert.equal(steps.some((step) => step.type === "strategy" && step.event === "no_progress_stop"), true);
 });
@@ -1632,6 +1629,49 @@ test("读取额度触顶后从后续模型工具列表移除读取工具", async
   const secondMessages = requests[1]?.messages as Array<{ content?: string }>;
   assert.equal(secondTools.some((tool) => tool.function.name === "readFile"), false);
   assert.equal(secondMessages.some((message) => message.content?.includes("自动读取文件上限")), true);
+});
+
+test("读取额度触顶后为未读取的模式候选文件保留一次 readFile", async () => {
+  const requests: Record<string, unknown>[] = [];
+  let modelStep = 0;
+  const registry = createAgentToolRegistry([{
+    ...createRuntimeTestTool("readFile", {}),
+    async execute(args, runtime) {
+      if (args.filePath === "legacy.jsp") {
+        runtime.agentContext.patternCandidateFiles = ["src/views/ExistingView.vue"];
+        return {
+          error: "Automatic file read limit reached.",
+          errorCode: "AUTO_READ_LIMIT_REACHED",
+          retryable: false,
+          suggestedAction: "停止读取新的文件。"
+        };
+      }
+      runtime.agentContext.filesRead.push("src/views/ExistingView.vue");
+      return { filePath: "src/views/ExistingView.vue", content: "<template />" };
+    }
+  }]);
+
+  await runAgentRuntime({
+    userRequest: "迁移页面",
+    mode: "act",
+    registry,
+    maxSteps: 3,
+    contextBudgetEnabled: false,
+    requestCompletion: async (body) => {
+      requests.push(body as Record<string, unknown>);
+      modelStep += 1;
+      if (modelStep === 1) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [createModelToolCall("read-limit", "readFile", { filePath: "legacy.jsp" })] } }] };
+      }
+      if (modelStep === 2) {
+        return { choices: [{ message: { role: "assistant", content: null, tool_calls: [createModelToolCall("read-pattern", "readFile", { filePath: "src/views/ExistingView.vue" })] } }] };
+      }
+      return { choices: [{ message: { role: "assistant", content: "已读取模式候选文件。" } }] };
+    }
+  });
+
+  const secondTools = requests[1]?.tools as Array<{ function: { name: string } }>;
+  assert.equal(secondTools.some((tool) => tool.function.name === "readFile"), true);
 });
 
 test("同一轮的后续读文件调用会在额度触顶后被 Runtime 硬拦截", async () => {

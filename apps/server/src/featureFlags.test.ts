@@ -12,10 +12,10 @@ test("渐进交付开关默认关闭，且可通过环境变量显式启用或�
   assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_DELIVERY_ENABLED: "invalid" }).progressiveDelivery, false);
 });
 
-test("渐进恢复开关默认关闭，且可独立灰度启用", () => {
-  assert.equal(readFeatureFlags({}).progressiveRecovery, false);
-  assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_RECOVERY_ENABLED: "1" }).progressiveRecovery, true);
-  assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_RECOVERY_ENABLED: "invalid" }).progressiveRecovery, false);
+test("渐进恢复开关默认开启，且可独立回退", () => {
+  assert.equal(readFeatureFlags({}).progressiveRecovery, true);
+  assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_RECOVERY_ENABLED: "0" }).progressiveRecovery, false);
+  assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_RECOVERY_ENABLED: "invalid" }).progressiveRecovery, true);
 });
 
 test("阶段六渐进交付灰度支持影子、内部、小比例和全量，并可由 Flag 立即回退", () => {
@@ -35,7 +35,7 @@ test("阶段六渐进交付灰度支持影子、内部、小比例和全量，�
 test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {
   assert.deepEqual(readFeatureFlags({}), defaultFeatureFlags);
   assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "true", MODEL_PROVIDER_GATEWAY_ENABLED: "1", LSP_ENABLED: "yes", INLINE_EDIT_ENABLED: "on", COMMAND_EXECUTION_V2_ENABLED: "true", AGENT_PLANNED_FILE_RESOLUTION: "true", AGENT_SEMANTIC_COMPLETION_CHECK: "true", SAFE_EDIT_EVIDENCE_V2_ENABLED: "true", AGENT_EXPLICIT_COMPLETION_TOOL: "true", AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE: "true", AGENT_COMPLETION_REJECTION_CONVERGENCE: "true", AGENT_STRUCTURED_COMPLETION_REJECTION: "true" }), defaultFeatureFlags);
-  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0", AGENT_PLANNED_FILE_RESOLUTION: "false", AGENT_SEMANTIC_COMPLETION_CHECK: "off", SAFE_EDIT_EVIDENCE_V2_ENABLED: "false", AGENT_EXPLICIT_COMPLETION_TOOL: "false", AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE: "false", AGENT_COMPLETION_REJECTION_CONVERGENCE: "false", AGENT_STRUCTURED_COMPLETION_REJECTION: "false" }), Object.fromEntries(Object.keys(defaultFeatureFlags).map((key) => [key, false])));
+  assert.deepEqual(readFeatureFlags({ CONTEXT_BUDGET_V2_ENABLED: "false", MODEL_PROVIDER_GATEWAY_ENABLED: "0", LSP_ENABLED: "no", INLINE_EDIT_ENABLED: "off", COMMAND_EXECUTION_V2_ENABLED: "0", AGENT_PLANNED_FILE_RESOLUTION: "false", AGENT_SEMANTIC_COMPLETION_CHECK: "off", SAFE_EDIT_EVIDENCE_V2_ENABLED: "false", AGENT_EXPLICIT_COMPLETION_TOOL: "false", AGENT_TASK_RUNTIME_EVIDENCE_PERSISTENCE: "false", AGENT_COMPLETION_REJECTION_CONVERGENCE: "false", AGENT_STRUCTURED_COMPLETION_REJECTION: "false", AGENT_PROGRESSIVE_DELIVERY_ENABLED: "false", AGENT_PROGRESSIVE_RECOVERY_ENABLED: "false", AGENT_UNIT_CONTEXT_BUDGET_ENABLED: "false" }), Object.fromEntries(Object.keys(defaultFeatureFlags).map((key) => [key, false])));
   assert.deepEqual(readFeatureFlags({ LSP_ENABLED: "invalid-value" }), defaultFeatureFlags);
 });
 

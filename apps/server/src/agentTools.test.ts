@@ -135,6 +135,29 @@ test("readFile 按实施批次而非整个任务累计读取额度", async () =>
   assert.deepEqual(agentContext.readBatch.filesRead, ["batch-2.txt"]);
 });
 
+test("读取额度触顶后仍允许读取一个未读取的模式候选文件", async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
+  const agentContext = createAgentContext();
+  agentContext.readBatch = { index: 1, maxFiles: 2, discoveredFileCount: 13, filesRead: ["source-a.jsp", "source-b.jsp"] };
+  agentContext.filesRead.push("source-a.jsp", "source-b.jsp");
+  agentContext.patternCandidateFiles = ["src/views/ExistingView.vue"];
+  await fs.mkdir(path.join(workspaceRoot, "src", "views"), { recursive: true });
+  await fs.writeFile(path.join(workspaceRoot, "src", "views", "ExistingView.vue"), "<template />", "utf8");
+  await setWorkspaceRoot(workspaceRoot, { persist: false });
+
+  const response = await executeAgentToolCall(
+    createToolCall("readFile", { filePath: "src/views/ExistingView.vue" }),
+    createAgentToolRuntime({ agentContext, runId: "test-pattern-candidate-read-exception" })
+  );
+
+  assert.equal((JSON.parse(response.content) as Record<string, unknown>).filePath, "src/views/ExistingView.vue");
+  const blocked = await executeAgentToolCall(
+    createToolCall("readFile", { filePath: "another.vue" }),
+    createAgentToolRuntime({ agentContext, runId: "test-pattern-candidate-read-exception" })
+  );
+  assert.equal((JSON.parse(blocked.content) as Record<string, unknown>).errorCode, "AUTO_READ_LIMIT_REACHED");
+});
+
 test("readFileChunk reads follow-up chunks with continuation metadata", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-agent-tools-"));
   const content = Array.from({ length: 5 }, (_item, index) => `line ${index + 1}`).join("\n");
