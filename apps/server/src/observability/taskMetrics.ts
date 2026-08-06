@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { appStatePath } from "../statePaths.js";
 import { readJsonStateFile, writeJsonStateFile } from "../stateFileStorage.js";
-import { appendRunMetrics, COMPLETION_RESOURCE_LIMITS, createEmptyTaskSessionPersistenceMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta, type TaskSessionPersistenceMetrics } from "./runMetrics.js";
+import { appendRunMetrics, COMPLETION_RESOURCE_LIMITS, createEmptyProgressiveDeliveryMetrics, createEmptyTaskSessionPersistenceMetrics, type ProgressiveDeliveryMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta, type TaskSessionPersistenceMetrics } from "./runMetrics.js";
 
 const taskMetrics = new Map<string, RunMetrics>();
 const taskMetricQueues = new Map<string, Promise<unknown>>();
@@ -71,6 +71,13 @@ function normalizeMetricFields(metrics: RunMetrics) {
   metrics.taskSessionPersistence.taskSessionWriteSkippedCount ??= 0;
   metrics.taskSessionPersistence.taskSessionWriteCoalescedCount ??= 0;
   metrics.taskSessionPersistence.taskSessionRenameRetryCount ??= 0;
+  metrics.progressiveDelivery ??= createEmptyProgressiveDeliveryMetrics();
+  metrics.progressiveDelivery.deliveryUnits ??= createEmptyProgressiveDeliveryMetrics().deliveryUnits;
+  metrics.progressiveDelivery.toolFailuresByCategory ??= {};
+  metrics.progressiveDelivery.recoveryDecisions ??= { total: 0, byAction: {} };
+  metrics.progressiveDelivery.recoveryDecisions.byAction ??= {};
+  metrics.progressiveDelivery.noProgressTransitions ??= { replan: 0, awaitingUser: 0, successfulDelivery: 0 };
+  metrics.progressiveDelivery.unitSummaries ??= [];
   metrics.result.stopReason ??= metrics.result.status === "completed"
     ? "completed"
     : metrics.result.status === "awaiting_approval"
@@ -85,6 +92,24 @@ function normalizeMetricFields(metrics: RunMetrics) {
           ? "step_limit"
           : "provider_error";
   return metrics;
+}
+
+/** 合并影子指标时只累加计数，单元摘要按稳定 ID 覆盖为最新状态。 */
+function mergeProgressiveDeliveryMetrics(current: ProgressiveDeliveryMetrics, next: ProgressiveDeliveryMetrics) {
+  current.deliveryUnits = { ...next.deliveryUnits };
+  for (const [category, count] of Object.entries(next.toolFailuresByCategory)) {
+    current.toolFailuresByCategory[category] = (current.toolFailuresByCategory[category] ?? 0) + count;
+  }
+  current.recoveryDecisions.total += next.recoveryDecisions.total;
+  for (const [action, count] of Object.entries(next.recoveryDecisions.byAction)) {
+    current.recoveryDecisions.byAction[action] = (current.recoveryDecisions.byAction[action] ?? 0) + count;
+  }
+  current.noProgressTransitions.replan += next.noProgressTransitions.replan;
+  current.noProgressTransitions.awaitingUser += next.noProgressTransitions.awaitingUser;
+  current.noProgressTransitions.successfulDelivery += next.noProgressTransitions.successfulDelivery;
+  const summaries = new Map(current.unitSummaries.map((unit) => [unit.unitId, unit]));
+  for (const summary of next.unitSummaries) summaries.set(summary.unitId, structuredClone(summary));
+  current.unitSummaries = [...summaries.values()].slice(0, 100);
 }
 
 function refreshCompletionResourceAlerts(metrics: RunMetrics) {
@@ -286,6 +311,7 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
     current.context.estimatedTokensBefore = Math.max(current.context.estimatedTokensBefore ?? 0, metrics.context.estimatedTokensBefore ?? 0) || null;
     current.context.estimatedTokensAfter = metrics.context.estimatedTokensAfter ?? current.context.estimatedTokensAfter;
     if (metrics.context.estimator !== "unavailable") current.context.estimator = metrics.context.estimator;
+    mergeProgressiveDeliveryMetrics(current.progressiveDelivery, metrics.progressiveDelivery);
     current.result.status = metrics.result.status;
     current.result.stopReason = metrics.result.stopReason;
     if (metrics.result.failureCategory !== "none") current.result.failureCategory = metrics.result.failureCategory;

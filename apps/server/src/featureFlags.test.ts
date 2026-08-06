@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import express from "express";
 import http from "node:http";
 import { createCapabilityRouter } from "./capabilityRoutes.js";
-import { createServerCapabilities, defaultFeatureFlags, getStableRolloutBucket, readCompletionPolicyRollout, readExplicitCompletionRollout, readFeatureFlags, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, resolveFeaturePath, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
+import { createServerCapabilities, defaultFeatureFlags, getStableRolloutBucket, readCompletionPolicyRollout, readExplicitCompletionRollout, readFeatureFlags, readProgressiveDeliveryRollout, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, resolveFeaturePath, resolveProgressiveDeliveryRollout, selectFeaturePath, type FeatureFlags } from "./featureFlags.js";
 import { buildSafeEditRecommendation, evaluateSafeEditRollout } from "./safeEditor/index.js";
 
 test("渐进交付开关默认关闭，且可通过环境变量显式启用或回退", () => {
@@ -16,6 +16,20 @@ test("渐进恢复开关默认关闭，且可独立灰度启用", () => {
   assert.equal(readFeatureFlags({}).progressiveRecovery, false);
   assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_RECOVERY_ENABLED: "1" }).progressiveRecovery, true);
   assert.equal(readFeatureFlags({ AGENT_PROGRESSIVE_RECOVERY_ENABLED: "invalid" }).progressiveRecovery, false);
+});
+
+test("阶段六渐进交付灰度支持影子、内部、小比例和全量，并可由 Flag 立即回退", () => {
+  assert.deepEqual(readProgressiveDeliveryRollout({}), { mode: "all" });
+  assert.deepEqual(readProgressiveDeliveryRollout({ AGENT_PROGRESSIVE_DELIVERY_ROLLOUT: "invalid" }), { mode: "shadow" });
+  const flags = { progressiveDelivery: true, progressiveRecovery: true, unitContextBudget: true };
+  assert.deepEqual(resolveProgressiveDeliveryRollout({ taskKey: "task-a", flags, config: { mode: "shadow" } }), {
+    progressiveDelivery: false, progressiveRecovery: false, unitContextBudget: false
+  });
+  assert.equal(resolveProgressiveDeliveryRollout({ taskKey: "internal", flags, config: { mode: "internal" }, internalTask: true }).progressiveRecovery, true);
+  assert.equal(resolveProgressiveDeliveryRollout({ taskKey: "external", flags, config: { mode: "internal" }, internalTask: false }).progressiveRecovery, false);
+  const ten = Array.from({ length: 1_000 }, (_, index) => resolveProgressiveDeliveryRollout({ taskKey: `progressive-${index}`, flags, config: { mode: "10" } }).progressiveRecovery).filter(Boolean).length;
+  assert.ok(ten >= 80 && ten <= 120);
+  assert.equal(resolveProgressiveDeliveryRollout({ taskKey: "rollback", flags: { ...flags, progressiveRecovery: false }, config: { mode: "all" } }).progressiveRecovery, false);
 });
 
 test("Feature Flag 默认启用并支持常用布尔值和显式回退", () => {

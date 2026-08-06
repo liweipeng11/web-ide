@@ -342,6 +342,13 @@ stateDiagram-v2
 - Flag 关闭后的核心回归测试与改造前保持一致。
 - 指标可回答：任务为何暂停、Runtime 做了什么、用户如何继续、新策略是否提升了有交付物结束的比例。
 
+### 实施收口（2026-08）
+
+- `RunMetrics` / `TaskMetrics` 已增加仅含元数据的 `progressiveDelivery` 快照：单元状态计数、失败类别、恢复动作、无进展转化结果及单元级 token/压缩/变更/验证摘要；不记录标题、文件路径、命令、源码、完整 Prompt 或 diff。
+- 发布使用 `AGENT_PROGRESSIVE_DELIVERY_ROLLOUT=shadow -> internal -> 10 -> 50 -> all`。`shadow` 只写指标；稳定任务分桶确保重试和恢复始终命中同一路径。
+- 任一 `AGENT_PROGRESSIVE_*_ENABLED` 或 `AGENT_UNIT_CONTEXT_BUDGET_ENABLED` 设为 `0` 即刻恢复旧 Runtime 路径。会话中的新字段只读保留，不迁移、不删除用户数据。
+- 离线验收命令：`pnpm --filter @mini-ai-web-editor/server test:progressive-delivery-stage6`、服务端与 Web 的 `typecheck`、以及 Web `build`。验收夹具覆盖简单任务、跨文件上下文、失败验证、可重试失败、重复调用、压缩、重规划和恢复。
+
 ## 7. 测试策略
 
 ### 7.1 单元测试

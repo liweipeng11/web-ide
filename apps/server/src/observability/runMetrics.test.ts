@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { appendRunMetrics, classifyRunFailure, RunMetricsTracker } from "./runMetrics.js";
+import { appendRunMetrics, classifyRunFailure, createEmptyProgressiveDeliveryMetrics, RunMetricsTracker } from "./runMetrics.js";
 import { runAgentRuntime } from "../agentRuntime.js";
 import { createAgentToolRegistry } from "../agentToolRegistry.js";
 import type { RunMetrics } from "./runMetrics.js";
@@ -203,6 +203,7 @@ test("并发指标写入保持 UTF-8 JSONL 行完整", async () => {
         taskSessionWriteCoalescedCount: 0,
         taskSessionRenameRetryCount: 0
       },
+      progressiveDelivery: createEmptyProgressiveDeliveryMetrics(),
       tools: {
         calls: 0,
         repeatedCalls: 0,
@@ -280,4 +281,24 @@ test("Mock Agent 完成后生成一条完整运行指标", async () => {
   assert.equal(captured?.firstTokenLatencySource, "completion_upper_bound");
   assert.equal(typeof captured?.firstTokenLatencyMs, "number");
   assert.equal(captured?.taskSessionId, null);
+});
+
+test("阶段六影子指标只保留交付单元元数据、失败类别和恢复结果", async () => {
+  const tracker = new RunMetricsTracker({ runId: "stage6-shadow", taskSessionId: "stage6-task", provider: "mock", model: "mock", mode: "act" }, async () => {});
+  tracker.recordDeliveryUnitSnapshot([{
+    version: 1, id: "unit-safe-id", title: "不得写入指标", sourcePlanItemIds: ["plan-1"], status: "validated",
+    completionCriteria: [], candidateFiles: ["secret.ts"], filesRead: [], plannedFiles: [], dependencyUnitIds: [], checkpointIds: [], verificationCommands: ["private command"],
+    contextMetrics: { inputTokens: 123, compressionCount: 2, toolCallCount: 3, changedFileCount: 1, validationResult: "passed", updatedAt: Date.now() }, createdAt: Date.now(), updatedAt: Date.now()
+  }]);
+  tracker.recordToolFailureDiagnostic({ errorCategory: "transient" });
+  tracker.recordRecoveryDecision("replan");
+  const metrics = await tracker.finish({ status: "completed" });
+  assert.deepEqual(metrics.progressiveDelivery.deliveryUnits, { total: 1, completed: 1, blocked: 0, deferred: 0 });
+  assert.equal(metrics.progressiveDelivery.toolFailuresByCategory.transient, 1);
+  assert.equal(metrics.progressiveDelivery.noProgressTransitions.replan, 1);
+  assert.equal(metrics.progressiveDelivery.noProgressTransitions.successfulDelivery, 1);
+  const serialized = JSON.stringify(metrics.progressiveDelivery);
+  assert.equal(serialized.includes("不得写入指标"), false);
+  assert.equal(serialized.includes("secret.ts"), false);
+  assert.equal(serialized.includes("private command"), false);
 });

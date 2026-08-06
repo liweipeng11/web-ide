@@ -73,6 +73,10 @@ export type CompletionPolicyFeature =
   | "structuredCompletionRejection";
 
 export type CompletionPolicyFeatureFlags = Pick<FeatureFlags, CompletionPolicyFeature>;
+export type ProgressiveDeliveryFeature = "progressiveDelivery" | "progressiveRecovery" | "unitContextBudget";
+export type ProgressiveDeliveryFeatureFlags = Pick<FeatureFlags, ProgressiveDeliveryFeature>;
+export type ProgressiveDeliveryRolloutMode = "shadow" | "internal" | "10" | "50" | "all";
+export type ProgressiveDeliveryRolloutConfig = { mode: ProgressiveDeliveryRolloutMode };
 export type CompletionPolicyRolloutMode = "off" | "10" | "50" | "all";
 export type CompletionPolicyRolloutConfig = { mode: CompletionPolicyRolloutMode };
 
@@ -90,6 +94,30 @@ export type ExplicitCompletionRolloutDecision = {
 
 const explicitCompletionRolloutModes = new Set<ExplicitCompletionRolloutMode>(["shadow", "10", "50", "all", "strict"]);
 const completionPolicyRolloutModes = new Set<CompletionPolicyRolloutMode>(["off", "10", "50", "all"]);
+const progressiveDeliveryRolloutModes = new Set<ProgressiveDeliveryRolloutMode>(["shadow", "internal", "10", "50", "all"]);
+
+/** 阶段六灰度从影子记录开始；未配置时保持既有 Flag 语义，非法值安全回退到影子模式。 */
+export function readProgressiveDeliveryRollout(environment: NodeJS.ProcessEnv = process.env): ProgressiveDeliveryRolloutConfig {
+  const value = environment.AGENT_PROGRESSIVE_DELIVERY_ROLLOUT?.trim().toLowerCase() as ProgressiveDeliveryRolloutMode | undefined;
+  if (!value) return { mode: "all" };
+  return { mode: progressiveDeliveryRolloutModes.has(value) ? value : "shadow" };
+}
+
+/** 同一任务始终落入同一灰度桶；shadow 仅保留指标，关闭 Flag 可立即回退到旧路径。 */
+export function resolveProgressiveDeliveryRollout(input: {
+  taskKey: string;
+  flags: ProgressiveDeliveryFeatureFlags;
+  config: ProgressiveDeliveryRolloutConfig;
+  internalTask?: boolean;
+}): ProgressiveDeliveryFeatureFlags {
+  const threshold = input.config.mode === "10" ? 10 : input.config.mode === "50" ? 50 : input.config.mode === "all" ? 100 : 0;
+  const selected = input.config.mode === "internal" ? Boolean(input.internalTask) : getStableRolloutBucket(input.taskKey) < threshold;
+  return {
+    progressiveDelivery: selected && input.flags.progressiveDelivery,
+    progressiveRecovery: selected && input.flags.progressiveRecovery,
+    unitContextBudget: selected && input.flags.unitContextBudget
+  };
+}
 
 /** 读取任务完成策略灰度阶段；默认全量保持现有行为，非法配置则安全关闭。 */
 export function readCompletionPolicyRollout(environment: NodeJS.ProcessEnv = process.env): CompletionPolicyRolloutConfig {

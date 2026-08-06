@@ -51,7 +51,7 @@ import { RunMetricsTracker, classifyRunFailure, type RunMetricsRecorder } from "
 import { getPendingPatch } from "./patchStore.js";
 import { ConservativeTokenEstimator, isUnitContextBudgetWarning, prepareContextBudget } from "./contextBudget/index.js";
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
-import { implementedFeatures, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, type CompletionPolicyFeatureFlags, type CompletionPolicyRolloutConfig, type ExplicitCompletionRolloutConfig } from "./featureFlags.js";
+import { implementedFeatures, recordFeatureDecisionDifference, resolveCompletionPolicyRollout, resolveExplicitCompletionRollout, resolveProgressiveDeliveryRollout, type CompletionPolicyFeatureFlags, type CompletionPolicyRolloutConfig, type ExplicitCompletionRolloutConfig, type ProgressiveDeliveryRolloutConfig } from "./featureFlags.js";
 import { appendTaskSessionRecoveryDecision, appendTaskSessionToolFailureDiagnostic, getTaskSessionContextState, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, setTaskSessionContinuation, setTaskSessionRuntimeEvidence } from "./taskSessionStore.js";
 import { decideRecovery, evaluateProgress } from "./progressRecovery.js";
 import { createStructuredContextSummary } from "./contextBudget/summary.js";
@@ -110,6 +110,8 @@ export type AgentRuntimeOptions = {
   completionPolicyFlags?: CompletionPolicyFeatureFlags;
   /** 仅供验收覆盖灰度阶段，生产环境默认读取集中配置。 */
   completionPolicyRollout?: CompletionPolicyRolloutConfig;
+  /** 阶段六按稳定任务桶灰度，shadow 状态只记录安全指标。 */
+  progressiveDeliveryRollout?: ProgressiveDeliveryRolloutConfig;
   contextWindowTokens?: number;
   maxOutputTokens?: number;
   contextSafetyMarginTokens?: number;
@@ -122,7 +124,7 @@ export type AgentRuntimeOptions = {
 };
 
 async function loadRuntimeContextState(taskSessionId: string | null | undefined) {
-  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, activeDeliveryUnit: undefined as DeliveryUnit | undefined };
+  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, deliveryUnits: [] as DeliveryUnit[], activeDeliveryUnit: undefined as DeliveryUnit | undefined };
   try {
     const session = await getTaskSessionContextState(taskSessionId);
     return {
@@ -136,11 +138,12 @@ async function loadRuntimeContextState(taskSessionId: string | null | undefined)
       contextSummary: session.contextSummary ?? null,
       pendingToolCall: session.pendingToolCall ?? null,
       runtimeEvidence: session.runtimeEvidence,
+      deliveryUnits: session.deliveryUnits ?? [],
       activeDeliveryUnit: session.deliveryUnits?.find((unit) => unit.id === session.activeDeliveryUnitId)
     };
   } catch {
     // 无持久化任务的单元调用继续使用 Runtime 内存状态。
-    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, activeDeliveryUnit: undefined as DeliveryUnit | undefined };
+    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, deliveryUnits: [] as DeliveryUnit[], activeDeliveryUnit: undefined as DeliveryUnit | undefined };
   }
 }
 
@@ -1287,6 +1290,11 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     flags: options.completionPolicyFlags ?? config.featureFlags,
     config: options.completionPolicyRollout ?? config.completionPolicyRollout
   });
+  const progressiveDeliveryFlags = resolveProgressiveDeliveryRollout({
+    taskKey: options.taskSessionId || options.runtimeEvidence?.taskRunId || runId,
+    flags: config.featureFlags,
+    config: options.progressiveDeliveryRollout ?? config.progressiveDeliveryRollout
+  });
   const explicitCompletionRollout = resolveExplicitCompletionRollout({
     taskKey: options.taskSessionId || runId,
     featureEnabled: config.featureFlags.explicitCompletionTool,
@@ -1400,7 +1408,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   let latestContextBudgetSnapshot: ContextBudgetSnapshot | undefined;
   let latestContextSummary: StructuredContextSummary | null = null;
   const contextBudgetEnabled = options.contextBudgetEnabled ?? (config.featureFlags.contextBudgetV2 && implementedFeatures.contextBudgetV2);
-  const unitContextBudgetEnabled = options.unitContextBudgetEnabled ?? (config.featureFlags.unitContextBudget && implementedFeatures.unitContextBudget);
+  const unitContextBudgetEnabled = options.unitContextBudgetEnabled ?? (progressiveDeliveryFlags.unitContextBudget && implementedFeatures.unitContextBudget);
   let unitContextWarningActive = false;
   let unitContextBoundaryDecisionRecorded = false;
   const metrics = new RunMetricsTracker(
@@ -1416,6 +1424,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   metrics.setPrice(selectedModelDescriptor?.price);
   if (options.approvalResume) metrics.recordApprovalResume();
   metrics.recordChangedFileCount(directAppliedFiles.size);
+  metrics.recordDeliveryUnitSnapshot(taskContextState?.deliveryUnits);
   const persistAndReconcileRuntimeEvidence = async () => {
     if (!completionPolicyFlags.taskRuntimeEvidencePersistence) return;
     const runtimeEvidence = snapshotRuntimeEvidence();
@@ -2386,6 +2395,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
             createdAt: Date.now()
           };
           await appendTaskSessionToolFailureDiagnostic(options.taskSessionId, lastFailureDiagnostic);
+          metrics.recordToolFailureDiagnostic(lastFailureDiagnostic);
           options.onAgentStep?.(createProgressiveDeliveryStep({
             event: "tool_failure_recorded",
             details: {
@@ -2505,7 +2515,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
     }
 
     if (consecutiveNoProgressSteps >= maxNoProgressSteps) {
-      if (config.featureFlags.progressiveRecovery && implementedFeatures.progressiveRecovery) {
+      if (progressiveDeliveryFlags.progressiveRecovery && implementedFeatures.progressiveRecovery) {
         const taskStateForRecovery = await loadRuntimeContextState(options.taskSessionId);
         const decision = decideRecovery({
           consecutiveNoProgressSteps,
@@ -2521,6 +2531,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         });
         const facts = [...new Set([...lastProgressFacts, ...buildRecoveryFacts(agentContext, generatedPatchIds)])];
         await appendTaskSessionRecoveryDecision(options.taskSessionId, { triggerSignal: "no_progress", candidateActions: decision.candidateActions, finalAction: decision.action, reason: decision.reason, evidence: facts, deliveryUnitId: taskStateForRecovery.activeDeliveryUnit?.id });
+        metrics.recordRecoveryDecision(decision.action);
+        metrics.recordDeliveryUnitSnapshot(taskStateForRecovery.deliveryUnits);
         await setTaskSessionContinuation(options.taskSessionId, {
           nextStep: decision.continuation,
           requiredUserInputs: decision.action === "await_user" ? [{ field: "recovery_decision", label: "请提供继续执行所需的权限、依赖或目标选择", required: true }] : [],

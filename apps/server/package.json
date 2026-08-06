@@ -20,6 +20,7 @@
     "test:project-memory-stage6": "tsx --test src/projectMemory/memorySecurity.test.ts src/projectMemory/memoryEvaluation.test.ts src/projectMemory/memoryMetrics.test.ts src/projectMemory/projectMemoryFeatureFlags.test.ts",
     "test:stage7": "tsx --test src/agentRuntime.test.ts src/agentTools.test.ts src/providers/openAiCompatibleProvider.test.ts src/acceptance/stage7Acceptance.test.ts",
     "test:progressive-delivery-stage0": "tsx --test src/agentRuntime.test.ts src/featureFlags.test.ts src/observability/runMetrics.test.ts src/observability/taskMetrics.test.ts src/observability/progressiveDeliveryBaseline.test.ts",
+    "test:progressive-delivery-stage6": "tsx --test src/agentRuntime.test.ts src/featureFlags.test.ts src/taskSessionStore.test.ts src/observability/runMetrics.test.ts src/observability/taskMetrics.test.ts src/observability/progressiveDeliveryBaseline.test.ts",
     "test:agent-new-file-stage0": "tsx --test src/acceptance/agentNewFileBaseline.test.ts",
     "test:agent-new-file-stage1": "tsx --test src/existenceChecker/existenceChecker.test.ts src/existenceChecker/packageResolver.test.ts src/existenceChecker/aliasResolver.test.ts",
     "test:agent-new-file-stage2": "tsx --test src/existenceChecker/plannedFileResolver.test.ts src/existenceChecker/existenceChecker.test.ts src/agentPatchTools.test.ts src/editPatchService.test.ts",

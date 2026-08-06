@@ -3,6 +3,7 @@ import path from "node:path";
 import { appStatePath } from "../statePaths.js";
 import type { ModelPrice, ModelUsage } from "../contracts/model.js";
 import type { CompletionRejectionCode } from "../types.js";
+import type { DeliveryUnit, ToolFailureDiagnostic } from "../types.js";
 
 export const COMPLETION_RESOURCE_LIMITS = {
   maxInputTokensPerChangedFile: 100_000,
@@ -82,6 +83,32 @@ export type TaskSessionPersistenceMetrics = {
   taskSessionRenameRetryCount: number;
 };
 
+/** 阶段六只汇总交付过程的计数和状态，不保存源码、提示词或补丁内容。 */
+export type ProgressiveDeliveryMetrics = {
+  deliveryUnits: { total: number; completed: number; blocked: number; deferred: number };
+  toolFailuresByCategory: Record<string, number>;
+  recoveryDecisions: { total: number; byAction: Record<string, number> };
+  noProgressTransitions: { replan: number; awaitingUser: number; successfulDelivery: number };
+  unitSummaries: Array<{
+    unitId: string;
+    status: DeliveryUnit["status"];
+    inputTokens: number;
+    compressionCount: number;
+    changedFileCount: number;
+    validationStatus: "not_required" | "not_run" | "passed" | "failed" | "unavailable";
+  }>;
+};
+
+export function createEmptyProgressiveDeliveryMetrics(): ProgressiveDeliveryMetrics {
+  return {
+    deliveryUnits: { total: 0, completed: 0, blocked: 0, deferred: 0 },
+    toolFailuresByCategory: {},
+    recoveryDecisions: { total: 0, byAction: {} },
+    noProgressTransitions: { replan: 0, awaitingUser: 0, successfulDelivery: 0 },
+    unitSummaries: []
+  };
+}
+
 export function createEmptyTaskSessionPersistenceMetrics(): TaskSessionPersistenceMetrics {
   return {
     taskSessionUpdateCount: 0,
@@ -129,6 +156,7 @@ export type RunMetrics = {
   completionResourceAlerts: CompletionResourceAlert[];
   completionRejections: CompletionRejectionDiagnostic[];
   taskSessionPersistence: TaskSessionPersistenceMetrics;
+  progressiveDelivery: ProgressiveDeliveryMetrics;
   tools: ToolRuntimeMetrics;
   context: { compressionCount: number; estimatedTokensBefore: number | null; estimatedTokensAfter: number | null; estimator: "conservative" | "unavailable" };
   result: {
@@ -239,6 +267,7 @@ export class RunMetricsTracker {
     safeEditorRiskAcknowledgementCount: 0,
     safeEditorFalseExpansionRegressionCount: 0
   };
+  private progressiveDelivery = createEmptyProgressiveDeliveryMetrics();
 
   constructor(
     private readonly identity: Pick<RunMetrics, "runId" | "taskSessionId" | "provider" | "model" | "mode"> & Partial<Pick<RunMetrics, "scope">>,
@@ -326,6 +355,41 @@ export class RunMetricsTracker {
   recordToolFailure(input: { completionEvidence?: boolean } = {}) {
     this.failedToolCalls += 1;
     if (input.completionEvidence !== false) this.completionEvidenceFailedToolCalls += 1;
+  }
+
+  /** 仅记录已脱敏诊断的类别，避免指标链路成为敏感工具输出的旁路存储。 */
+  recordToolFailureDiagnostic(diagnostic: Pick<ToolFailureDiagnostic, "errorCategory">) {
+    const category = diagnostic.errorCategory.trim().slice(0, 80) || "unknown";
+    this.progressiveDelivery.toolFailuresByCategory[category] = (this.progressiveDelivery.toolFailuresByCategory[category] ?? 0) + 1;
+  }
+
+  /** 记录恢复动作及其可观察结果，用于比较灰度前后的无进展收口质量。 */
+  recordRecoveryDecision(action: string) {
+    const normalized = action.trim().slice(0, 80) || "unknown";
+    this.progressiveDelivery.recoveryDecisions.total += 1;
+    this.progressiveDelivery.recoveryDecisions.byAction[normalized] = (this.progressiveDelivery.recoveryDecisions.byAction[normalized] ?? 0) + 1;
+    if (normalized === "replan") this.progressiveDelivery.noProgressTransitions.replan += 1;
+    if (normalized === "await_user") this.progressiveDelivery.noProgressTransitions.awaitingUser += 1;
+  }
+
+  /** 将会话中的单元指标投影为安全摘要；标题、文件名和命令均不进入运行指标。 */
+  recordDeliveryUnitSnapshot(units: readonly DeliveryUnit[] | undefined) {
+    if (!units) return;
+    const summaries = units.map((unit) => ({
+      unitId: unit.id,
+      status: unit.status,
+      inputTokens: unit.contextMetrics?.inputTokens ?? 0,
+      compressionCount: unit.contextMetrics?.compressionCount ?? 0,
+      changedFileCount: unit.contextMetrics?.changedFileCount ?? 0,
+      validationStatus: unit.contextMetrics?.validationResult ?? "not_run"
+    }));
+    this.progressiveDelivery.deliveryUnits = {
+      total: summaries.length,
+      completed: summaries.filter((unit) => unit.status === "validated").length,
+      blocked: summaries.filter((unit) => unit.status === "blocked").length,
+      deferred: summaries.filter((unit) => unit.status === "deferred").length
+    };
+    this.progressiveDelivery.unitSummaries = summaries.slice(0, 100);
   }
 
   /** 为显式完成协议补充独立统计，便于从普通工具指标中识别拒绝循环。 */
@@ -443,6 +507,9 @@ export class RunMetricsTracker {
     if (this.providerCallsAfterFirstCompletionRejection > COMPLETION_RESOURCE_LIMITS.maxProviderCallsAfterFirstCompletionRejection) {
       completionResourceAlerts.push("EXCESSIVE_PROVIDER_CALLS_AFTER_REJECTION");
     }
+    if (input.status === "completed" && this.progressiveDelivery.recoveryDecisions.total > 0) {
+      this.progressiveDelivery.noProgressTransitions.successfulDelivery += 1;
+    }
     const metrics: RunMetrics = {
       schemaVersion: 1,
       ...this.identity,
@@ -470,6 +537,7 @@ export class RunMetricsTracker {
       completionResourceAlerts,
       completionRejections: structuredClone(this.completionRejections),
       taskSessionPersistence: createEmptyTaskSessionPersistenceMetrics(),
+      progressiveDelivery: structuredClone(this.progressiveDelivery),
       tools: {
         calls: this.toolCalls,
         repeatedCalls: this.repeatedToolCalls,
