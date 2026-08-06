@@ -55,6 +55,7 @@ const deliveryUnitStatusText: Record<DeliveryUnitStatus, string> = {
 };
 
 const taskPauseView: Partial<Record<TaskSession["status"], { label: string; detail: string }>> = {
+  paused: { label: "计划已就绪", detail: "已完成只读调研。切换到 Act 后会在同一任务上下文中继续实施。" },
   incomplete: { label: "可继续暂停", detail: "本轮未完成，但已保留可复用事实和后续入口。" },
   awaiting_replan: { label: "等待重规划", detail: "当前事实不足以安全继续，请重规划或编辑计划。" },
   awaiting_user: { label: "等待你的决策", detail: "任务需要你回答具体问题或确认条件后才能继续。" },
@@ -119,6 +120,7 @@ export default function TaskPlanPanel({
   const [editingItemId, setEditingItemId] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
   const [editingNote, setEditingNote] = useState("");
+  const [showPlanSteps, setShowPlanSteps] = useState(false);
   const planItems = session?.planItems || [];
   const deliveryUnits = session?.deliveryUnits || [];
   const deliveryUnitGroups = getDeliveryUnitGroups(deliveryUnits);
@@ -126,6 +128,7 @@ export default function TaskPlanPanel({
   const workflow = session?.workflow;
   const isAwaitingReplan = session?.status === "awaiting_replan";
   const effectiveAgentMode = session?.agentMode || agentMode || "act";
+  const isPlanReadyForAct = session?.status === "paused" && effectiveAgentMode === "plan";
   const canEdit = Boolean(session) && !disabled && !loading;
   const canInterruptForReplan = Boolean(session) && Boolean(onInterruptForReplan) && streaming && !disabled;
   const canSubmitPlanAction = canEdit || canInterruptForReplan;
@@ -137,6 +140,8 @@ export default function TaskPlanPanel({
   const tokenUsage = getTaskTokenUsageText(session?.modelUsage);
   const taskFinished = session ? ["success", "incomplete", "blocked", "failed", "cancelled"].includes(session.status) : false;
   const pauseView = session ? taskPauseView[session.status] : undefined;
+  // 有交付单元时优先展示 Runtime 批次；旧会话仍保持原计划步骤的直接可见性。
+  const shouldShowPlanSteps = deliveryUnits.length === 0 || showPlanSteps;
 
   useEffect(() => {
     setEditingItemId("");
@@ -144,6 +149,7 @@ export default function TaskPlanPanel({
     setEditingNote("");
     setDraftTitle("");
     setRewriteInstruction("");
+    setShowPlanSteps(false);
   }, [session?.id]);
 
   function startEditing(item: TaskPlanItem) {
@@ -243,9 +249,15 @@ export default function TaskPlanPanel({
           )}
           {session?.status !== "awaiting_replan" && (
             <div className="task-continuation-actions">
-              <button type="button" disabled={disabled || loading} onClick={onOpenTaskConversation}>
-                {getContinuationLabel(session?.continuation)}
-              </button>
+              {isPlanReadyForAct ? (
+                <button type="button" disabled={disabled || loading} onClick={() => void onApprovePlan()}>
+                  切换到 Act 并执行
+                </button>
+              ) : (
+                <button type="button" disabled={disabled || loading} onClick={onOpenTaskConversation}>
+                  {getContinuationLabel(session?.continuation)}
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -290,6 +302,18 @@ export default function TaskPlanPanel({
         </section>
       )}
 
+      {deliveryUnits.length > 0 && (
+        <div className="task-plan-step-toggle">
+          <div>
+            <strong>计划步骤</strong>
+            <span>{planItems.length} 项，可编辑；用于说明每个交付单元的来源计划。</span>
+          </div>
+          <button type="button" className="secondary" aria-expanded={showPlanSteps} onClick={() => setShowPlanSteps((current) => !current)}>
+            {showPlanSteps ? "收起计划步骤" : "查看计划步骤"}
+          </button>
+        </div>
+      )}
+
       {session?.planApproval?.status === "pending" && (
         <div className="task-plan-approval">
           <strong>{isAwaitingReplan ? "已进入计划模式" : "计划等待批准"}</strong>
@@ -300,7 +324,7 @@ export default function TaskPlanPanel({
         </div>
       )}
 
-      {session && (
+      {session && shouldShowPlanSteps && (
         <form
           className="task-plan-rewrite"
           onSubmit={(event) => {
@@ -320,7 +344,7 @@ export default function TaskPlanPanel({
         </form>
       )}
 
-      {session && (
+      {session && shouldShowPlanSteps && (
         <form
           className="task-plan-add"
           onSubmit={(event) => {
@@ -335,7 +359,7 @@ export default function TaskPlanPanel({
         </form>
       )}
 
-      {planItems.length ? (
+      {shouldShowPlanSteps && (planItems.length ? (
         <ol className="task-plan-list">
           {planItems.map((item) => {
             const isEditing = editingItemId === item.id;
@@ -396,9 +420,9 @@ export default function TaskPlanPanel({
         </ol>
       ) : (
         <p className="task-plan-empty">{session ? "还没有计划步骤，可以先手动添加。后续 Agent Loop 会自动维护这里。" : "打开任务历史或开始一次智能体任务后，这里会显示计划。"}</p>
-      )}
+      ))}
 
-      {planRevisions.length > 0 && (
+      {shouldShowPlanSteps && planRevisions.length > 0 && (
         <div className="task-plan-revisions" aria-label="计划修订记录">
           <strong>计划修订</strong>
           <ul>

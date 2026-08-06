@@ -79,6 +79,11 @@ export type AgentRuntimeResult = {
 export type AgentRuntimeOptions = {
   userRequest: string;
   messages?: ModelMessage[];
+  /**
+   * 从 Plan 切换到 Act 时恢复同一任务的历史对话。系统提示始终按当前模式重建，
+   * 避免把 Plan 的只读权限意外带入 Act。
+   */
+  resumeFromPlan?: boolean;
   agentContext?: AgentContext;
   registry?: AgentToolRegistry;
   maxSteps?: number;
@@ -1170,10 +1175,12 @@ function restoreRuntimeMessage(message: PersistedAgentMessage): ModelMessage {
 }
 
 function restoreRuntimeMessages(userRequest: string, mode: AgentMode, persistedMessages: PersistedAgentMessage[] = [], workflow?: TaskWorkflowSnapshot, projectMemoryPrompt = "") {
-  const restoredMessages = persistedMessages.map(restoreRuntimeMessage);
+  // 历史 system prompt 可能来自 Plan 模式；恢复时必须用当前模式的权限和工具说明替换它。
+  const restoredMessages = persistedMessages
+    .map(restoreRuntimeMessage)
+    .filter((message) => message.role !== "system");
 
-  // 旧会话可能只持久化 assistant/tool 消息，恢复时补齐当前模式对应的系统提示词和用户目标。
-  return restoredMessages.some((message) => message.role === "system") ? restoredMessages : [...createInitialMessages(userRequest, mode, workflow, projectMemoryPrompt), ...restoredMessages];
+  return [...createInitialMessages(userRequest, mode, workflow, projectMemoryPrompt), ...restoredMessages];
 }
 
 export type ResumeAgentRuntimeAfterApprovalOptions = Omit<AgentRuntimeOptions, "messages"> & {
@@ -1345,14 +1352,28 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
   const projectMemoryPrompt = options.projectMemoryPrompt ?? (await loadProjectMemoryPrompt(options.userRequest, agentContext));
   // 运行时按当前操作系统生成命令约束，保证模型看到的语法与 runCommand 的真实 Shell 一致。
   const commandShellPrompt = registry.get("runCommand") ? createAgentCommandShellPrompt() : "";
-  const messages: ModelMessage[] = options.messages ? [...options.messages] : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
+  const persistedMessages = options.resumeFromPlan && options.taskSessionId
+    ? await listAgentMessages(options.taskSessionId)
+    : [];
+  const messages: ModelMessage[] = options.messages
+    ? [...options.messages]
+    : options.resumeFromPlan
+      ? restoreRuntimeMessages(options.userRequest, mode, persistedMessages, options.workflow, projectMemoryPrompt)
+      : createInitialMessages(options.userRequest, mode, options.workflow, projectMemoryPrompt);
+  if (options.resumeFromPlan) {
+    // 明确告知模型这是用户确认后的模式切换，而不是一次脱离计划的新请求。
+    messages.push({ role: "user", content: "用户已确认并切换到 Act 模式。请基于本任务已完成的 Plan 调研、计划和未解决问题继续实施；如发现计划与事实不符，先说明并重规划。" });
+  }
   messages.forEach((message, index) => {
     message.id ??= `runtime-${runId}-${index + 1}`;
     message.createdAt ??= Date.now() + index;
   });
-  if (!options.messages && options.taskSessionId) {
+  if (!options.messages && options.taskSessionId && !options.resumeFromPlan) {
     // 初始系统规则和用户目标也进入原始审计链；压缩只改变发送视图，不删除这些记录。
     for (const message of messages) await persistAgentMessage(options.taskSessionId, message);
+  } else if (options.resumeFromPlan && options.taskSessionId) {
+    // 历史消息已存在，仅追加本次模式切换的审计记录，避免重复写入整段 Plan 上下文。
+    await persistAgentMessage(options.taskSessionId, messages.at(-1)!);
   }
   const taskContextState = options.runtimeEvidence ? null : await loadRuntimeContextState(options.taskSessionId);
   const restoredRuntimeEvidence = completionPolicyFlags.taskRuntimeEvidencePersistence

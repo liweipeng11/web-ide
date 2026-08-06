@@ -26,6 +26,7 @@ import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
 import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
+import { buildTaskPlanContinuationRequest, decideTaskPlanContinuation } from "./taskPlanContinuation.js";
 import { attachTerminalServer } from "./terminalServer.js";
 import { pickWorkspaceFolder } from "./workspacePicker.js";
 import { getWorkspaceRoot, initializeWorkspaceRoot, setWorkspaceRoot } from "./workspaceStore.js";
@@ -293,8 +294,11 @@ function buildRuntimeFollowupAnswer(runtimeResult: Awaited<ReturnType<typeof run
 }
 
 function buildDeferredRuntimeAnswer(runtimeResult: Awaited<ReturnType<typeof runAgentRuntime>>, runtimePatch: GenerateEditResponse | null) {
-  // 工具审批还没全部结束时，只展示步骤和审批卡片，最终说明留到 runtime 真正完成后再出现。
-  if (runtimeResult.status === "awaiting_approval") return null;
+  // 补丁尚待审批时仍需写入简短的聊天摘要，避免用户只能从工具调用区域得知结果。
+  // 实际改动依然必须经过审批，摘要不会改变任务或补丁的审批状态。
+  if (runtimeResult.status === "awaiting_approval") {
+    return runtimePatch ? buildRuntimeFollowupAnswer(runtimeResult, runtimePatch) : null;
+  }
 
   return buildRuntimeFollowupAnswer(runtimeResult, runtimePatch);
 }
@@ -1107,19 +1111,47 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         );
       }
 
-      const runtimeResult = await runAgentRuntime({
-        taskSessionId: taskSession.id,
-        userRequest: editRequest,
-        mode: "act",
-        providerId: modelSelection.providerId,
-        modelId: modelSelection.modelId,
-        signal: controller.signal,
-        workflow: plannedTaskSession?.workflow || taskSession.workflow,
-        runtimeEvidence: taskSession.runtimeEvidence,
-        onTaskProgress: createRuntimeTaskProgressHandler(taskSession.id),
-        onAgentStep: pushAgentStep,
-        onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
+      const runTaskRuntime = (goal: string, runtimeEvidence: TaskSession["runtimeEvidence"], agentContext?: Awaited<ReturnType<typeof runAgentRuntime>>["agentContext"]) =>
+        runAgentRuntime({
+          taskSessionId: taskSession.id,
+          userRequest: goal,
+          mode: "act",
+          providerId: modelSelection.providerId,
+          modelId: modelSelection.modelId,
+          signal: controller.signal,
+          workflow: plannedTaskSession?.workflow || taskSession.workflow,
+          runtimeEvidence,
+          agentContext,
+          // Plan → Act 必须复用同一任务的调研结论和对话轨迹，行为与 Cline 的模式切换一致。
+          resumeFromPlan: Boolean(approvedTaskSessionId) && !agentContext,
+          onTaskProgress: createRuntimeTaskProgressHandler(taskSession.id),
+          onAgentStep: pushAgentStep,
+          onContextBudget: ({ snapshot, summary }) => sendEvent("context_budget", { taskSessionId: taskSession.id, snapshot, summary })
+        });
+
+      let runtimeResult = await runTaskRuntime(editRequest, taskSession.runtimeEvidence);
+      const sessionAfterFirstRun = await getTaskSession(taskSession.id);
+      const continuation = decideTaskPlanContinuation({
+        runtimeStatus: runtimeResult.status,
+        continuationCount: 0,
+        hasPendingToolCall: Boolean(runtimeResult.pendingToolCall),
+        generatedPatchCount: runtimeResult.generatedPatchIds.length,
+        planItems: sessionAfterFirstRun.planItems
       });
+
+      if (continuation.shouldContinue && continuation.planItem) {
+        // Runtime 的 incomplete 只是本轮未交付；仍有计划项时应聚焦当前步骤续跑一次。
+        pushAgentStep(createAgentStep({
+          type: "strategy",
+          event: "no_progress_recovery",
+          message: `上一轮未形成可交付结果，正在继续执行计划步骤：${continuation.planItem.title}`
+        }));
+        runtimeResult = await runTaskRuntime(
+          buildTaskPlanContinuationRequest(editRequest, continuation.planItem),
+          runtimeResult.runtimeEvidence,
+          runtimeResult.agentContext
+        );
+      }
       const runtimePatch = createPatchStreamResponse(runtimeResult.generatedPatchIds.at(-1), taskSession.id, runtimeResult.content || "已生成待审核补丁。", agentSteps);
       let runtimeProgressedTaskSession;
       if (runtimePatch) {

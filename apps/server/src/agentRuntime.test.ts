@@ -84,6 +84,30 @@ test("启用显式完成协议后，自然停止不能直接 completed", async (
   assert.equal(result.messages.some((message) => message.role === "user" && String(message.content).includes("completeTask")), true);
 });
 
+test("Plan 切换到 Act 时保留历史语境并重建 Act 系统提示", async () => {
+  let firstRequest: import("./contracts/index.js").ModelRequest | undefined;
+
+  await runAgentRuntime({
+    userRequest: "为登录页增加双因素认证",
+    mode: "act",
+    resumeFromPlan: true,
+    maxSteps: 1,
+    contextBudgetEnabled: false,
+    registry: createAgentToolRegistry(completionAgentToolDefinitions),
+    completeModel: async (request) => {
+      firstRequest = request;
+      return {
+        message: { role: "assistant", content: "开始实施。" },
+        usage: { inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cachedInputTokens: 0 }
+      };
+    },
+    metricsRecorder: async () => undefined
+  });
+
+  assert.match(firstRequest?.systemPrompt || "", /Act/i);
+  assert.equal(firstRequest?.messages.some((message) => message.role === "user" && String(message.content).includes("切换到 Act 模式")), true);
+});
+
 test("completeTask 与编辑工具混用时整轮拒绝且不执行编辑", async () => {
   let editExecutionCount = 0;
   let completionCount = 0;

@@ -16,6 +16,8 @@ test("阶段 5：渐进交付界面保留恢复入口与旧会话降级", async 
   ]);
 
   assert.match(planPanel, /deliveryUnits \|\| \[\]/, "旧会话缺少交付单元时应继续渲染原计划");
+  assert.match(planPanel, /shouldShowPlanSteps/, "交付单元存在时应按需展开来源计划");
+  assert.match(planPanel, /查看计划步骤/);
   assert.match(planPanel, /按当前事实重规划/);
   assert.match(planPanel, /编辑计划后继续/);
   assert.match(planPanel, /等待你的决策/);
