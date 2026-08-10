@@ -7,6 +7,7 @@ import type { RuntimeTool, RuntimeToolEffect, RuntimeToolExecutionContext } from
 export type LegacyToolAdapterOptions = {
   effect: RuntimeToolEffect;
   getTargetPaths?: (args: Record<string, unknown>) => string[];
+  getChangedFiles?: (args: Record<string, unknown>, result: unknown) => string[];
   createRuntime: (context: RuntimeToolExecutionContext) => AgentToolRuntime | Promise<AgentToolRuntime>;
 };
 
@@ -36,7 +37,9 @@ export function adaptLegacyAgentTool(definition: AgentToolDefinition, options: L
     name: definition.name,
     description: definition.description,
     effect: options.effect,
+    inputSchema: definition.parameters,
     getTargetPaths: options.getTargetPaths,
+    getChangedFiles: options.getChangedFiles,
     async execute(args, context) {
       const runtime = await options.createRuntime(context);
       const adaptedRuntime = { ...runtime, registry };

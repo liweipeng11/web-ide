@@ -9,7 +9,8 @@ export type RuntimeErrorCode =
   | "DUPLICATE_TOOL"
   | "UNKNOWN_TOOL"
   | "PERMISSION_DENIED"
-  | "SCOPE_VIOLATION";
+  | "SCOPE_VIOLATION"
+  | "AGENT_LOOP_LIMIT_EXCEEDED";
 
 /** 对外暴露稳定错误码，避免上层依赖第三方库或内部异常文本。 */
 export class AgentRuntimeError extends Error {

@@ -88,10 +88,30 @@ export class RuntimeKernel {
     const context = {
       agentId,
       state: this.options.state.getState(),
+      availableTools: this.options.tools.describeAvailable(task.allowedTools),
+      getState: () => this.options.state.getState(),
       callTool: async (toolName: string, args: Record<string, unknown>) => {
         const tool = this.options.tools.get(toolName);
         this.options.permissions.checkTool(agentId, task, tool, args);
-        return tool.execute(args, { agentId, task });
+        const toolResult = await tool.execute(args, { agentId, task });
+        const changedFiles = tool.getChangedFiles?.(args, toolResult) ?? [];
+        if (changedFiles.length) {
+          // 工具声明的变更必须再次经过任务写范围校验，不能依赖模型自报路径。
+          this.options.permissions.checkResult(task, {
+            taskId: task.taskId,
+            status: "success",
+            summary: "工具执行进度",
+            facts: [],
+            changedFiles,
+            evidence: [],
+            blockers: []
+          });
+          this.options.state.recordProgress(task.taskId, {
+            changedFiles,
+            facts: [`工具 ${toolName} 已完成受控写入。`]
+          });
+        }
+        return toolResult;
       }
     };
 

@@ -21,4 +21,17 @@ export class ToolRegistry {
     if (!tool) throw runtimeError("UNKNOWN_TOOL", `未知工具：${toolName}`, { toolName });
     return tool;
   }
+
+  /** 只暴露任务声明允许且已经注册的工具描述，不向 Agent 暴露执行函数。 */
+  describeAvailable(toolNames: string[]) {
+    return [...new Set(toolNames)].flatMap((toolName) => {
+      const tool = this.tools.get(toolName);
+      return tool ? [{
+        name: tool.name,
+        description: tool.description,
+        effect: tool.effect,
+        inputSchema: tool.inputSchema
+      }] : [];
+    });
+  }
 }

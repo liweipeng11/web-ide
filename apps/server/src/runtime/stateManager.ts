@@ -168,6 +168,20 @@ export class StateManager {
     this.state.status = "running";
   }
 
+  /** 工具执行成功后立即合并可验证进度，避免等 Agent 结束才看到文件变化。 */
+  recordProgress(taskId: string, progress: Pick<AgentResult, "changedFiles" | "facts">) {
+    const task = this.getTask(taskId);
+    if (task.status !== "running" || this.state.currentTask !== taskId) {
+      throw runtimeError("INVALID_STATE_TRANSITION", `只能向当前 running 任务记录进度：${taskId}`, {
+        taskId,
+        currentTask: this.state.currentTask,
+        currentStatus: task.status
+      });
+    }
+    this.state.changedFiles = uniqueStrings([...this.state.changedFiles, ...progress.changedFiles]);
+    this.state.facts = uniqueStrings([...this.state.facts, ...progress.facts]);
+  }
+
   applyResult(result: AgentResult) {
     const task = this.getTask(result.taskId);
     if (task.status !== "running") {

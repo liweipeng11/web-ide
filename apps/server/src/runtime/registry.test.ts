@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Agent, RuntimeTool } from "./contracts.js";
+import type { Agent, AgentContext, AgentTaskPacket, RuntimeTool } from "./contracts.js";
 import { AgentRegistry } from "./agentRegistry.js";
 import { ToolRegistry } from "./toolRegistry.js";
 
@@ -33,6 +33,38 @@ test("AgentRegistry 校验能力并拒绝重复身份", () => {
     () => registry.register(agent),
     (error: unknown) => error instanceof Error && "code" in error && error.code === "DUPLICATE_AGENT"
   );
+});
+
+test("AgentRegistry 保留 class Agent 的原型方法", async () => {
+  class ClassAgent implements Agent {
+    id = "class-agent";
+    capabilities = ["read"];
+
+    async run(task: AgentTaskPacket) {
+      return {
+        taskId: task.taskId,
+        status: "success" as const,
+        summary: "class agent completed",
+        facts: [],
+        changedFiles: [],
+        evidence: [],
+        blockers: []
+      };
+    }
+  }
+
+  const registered = new AgentRegistry([new ClassAgent()]).get("class-agent");
+  const result = await registered.run({
+    taskId: "T1",
+    goal: "验证类 Agent",
+    context: null,
+    constraints: [],
+    acceptanceCriteria: ["返回结果"],
+    readScope: [],
+    writeScope: [],
+    allowedTools: []
+  }, {} as AgentContext);
+  assert.equal(result.summary, "class agent completed");
 });
 
 test("ToolRegistry 拒绝未知工具和重复工具", () => {
