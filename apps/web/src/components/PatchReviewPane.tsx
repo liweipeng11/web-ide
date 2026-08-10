@@ -117,6 +117,12 @@ export default function PatchReviewPane({ patch, loading, autoFix, onApply, onRe
         <div>
           <h2>Diff Preview</h2>
           <small>{displaySummary}</small>
+          {/* 阶段 7：子代理来源标签 */}
+          {patch.subagentId && (
+            <span className="subagent-source-tag" title={`来源子代理：${patch.subagentId}`}>
+              来源子代理
+            </span>
+          )}
         </div>
         <div className="diff-actions">
           <button type="button" className="icon-button" disabled={loading || safeEditModel?.status === "needs_analysis"} title={safeEditModel?.status === "needs_analysis" ? "需要先补充影响分析" : "Apply all"} aria-label="Apply all" onClick={() => requestApply()}>

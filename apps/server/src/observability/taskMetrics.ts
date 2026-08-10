@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { appStatePath } from "../statePaths.js";
 import { readJsonStateFile, writeJsonStateFile } from "../stateFileStorage.js";
-import { appendRunMetrics, COMPLETION_RESOURCE_LIMITS, createEmptyProgressiveDeliveryMetrics, createEmptyTaskSessionPersistenceMetrics, type ProgressiveDeliveryMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta, type TaskSessionPersistenceMetrics } from "./runMetrics.js";
+import { appendRunMetrics, COMPLETION_RESOURCE_LIMITS, createEmptyProgressiveDeliveryMetrics, createEmptySubagentMetrics, createEmptyTaskSessionPersistenceMetrics, type ProgressiveDeliveryMetrics, type RunFinalStatus, type RunMetrics, type RunMetricsRecorder, type SafeEditorMetricDelta, type SubagentMetrics, type TaskSessionPersistenceMetrics } from "./runMetrics.js";
 
 const taskMetrics = new Map<string, RunMetrics>();
 const taskMetricQueues = new Map<string, Promise<unknown>>();
@@ -78,6 +78,13 @@ function normalizeMetricFields(metrics: RunMetrics) {
   metrics.progressiveDelivery.recoveryDecisions.byAction ??= {};
   metrics.progressiveDelivery.noProgressTransitions ??= { replan: 0, awaitingUser: 0, successfulDelivery: 0 };
   metrics.progressiveDelivery.unitSummaries ??= [];
+  // 阶段 1：子代理指标默认值兼容，保证阶段 0 快照在阶段 1 读取时不会解构 undefined。
+  metrics.subagentMetrics ??= createEmptySubagentMetrics();
+  metrics.subagentMetrics.byArtifactsKind ??= { analysis: 0, proposed_patch: 0, execution_report: 0, modification_plan: 0 };
+  metrics.subagentMetrics.byKind ??= { analysis: 0, implementation: 0, verification: 0, planning: 0 };
+  metrics.subagentMetrics.byStatus ??= { succeeded: 0, failed: 0, cancelled: 0 };
+  // 阶段 6：并行指标默认值兼容。
+  metrics.subagentMetrics.concurrent ??= { batches: 0, totalParallelTasks: 0, peakConcurrency: 0, totalParallelDurationMs: 0 };
   metrics.result.stopReason ??= metrics.result.status === "completed"
     ? "completed"
     : metrics.result.status === "awaiting_approval"
@@ -110,6 +117,26 @@ function mergeProgressiveDeliveryMetrics(current: ProgressiveDeliveryMetrics, ne
   const summaries = new Map(current.unitSummaries.map((unit) => [unit.unitId, unit]));
   for (const summary of next.unitSummaries) summaries.set(summary.unitId, structuredClone(summary));
   current.unitSummaries = [...summaries.values()].slice(0, 100);
+}
+
+// 阶段 1：累加子代理跨运行指标，区分父代理和子代理的失败归属。
+function mergeSubagentMetrics(current: SubagentMetrics, next: SubagentMetrics) {
+  current.totalRuns += next.totalRuns;
+  current.freshStarted += next.freshStarted;
+  current.byStatus.succeeded += next.byStatus.succeeded;
+  current.byStatus.failed += next.byStatus.failed;
+  current.byStatus.cancelled += next.byStatus.cancelled;
+  for (const kind of Object.keys(next.byKind) as Array<keyof SubagentMetrics["byKind"]>) {
+    current.byKind[kind] += next.byKind[kind];
+  }
+  for (const kind of Object.keys(next.byArtifactsKind) as Array<keyof SubagentMetrics["byArtifactsKind"]>) {
+    current.byArtifactsKind[kind] += next.byArtifactsKind[kind];
+  }
+  // 阶段 6：并行统计累加。
+  current.concurrent.batches += next.concurrent.batches;
+  current.concurrent.totalParallelTasks += next.concurrent.totalParallelTasks;
+  current.concurrent.peakConcurrency = Math.max(current.concurrent.peakConcurrency, next.concurrent.peakConcurrency);
+  current.concurrent.totalParallelDurationMs += next.concurrent.totalParallelDurationMs;
 }
 
 function refreshCompletionResourceAlerts(metrics: RunMetrics) {
@@ -312,6 +339,9 @@ export async function mergeTaskMetrics(metrics: RunMetrics) {
     current.context.estimatedTokensAfter = metrics.context.estimatedTokensAfter ?? current.context.estimatedTokensAfter;
     if (metrics.context.estimator !== "unavailable") current.context.estimator = metrics.context.estimator;
     mergeProgressiveDeliveryMetrics(current.progressiveDelivery, metrics.progressiveDelivery);
+    if (current.subagentMetrics && metrics.subagentMetrics) {
+      mergeSubagentMetrics(current.subagentMetrics, metrics.subagentMetrics);
+    }
     current.result.status = metrics.result.status;
     current.result.stopReason = metrics.result.stopReason;
     if (metrics.result.failureCategory !== "none") current.result.failureCategory = metrics.result.failureCategory;

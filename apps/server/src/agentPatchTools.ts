@@ -138,6 +138,10 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
       runtime.agentContext.modificationPlan = modificationPlan;
       await setTaskSessionModificationPlan(runtime.taskSessionId, modificationPlan);
       // 由补丁服务统一执行预检与一次性恢复，避免工具层和服务层分别重试造成循环。
+      // 阶段 3：子代理运行时透传 delegationId/subagentId，标记 patch 来源。
+      const subagentInfo = runtime.agentContext.isSubagent
+        ? { delegationId: runtime.agentContext.subagentDelegationId, subagentId: runtime.agentContext.subagentId }
+        : undefined;
       const patch = await createEditPatchResponse(
         filePath,
         userRequest,
@@ -148,7 +152,8 @@ export const patchAgentToolDefinitions: AgentToolDefinition[] = [
         {
           previousAnalyses: runtime.agentContext.impactAnalyses,
           executeImpactAnalysis: (root, targets, options) => executeImpactAnalysis(root, targets, runtime.agentContext, options)
-        }
+        },
+        subagentInfo
       );
       const importValidation = await validateAgentGeneratedPatchImports(workspaceRoot, patch.files);
       if (importValidation.unresolved.length) {

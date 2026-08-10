@@ -12,6 +12,37 @@ export const DEFAULT_AGENT_BUDGET_POLICY: AgentBudgetPolicy = {
   forceFinalRemainingSteps: 1
 };
 
+// 阶段 5：子代理默认预算，比父代理更激进的三阶段压缩。
+// 子代理负责局部目标，不需要长时间探索，应更快收敛到最终结论。
+// analysis 子代理和 implementation 子代理共享同一预算策略。
+export const DEFAULT_ANALYSIS_SUBAGENT_BUDGET_POLICY: AgentBudgetPolicy = {
+  maxSteps: 12,
+  convergenceRemainingSteps: 2,
+  forceFinalRemainingSteps: 1
+};
+
+export const DEFAULT_IMPLEMENTATION_SUBAGENT_BUDGET_POLICY: AgentBudgetPolicy = {
+  maxSteps: 16,
+  convergenceRemainingSteps: 3,
+  forceFinalRemainingSteps: 1
+};
+
+/**
+ * 阶段 5：从子代理委派参数构造预算策略。
+ * 子代理的 maxSteps 来自委派工具的 maxSteps 参数，收敛和强制结论阶段按比例计算。
+ * 如果委派工具未指定 maxSteps，使用默认值。
+ */
+export function resolveSubagentBudgetPolicy(kind: "analysis" | "implementation", maxSteps?: number): AgentBudgetPolicy {
+  const defaults = kind === "analysis" ? DEFAULT_ANALYSIS_SUBAGENT_BUDGET_POLICY : DEFAULT_IMPLEMENTATION_SUBAGENT_BUDGET_POLICY;
+  const effectiveMaxSteps = maxSteps && Number.isInteger(maxSteps) && maxSteps > 0 ? maxSteps : defaults.maxSteps;
+  if (effectiveMaxSteps < 3) {
+    return { maxSteps: effectiveMaxSteps, convergenceRemainingSteps: 1, forceFinalRemainingSteps: 1 };
+  }
+  const convergenceRemainingSteps = Math.max(2, Math.min(3, effectiveMaxSteps - 1));
+  const forceFinalRemainingSteps = 1;
+  return { maxSteps: effectiveMaxSteps, convergenceRemainingSteps, forceFinalRemainingSteps };
+}
+
 const CONVERGENCE_ALLOWED_TOOL_NAMES = new Set([
   // 精确读取和上下文恢复仍可用于补齐最后一段必要上下文。
   "readFile",

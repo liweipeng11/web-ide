@@ -250,7 +250,7 @@ function hasNewStandaloneEditTarget(userRequest: string) {
   const normalized = userRequest.trim();
 
   // 短跟进如果带了明确文件、路径或带引号的新文案，更可能是新的独立需求。
-  return /(?:[\w-]+\.(?:ts|tsx|js|jsx|vue|css|scss|html|json|md)|\/|\\|["“”'‘’][^"“”'‘’]{2,}["“”'‘’])/.test(normalized);
+  return /(?:[\w-]+\.(?:ts|tsx|js|jsx|vue|css|scss|html|json|md)|\/|\\|["""'''][^"""''']{2,}["""'''])/.test(normalized);
 }
 
 function shouldContinueEditFromContext(history: FileChatMessage[], userRequest: string, normalizedGoal?: string) {
@@ -375,12 +375,12 @@ function extractQuotedSearchKeywords(source: string) {
     }
   };
 
-  for (const match of source.matchAll(/["“”'‘’]([^"“”'‘’]{2,40})["“”'‘’]/g)) {
+  for (const match of source.matchAll(/["""''']([^"""''']{2,40})["""''']/g)) {
     addKeyword(match[1]);
   }
 
-  // 仅保留控件名前缀，避免把“把新增工具按钮改成二级样式”整段都当成搜索词。
-  for (const match of source.matchAll(/(?:^|[\s，。、“"'‘’“”:(（【[])([\u4e00-\u9fa5A-Za-z0-9 _-]{2,24}?)(?:按钮|文案|标题|菜单|文本)/g)) {
+  // 仅保留控件名前缀，避免把"把新增工具按钮改成二级样式"整段都当成搜索词。
+  for (const match of source.matchAll(/(?:^|[\s，。、""'''"":(（【[])([\u4e00-\u9fa5A-Za-z0-9 _-]{2,24}?)(?:按钮|文案|标题|菜单|文本)/g)) {
     addKeyword(match[1]);
   }
 
@@ -403,7 +403,7 @@ export function isIntermediateEditPlanSummary(summary: string) {
     /\b(?:search|inspect|read|analy[sz]e|create|add|modify|integrate|implement|generate|import|register)\b/i
   ].some((pattern) => pattern.test(normalized));
   const hasContextRequestLanguage = [
-    // 兼容 Cline 式“先读上下文再编辑”的中间回复，避免把只缺上下文误判成最终失败。
+    // 兼容 Cline 式"先读上下文再编辑"的中间回复，避免把只缺上下文误判成最终失败。
     /(?:\u9700\u8981|\u9700|\u8fd8\u9700|\u5148)?(?:\u8bfb\u53d6|\u67e5\u770b|\u67e5\u627e|\u641c\u7d22|\u4e86\u89e3|\u786e\u8ba4|\u68c0\u67e5).*(?:\u6587\u4ef6|\u4e0a\u4e0b\u6587|\u7ed3\u6784|\u6a21\u5f0f|\u6570\u636e\u5c42|mock|api|store|view|route|router|component)/i,
     /\b(?:need|needs|required|requires|must)\b.*\b(?:read|inspect|search|check|understand)\b.*\b(?:file|context|structure|pattern|mock|api|store|view|route|router|component)\b/i
   ].some((pattern) => pattern.test(normalized));
@@ -624,7 +624,7 @@ async function runMandatoryEditPreflightSearch(userRequest: string, filePath: st
   };
 }
 
-// 执行模型计划摘要里提到的关键词搜索，避免“先搜索...”停留在文字计划阶段。
+// 执行模型计划摘要里提到的关键词搜索，避免"先搜索..."停留在文字计划阶段。
 async function runAdditionalEditSearch(queries: string[], agentContext: AgentContext, runId: string, onAgentStep?: (step: AgentStep) => void) {
   const resultsByQuery: Array<{ query: string; results: Array<{ filePath: string; line: number; content: string }> }> = [];
 
@@ -1314,7 +1314,9 @@ async function generateAiEditWithTools(
     searchQueries: [],
     searchResultFiles: [],
     relevantFiles: filePath ? [filePath] : [],
-    modificationPlan: initialModificationPlan ? structuredClone(initialModificationPlan) : undefined
+    modificationPlan: initialModificationPlan ? structuredClone(initialModificationPlan) : undefined,
+    isSubagent: false,
+    parentRunId: null
   };
   const lockedModificationPlan = initialModificationPlan ? structuredClone(initialModificationPlan) : undefined;
   logAi(runId, "start", { userGoal: userRequest, selectedFile: filePath, selectedFileChars: content.length, pathRetryContext });
@@ -1375,7 +1377,7 @@ async function generateAiEditWithTools(
     })
   });
 
-  // 先做一次服务端预搜索，降低 provider 不支持强制 tool_choice 时卡在“需要先搜索”的概率。
+  // 先做一次服务端预搜索，降低 provider 不支持强制 tool_choice 时卡在"需要先搜索"的概率。
   if (shouldRunServerPreflightSearch(userRequest, filePath, pathRetryContext)) {
     const preflightSearch = await runMandatoryEditPreflightSearch(userRequest, filePath, agentContext, runId, onAgentStep);
     const automaticContextFiles = await readEditContextFiles(getFallbackSearchFilePaths(preflightSearch), agentContext, runId, onAgentStep);
@@ -1669,7 +1671,9 @@ export async function generateFileChatReply(contextFiles: ChatContextFile[], his
     filesRead: [],
     searchQueries: [],
     searchResultFiles: [],
-    relevantFiles: contextFiles.map((file) => file.path)
+    relevantFiles: contextFiles.map((file) => file.path),
+    isSubagent: false,
+    parentRunId: null
   };
 
   return generateFileChatAssistantContent([
@@ -1757,7 +1761,9 @@ export async function streamFileChatReply(
     filesRead: [],
     searchQueries: [],
     searchResultFiles: [],
-    relevantFiles: contextFiles.map((file) => file.path)
+    relevantFiles: contextFiles.map((file) => file.path),
+    isSubagent: false,
+    parentRunId: null
   };
   const toolLoop = await runFileChatToolLoop(await buildFileChatMessages(contextFiles, history, userRequest, chatId), agentContext, onAgentStep, true, modelId);
 

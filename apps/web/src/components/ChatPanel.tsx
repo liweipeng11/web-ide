@@ -159,6 +159,121 @@ function formatTaskEventTime(value: number) {
   return new Date(value).toLocaleString();
 }
 
+// 阶段 7：子代理运行树展示，按子代理分组显示创建/启动/完成/失败/取消步骤。
+function renderSubagentTree(session: TaskSession) {
+  const subagents = session.subagents;
+  if (!subagents || !subagents.length) return null;
+
+  // 从 session.steps 中按 delegationId 分组找出子代理相关步骤
+  const subagentSteps = session.steps.filter(
+    (step) => step.type === "subagent_created" || step.type === "subagent_started" ||
+      step.type === "subagent_succeeded" || step.type === "subagent_failed" ||
+      step.type === "subagent_cancelled" || step.type === "subagent_artifacts_recovered"
+  );
+
+  // 按 delegationId 分组
+  const groups = new Map<string, typeof subagentSteps>();
+  for (const step of subagentSteps) {
+    const key = (step as Record<string, unknown>).delegationId as string;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(step);
+  }
+
+  return (
+    <section>
+      <h3>子代理运行树</h3>
+      <div className="subagent-tree">
+        {subagents.map((snapshot) => {
+          const statusIcon = snapshot.status === "succeeded" ? "✓" :
+            snapshot.status === "failed" ? "✗" :
+            snapshot.status === "cancelled" ? "⊘" :
+            snapshot.status === "running" ? "⟳" : "○";
+          const statusClass = `subagent-status-${snapshot.status}`;
+          const kindLabel = snapshot.kind === "analysis" ? "分析" :
+            snapshot.kind === "implementation" ? "实施" :
+            snapshot.kind === "planning" ? "规划" : "验证";
+          const duration = snapshot.runtime?.durationMs
+            ? `${(snapshot.runtime.durationMs / 1000).toFixed(1)}s`
+            : "";
+
+          return (
+            <details key={snapshot.subagentId} className="subagent-tree-node">
+              <summary>
+                <span className={statusClass}>{statusIcon}</span>
+                <span className="subagent-kind-tag">{kindLabel}</span>
+                <b>{snapshot.title}</b>
+                {duration && <small>{duration}</small>}
+              </summary>
+              <dl>
+                <div><dt>目标</dt><dd>{snapshot.goal}</dd></div>
+                {snapshot.scope.allowedFilePaths?.length ? <div><dt>文件范围</dt><dd>{snapshot.scope.allowedFilePaths.join(", ")}</dd></div> : null}
+                <div><dt>预算</dt><dd>{snapshot.budget.maxSteps ?? "?"}步 / {snapshot.budget.maxReadFiles ?? "?"}文件</dd></div>
+                {snapshot.artifacts && (
+                  <div>
+                    <dt>产物摘要</dt>
+                    <dd>{snapshot.artifacts.summary}</dd>
+                  </div>
+                )}
+                {snapshot.artifacts?.relevantFiles?.length ? (
+                  <div>
+                    <dt>相关文件</dt>
+                    <dd>
+                      <ul className="task-file-list">
+                        {snapshot.artifacts.relevantFiles.slice(0, 10).map((filePath) => (
+                          <li key={filePath}><code>{filePath}</code></li>
+                        ))}
+                      </ul>
+                    </dd>
+                  </div>
+                ) : null}
+                {snapshot.artifacts?.patch && (
+                  <div><dt>产出补丁</dt><dd>{snapshot.artifacts.patch.patchId}</dd></div>
+                )}
+                {snapshot.failure && (
+                  <div className="subagent-failure">
+                    <dt>失败原因</dt>
+                    <dd>
+                      <code>{snapshot.failure.code}</code>
+                      <p>{snapshot.failure.reason}</p>
+                      {snapshot.failure.suggestedAction && <small>建议：{snapshot.failure.suggestedAction}</small>}
+                    </dd>
+                  </div>
+                )}
+                {snapshot.runtime && (
+                  <div>
+                    <dt>运行时</dt>
+                    <dd>模式：{snapshot.runtime.mode} / 耗时：{duration} / runId：{snapshot.runtime.runId.slice(0, 8)}...</dd>
+                  </div>
+                )}
+                <div><dt>创建时间</dt><dd>{formatTaskEventTime(snapshot.createdAt)}</dd></div>
+              </dl>
+            </details>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+// 阶段 7：子代理聚合摘要统计。
+function renderSubagentSummary(summary: TaskSession["subagentSummary"]) {
+  if (!summary) return null;
+
+  return (
+    <section>
+      <h3>子代理统计</h3>
+      <div className="subagent-summary">
+        <span className="subagent-stat">总数：{summary.total}</span>
+        <span className="subagent-stat succeeded">成功：{summary.succeeded}</span>
+        <span className="subagent-stat failed">失败：{summary.failed}</span>
+        <span className="subagent-stat running">运行中：{summary.running}</span>
+        <span className="subagent-stat cancelled">已取消：{summary.cancelled}</span>
+        {summary.awaitingParentReview > 0 && <span className="subagent-stat awaiting">待审批：{summary.awaitingParentReview}</span>}
+      </div>
+    </section>
+  );
+}
+
 export default function ChatPanel({
   chatId,
   agentMode,
@@ -236,6 +351,23 @@ export default function ChatPanel({
       })
       .slice(0, 80);
   }, [availableFiles, contextPaths, contextSearch]);
+
+  // 实时子代理运行状态：从当前步骤流中找出已创建但未完成的子代理
+  const runningSubagents = useMemo(() => {
+    const created = new Map<string, { title: string; kind: string; createdAt: number }>();
+    const finished = new Set<string>();
+    for (const step of visibleAgentSteps) {
+      if (step.type === "subagent_created") {
+        created.set(step.subagentId, { title: step.title, kind: step.kind, createdAt: step.createdAt });
+      } else if (step.type === "subagent_succeeded" || step.type === "subagent_failed" || step.type === "subagent_cancelled") {
+        finished.add(step.subagentId);
+      }
+    }
+    return [...created.entries()]
+      .filter(([id]) => !finished.has(id))
+      .sort(([, a], [, b]) => a.createdAt - b.createdAt)
+      .map(([subagentId, info]) => ({ subagentId, ...info }));
+  }, [visibleAgentSteps]);
 
   const activePlanItems = activeTaskSession?.planItems || [];
   const activePlanCompletedCount = activePlanItems.filter((item) => item.status === "completed").length;
@@ -756,6 +888,8 @@ export default function ChatPanel({
               </section>
               {renderPatchDiagnostics(selectedTaskSession.patchDiagnostics || [])}
               {renderPatchLifecycleEvents(selectedTaskSession.patchEvents || [])}
+              {renderSubagentTree(selectedTaskSession)}
+              {selectedTaskSession.subagentSummary && renderSubagentSummary(selectedTaskSession.subagentSummary)}
               <section>
                 <h3>Checkpoints</h3>
                 {selectedTaskSession.checkpointIds.length ? (
@@ -795,10 +929,27 @@ export default function ChatPanel({
             const messageAgentSteps = isLatestAssistantMessage ? visibleAgentSteps.filter((step) => step.type !== "command") : [];
             const showAssistantThinking = isLatestAssistantMessage && loading && !parsedSuggestion.visibleContent.trim();
             const showOnlyAgentSteps = message.role === "assistant" && isLatestAssistantMessage && messageAgentSteps.length > 0 && !parsedSuggestion.visibleContent.trim();
+            // 当前消息中的运行中子代理（过滤出属于本消息步骤的运行中子代理）
+            const messageRunningSubagents = isLatestAssistantMessage
+              ? runningSubagents
+              : [];
 
             return (
               <article key={message.id} className={"chat-message " + message.role}>
                 <strong className="chat-message-role">{message.role === "user" ? "用户" : "智能体"}</strong>
+                {messageRunningSubagents.length > 0 && (
+                  <div className="subagent-running-indicator">
+                    {messageRunningSubagents.map((info) => {
+                      const kindLabel = info.kind === "analysis" ? "分析" : info.kind === "implementation" ? "实施" : info.kind === "planning" ? "规划" : "验证";
+                      return (
+                        <span key={info.subagentId} className="subagent-running-badge">
+                          <span className="subagent-running-dot" />
+                          正在{kindLabel}：{info.title}
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
                 <AgentStepsPanel inline steps={messageAgentSteps} activeDeliveryUnitId={activeTaskSession?.activeDeliveryUnitId} disabled={disabled || loading} onDecideApproval={onDecideApproval} onRollbackCheckpoint={onRollbackCheckpoint} />
                 {editingMessageId === message.id ? (
                   <div className="chat-message-edit">

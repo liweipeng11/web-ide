@@ -4,6 +4,7 @@ import { appStatePath } from "../statePaths.js";
 import type { ModelPrice, ModelUsage } from "../contracts/model.js";
 import type { CompletionRejectionCode } from "../types.js";
 import type { DeliveryUnit, ToolFailureDiagnostic } from "../types.js";
+import type { SubagentKind, SubagentArtifactsKind } from "../agentToolTypes.js";
 
 export const COMPLETION_RESOURCE_LIMITS = {
   maxInputTokensPerChangedFile: 100_000,
@@ -109,6 +110,47 @@ export function createEmptyProgressiveDeliveryMetrics(): ProgressiveDeliveryMetr
   };
 }
 
+// 阶段 1：子代理运行指标，用于区分父/子代理的失败归属和产物产出维度。
+export type SubagentMetrics = {
+  /** 子代理运行总数（含当前运行和历史恢复）。 */
+  totalRuns: number;
+  /** 按产物类型统计。 */
+  byArtifactsKind: Record<SubagentArtifactsKind, number>;
+  /** 按子代理种类统计（analysis/implementation/verification）。 */
+  byKind: Record<SubagentKind, number>;
+  /** 按子代理最终状态统计。 */
+  byStatus: { succeeded: number; failed: number; cancelled: number };
+  /** 本次运行中新启动的子代理数（不含历史恢复）。 */
+  freshStarted: number;
+  // 阶段 6：并行运行统计。
+  concurrent: {
+    /** 并行批次总数。 */
+    batches: number;
+    /** 并行批次中的总任务数。 */
+    totalParallelTasks: number;
+    /** 并行运行时达到的最高并发数。 */
+    peakConcurrency: number;
+    /** 并行运行总耗时（毫秒）。 */
+    totalParallelDurationMs: number;
+  };
+};
+
+export function createEmptySubagentMetrics(): SubagentMetrics {
+  return {
+    totalRuns: 0,
+    byArtifactsKind: { analysis: 0, proposed_patch: 0, execution_report: 0, modification_plan: 0 },
+    byKind: { analysis: 0, implementation: 0, verification: 0, planning: 0 },
+    byStatus: { succeeded: 0, failed: 0, cancelled: 0 },
+    freshStarted: 0,
+    concurrent: {
+      batches: 0,
+      totalParallelTasks: 0,
+      peakConcurrency: 0,
+      totalParallelDurationMs: 0
+    }
+  };
+}
+
 export function createEmptyTaskSessionPersistenceMetrics(): TaskSessionPersistenceMetrics {
   return {
     taskSessionUpdateCount: 0,
@@ -157,6 +199,8 @@ export type RunMetrics = {
   completionRejections: CompletionRejectionDiagnostic[];
   taskSessionPersistence: TaskSessionPersistenceMetrics;
   progressiveDelivery: ProgressiveDeliveryMetrics;
+  /** 阶段 1：子代理运行指标，记录父代理本次运行中委派和执行的所有子代理；非子代理模式运行时可能为 undefined。 */
+  subagentMetrics?: SubagentMetrics;
   tools: ToolRuntimeMetrics;
   context: { compressionCount: number; estimatedTokensBefore: number | null; estimatedTokensAfter: number | null; estimator: "conservative" | "unavailable" };
   result: {
@@ -268,6 +312,7 @@ export class RunMetricsTracker {
     safeEditorFalseExpansionRegressionCount: 0
   };
   private progressiveDelivery = createEmptyProgressiveDeliveryMetrics();
+  private subagentMetrics = createEmptySubagentMetrics();
 
   constructor(
     private readonly identity: Pick<RunMetrics, "runId" | "taskSessionId" | "provider" | "model" | "mode"> & Partial<Pick<RunMetrics, "scope">>,
@@ -390,6 +435,49 @@ export class RunMetricsTracker {
       deferred: summaries.filter((unit) => unit.status === "deferred").length
     };
     this.progressiveDelivery.unitSummaries = summaries.slice(0, 100);
+  }
+
+  // 阶段 1：子代理生命周期事件记录，用于区分父子代理的失败归属和产物维度。
+
+  /** 父代理发起委派时调用，按子代理种类和产物类型累加计数。 */
+  recordSubagentCreated(kind: SubagentKind, artifactsKind: SubagentArtifactsKind) {
+    this.subagentMetrics.totalRuns += 1;
+    this.subagentMetrics.byKind[kind] += 1;
+    this.subagentMetrics.byArtifactsKind[artifactsKind] += 1;
+  }
+
+  /** 子代理开始执行时调用，统计新启动数（不含历史恢复）。 */
+  recordSubagentStarted(kind: SubagentKind, _artifactsKind: SubagentArtifactsKind) {
+    this.subagentMetrics.freshStarted += 1;
+    this.subagentMetrics.byKind[kind] += 1;
+    this.subagentMetrics.byArtifactsKind[_artifactsKind] += 1;
+  }
+
+  /** 子代理成功完成时调用。 */
+  recordSubagentSucceeded() {
+    this.subagentMetrics.byStatus.succeeded += 1;
+  }
+
+  /** 子代理执行失败时调用，可区分父代理失败还是子代理失败。 */
+  recordSubagentFailed() {
+    this.subagentMetrics.byStatus.failed += 1;
+  }
+
+  /** 子代理被取消时调用（用户主动取消或父代理中断委派）。 */
+  recordSubagentCancelled() {
+    this.subagentMetrics.byStatus.cancelled += 1;
+  }
+
+  // 阶段 6：并行运行统计记录。
+  /** 记录一个并行批次的统计信息。 */
+  recordSubagentParallelBatch(taskCount: number, peakConcurrency: number, totalDurationMs: number) {
+    this.subagentMetrics.concurrent.batches += 1;
+    this.subagentMetrics.concurrent.totalParallelTasks += taskCount;
+    this.subagentMetrics.concurrent.peakConcurrency = Math.max(
+      this.subagentMetrics.concurrent.peakConcurrency,
+      peakConcurrency
+    );
+    this.subagentMetrics.concurrent.totalParallelDurationMs += totalDurationMs;
   }
 
   /** 为显式完成协议补充独立统计，便于从普通工具指标中识别拒绝循环。 */
@@ -538,6 +626,7 @@ export class RunMetricsTracker {
       completionRejections: structuredClone(this.completionRejections),
       taskSessionPersistence: createEmptyTaskSessionPersistenceMetrics(),
       progressiveDelivery: structuredClone(this.progressiveDelivery),
+      subagentMetrics: structuredClone(this.subagentMetrics),
       tools: {
         calls: this.toolCalls,
         repeatedCalls: this.repeatedToolCalls,

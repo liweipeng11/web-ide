@@ -3,10 +3,11 @@ import { fileEditToolDefinitions } from "./fileEditTools.js";
 import { patchAgentToolDefinitions } from "./agentPatchTools.js";
 import { createAgentToolRegistry, type AgentToolRegistry } from "./agentToolRegistry.js";
 import { readonlyAgentToolDefinitions } from "./agentTools.js";
-import { AI_AGENT_ACT_SYSTEM_PROMPT, AI_AGENT_PLAN_SYSTEM_PROMPT } from "./prompts.js";
+import { AI_AGENT_ACT_SYSTEM_PROMPT, AI_AGENT_PLAN_SYSTEM_PROMPT, AI_AGENT_PARENT_DELEGATION_STRATEGY_PROMPT } from "./prompts.js";
 import type { AgentToolDefinition } from "./agentToolTypes.js";
 import { externalBrowserAgentToolDefinitions } from "./externalContext/index.js";
 import { completionAgentToolDefinitions } from "./agentCompletionTools.js";
+import { subagentDelegationToolDefinitions, parallelDelegationToolDefinitions } from "./subagent/subagentDelegationTool.js";
 
 export type AgentMode = "plan" | "act";
 
@@ -25,6 +26,10 @@ const actToolDefinitions: AgentToolDefinition[] = [
   ...patchAgentToolDefinitions,
   ...fileEditToolDefinitions,
   ...commandAgentToolDefinitions,
+  // 阶段 2：父代理可委派只读 analysis 子代理，子代理结果回传后由父代理决定是否生成 patch。
+  // 阶段 6：并行委派工具，可同时启动多个 analysis 子代理。
+  ...subagentDelegationToolDefinitions,
+  ...parallelDelegationToolDefinitions,
   ...completionAgentToolDefinitions
 ];
 
@@ -45,7 +50,7 @@ const modeConfigs: Record<AgentMode, AgentModeConfig> = {
   act: {
     mode: "act",
     label: "Act",
-    systemPrompt: AI_AGENT_ACT_SYSTEM_PROMPT,
+    systemPrompt: `${AI_AGENT_ACT_SYSTEM_PROMPT}\n\n${AI_AGENT_PARENT_DELEGATION_STRATEGY_PROMPT}`,
     registry: createAgentToolRegistry(actToolDefinitions),
     canModifyWorkspace: true
   }

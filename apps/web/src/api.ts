@@ -74,6 +74,9 @@ export type GenerateEditResponse = {
   newContent: string;
   diffHtml: string;
   agentSteps?: AgentStep[];
+  // 阶段 7：子代理来源关联，patch 来自子代理时标记来源。
+  delegationId?: string;
+  subagentId?: string;
 };
 
 export type PatchFilterReason = "invalid_path" | "duplicate_path" | "no_effect_change" | "scope_violation" | "stale_full_rewrite_retry";
@@ -261,6 +264,9 @@ export type PatchFileChange = {
   summary: string;
   diffHtml: string;
   editHunks?: EditHunk[];
+  // 阶段 7：子代理来源关联，标记该 patch 由哪个子代理产出。
+  delegationId?: string;
+  subagentId?: string;
 };
 
 export type EditHunkLine = {
@@ -396,6 +402,71 @@ export type AgentStep = {
       type: "delivery_unit_started" | "delivery_unit_completed" | "replan_requested" | "awaiting_user_decision" | "tool_failure_recorded";
       message: string;
       details: Record<string, unknown>;
+    }
+  // 阶段 7：子代理生命周期步骤类型，展示委派-执行-回收全过程。
+  | {
+      type: "subagent_created";
+      delegationId: string;
+      subagentId: string;
+      title: string;
+      kind: "analysis" | "implementation" | "verification";
+      goal: string;
+      scope: {
+        allowedFilePaths?: string[];
+        allowedFileGlobs?: string[];
+        allowedToolNames?: string[];
+        canMutateWorkspace?: boolean;
+        canRequestApproval?: boolean;
+        canCompleteTask?: boolean;
+      };
+      budget: {
+        maxSteps?: number;
+        maxReadFiles?: number;
+      };
+    }
+  | {
+      type: "subagent_started";
+      delegationId: string;
+      subagentId: string;
+      parentRunId: string;
+      runId: string;
+      mode: string;
+    }
+  | {
+      type: "subagent_succeeded";
+      delegationId: string;
+      subagentId: string;
+      artifactsKind: "analysis" | "proposed_patch" | "execution_report";
+      summary: string;
+      relevantFiles?: string[];
+      producedPatchCount?: number;
+    }
+  | {
+      type: "subagent_failed";
+      delegationId: string;
+      subagentId: string;
+      failure: {
+        code: string;
+        reason: string;
+        recoverable?: boolean;
+        budgetExhausted?: boolean;
+        timeout?: boolean;
+        suggestedAction?: string;
+      };
+    }
+  | {
+      type: "subagent_cancelled";
+      delegationId: string;
+      subagentId: string;
+      reason?: string;
+    }
+  | {
+      type: "subagent_artifacts_recovered";
+      delegationId: string;
+      subagentId: string;
+      artifactsKind: "analysis" | "proposed_patch" | "execution_report";
+      summary: string;
+      source: "current_run" | "task_session_history" | "approval_resume";
     }
 );
 
@@ -603,6 +674,100 @@ export type StructuredContextSummary = {
   pendingApproval: { actionId: string; toolName: string; arguments: unknown } | null;
 };
 
+// 阶段 7：子代理相关前端类型，用于 UI 展示父子运行关系。
+export type SubagentKind = "analysis" | "implementation" | "verification" | "planning";
+export type SubagentStatus = "created" | "running" | "succeeded" | "failed" | "cancelled" | "awaiting_parent_review";
+export type SubagentArtifactsKind = "analysis" | "proposed_patch" | "execution_report" | "modification_plan";
+
+export type SubagentIdentity = {
+  subagentId: string;
+  parentRunId: string;
+  delegationId: string;
+  kind: SubagentKind;
+  title: string;
+};
+
+export type SubagentDelegationScope = {
+  allowedFilePaths?: string[];
+  allowedFileGlobs?: string[];
+  allowedToolNames?: string[];
+  canMutateWorkspace?: boolean;
+  canRequestApproval?: boolean;
+  canCompleteTask?: boolean;
+};
+
+export type SubagentBudgetPolicy = {
+  maxSteps?: number;
+  maxReadFiles?: number;
+  maxOutputTokens?: number;
+  maxPromptTokens?: number;
+  timeoutMs?: number;
+};
+
+export type SubagentArtifacts = {
+  kind: SubagentArtifactsKind;
+  summary: string;
+  structuredEvidence?: Record<string, unknown>;
+  relevantFiles?: string[];
+  patch?: { patchId: string; patchIds?: string[] };
+  modificationPlan?: {
+    planId: string;
+    taskDescription: string;
+    files: Array<{
+      filePath: string;
+      changeKind: string;
+      reason: string;
+      symbolName?: string;
+      responsibility?: string;
+    }>;
+  };
+  risks?: Array<{ severity: string; description: string; filePaths?: string[] }>;
+  nextActions?: string[];
+};
+
+export type SubagentFailure = {
+  code: string;
+  reason: string;
+  recoverable?: boolean;
+  budgetExhausted?: boolean;
+  timeout?: boolean;
+  suggestedAction?: string;
+};
+
+export type SubagentRuntimeRef = {
+  runId: string;
+  mode: string;
+  startedAt: number;
+  finishedAt: number;
+  durationMs: number;
+  stepsUsed?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+};
+
+export type SubagentSnapshot = SubagentIdentity & {
+  goal: string;
+  scope: SubagentDelegationScope;
+  budget: SubagentBudgetPolicy;
+  status: SubagentStatus;
+  artifacts?: SubagentArtifacts;
+  failure?: SubagentFailure;
+  runtime?: SubagentRuntimeRef;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type SubagentSummary = {
+  total: number;
+  succeeded: number;
+  failed: number;
+  running: number;
+  cancelled: number;
+  awaitingParentReview: number;
+  producedPatchIds: string[];
+  lastUpdatedAt: number;
+};
+
 export type TaskSession = {
   id: string;
   userGoal: string;
@@ -649,6 +814,9 @@ export type TaskSession = {
     files: string[];
     createdAt: number;
   }[];
+  // 阶段 7：子代理快照和聚合摘要，用于任务历史中展示父子运行树。
+  subagents?: SubagentSnapshot[];
+  subagentSummary?: SubagentSummary;
   createdAt: number;
   updatedAt: number;
 };

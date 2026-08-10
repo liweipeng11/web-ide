@@ -9,6 +9,8 @@ export type ProgressVector = {
   modifiedFiles: boolean;
   validationResults: boolean;
   workflowAdvanced: boolean;
+  // 阶段 4：子代理完成进展维度，区分"无进展"和"子代理已推进但父代理尚未处理"
+  subagentCompleted: boolean;
 };
 
 export type ProgressEvaluation = {
@@ -43,7 +45,9 @@ export function evaluateProgress(
     generatedPatches: after.generatedPatches > before.generatedPatches,
     modifiedFiles: after.modifiedFiles > before.modifiedFiles,
     validationResults: after.commandsRun > before.commandsRun,
-    workflowAdvanced: after.completedWorkflowSteps > before.completedWorkflowSteps
+    workflowAdvanced: after.completedWorkflowSteps > before.completedWorkflowSteps,
+    // 阶段 4：子代理完成进展 — 当父代理本轮回收了子代理结果（subagent_artifacts_recovered）时标记为有进展。
+    subagentCompleted: (after.subagentCompleted ?? 0) > (before.subagentCompleted ?? 0)
   };
   const labels: Array<[keyof ProgressVector, string]> = [
     ["discoveredFiles", "发现新的相关文件或搜索结果"],
@@ -52,7 +56,8 @@ export function evaluateProgress(
     ["generatedPatches", "生成可审核补丁"],
     ["modifiedFiles", "产生已应用文件变更"],
     ["validationResults", "获得新的命令或验证结果"],
-    ["workflowAdvanced", "推进任务计划状态"]
+    ["workflowAdvanced", "推进任务计划状态"],
+    ["subagentCompleted", "子代理完成并回收结果"]
   ];
   const reasons = labels.filter(([key]) => vector[key]).map(([, label]) => label);
   const facts = [

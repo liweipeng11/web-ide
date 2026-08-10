@@ -6,6 +6,7 @@ import { HttpError } from "./errors.js";
 import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
 import { readJsonStateFile, writeJsonStateFile } from "./stateFileStorage.js";
 import type { AgentMessage, AgentMessageRole, AgentMode, AgentStep, DeliveryUnit, DeliveryUnitStatus, FileEditLifecycleEvent, FileEditLifecycleEventType, PatchFilterReason, PatchFilterStage, PatchGenerationDiagnostics, PatchLifecycleEvent, PatchLifecycleEventType, PendingAgentToolCall, RecoveryDecision, TaskContinuation, TaskPlanItem, TaskPlanItemStatus, TaskPlanRevision, TaskPlanRevisionTrigger, TaskRuntimeEvidence, TaskSession, TaskSessionFinalizationSource, TaskSessionTerminalStatus, ToolFailureDiagnostic } from "./types.js";
+import type { SubagentSnapshot } from "./agentToolTypes.js";
 import type { CandidateFileRecord, ContextSelectionSnapshot, EvidenceRecord, MissingRequirementRecord, PatchCompletenessReport, RequiredCompanionFile } from "./contextSelection/types.js";
 import type { GitCommitRecord } from "./gitWorkflow/types.js";
 import type { TaskWorkflowSnapshot, TaskWorkflowSource, TaskWorkflowType } from "./taskWorkflow/index.js";
@@ -825,7 +826,10 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     contextBudgetSnapshot: session.contextBudgetSnapshot && typeof session.contextBudgetSnapshot === "object" ? session.contextBudgetSnapshot : undefined,
     contextSummary: session.contextSummary && typeof session.contextSummary === "object" ? session.contextSummary : undefined,
     patchEvents: normalizePatchLifecycleEvents(session.patchEvents),
-    fileEditEvents: normalizeFileEditLifecycleEvents(session.fileEditEvents)
+    fileEditEvents: normalizeFileEditLifecycleEvents(session.fileEditEvents),
+    // 阶段 1：确保旧 TaskSession 在读取时有默认的子代理字段，避免解构 undefined。
+    subagents: Array.isArray(session.subagents) ? session.subagents : [],
+    subagentSummary: session.subagentSummary && typeof session.subagentSummary === "object" ? session.subagentSummary : null
   };
 }
 
@@ -956,7 +960,10 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     fileEditEvents: [],
     gitCommits: [],
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    // 阶段 1：新建会话时初始化空的子代理记录，后续运行时通过 enqueueTaskSessionUpdate 写入。
+    subagents: [],
+    subagentSummary: null
   };
 
   await writeTaskSession(session);
@@ -1154,6 +1161,53 @@ export async function appendTaskSessionRecoveryDecision(taskSessionId: string | 
 export async function setTaskSessionContinuation(taskSessionId: string | null | undefined, continuation: TaskContinuationInput | null) {
   if (!taskSessionId) return null;
   return enqueueTaskSessionUpdate(taskSessionId, (session) => ({ ...session, continuation: continuation ? normalizeTaskContinuation({ ...continuation, version: 1, updatedAt: continuation.updatedAt || Date.now() }) : undefined, updatedAt: Date.now() }), { flushImmediately: true });
+}
+
+// 阶段 2：子代理快照 upsert 和聚合摘要更新。
+// upsert 按 subagentId 去重更新；setSubagentSummary 根据当前 subagents[] 重新计算聚合统计。
+
+/** 把单个子代理快照 upsert 到任务会话的 subagents[] 中。 */
+export async function upsertSubagentSnapshot(taskSessionId: string | null | undefined, snapshot: SubagentSnapshot) {
+  if (!taskSessionId) return null;
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const existing = Array.isArray(session.subagents) ? session.subagents : [];
+    const index = existing.findIndex((item) => item.subagentId === snapshot.subagentId);
+    // 已存在则更新，不存在则追加
+    const next = index >= 0
+      ? existing.map((item, i) => i === index ? { ...item, ...snapshot, updatedAt: Date.now() } : item)
+      : [...existing, { ...snapshot, updatedAt: Date.now() }];
+    return { ...session, subagents: next, updatedAt: Date.now() };
+  });
+}
+
+/** 根据当前 subagents[] 重新计算聚合摘要。阶段 2 的 setSubagentSummary 接受可选的单条摘要用于增量更新，但推荐直接全量重算。 */
+export async function setSubagentSummary(taskSessionId: string | null | undefined, singleSummary?: {
+  delegationId: string;
+  subagentId: string;
+  kind: string;
+  title: string;
+  status: string;
+  summary: string;
+  relevantFiles?: string[];
+  producedPatchCount?: number;
+  hasFailure: boolean;
+}) {
+  if (!taskSessionId) return null;
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => {
+    const subagents = Array.isArray(session.subagents) ? session.subagents : [];
+    // 全量重算聚合统计
+    const summary = {
+      total: subagents.length,
+      succeeded: subagents.filter((s) => s.status === "succeeded").length,
+      failed: subagents.filter((s) => s.status === "failed").length,
+      running: subagents.filter((s) => s.status === "running").length,
+      cancelled: subagents.filter((s) => s.status === "cancelled").length,
+      awaitingParentReview: subagents.filter((s) => s.status === "awaiting_parent_review").length,
+      producedPatchIds: subagents.flatMap((s) => s.artifacts?.patch ? [s.artifacts.patch.patchId] : []),
+      lastUpdatedAt: Date.now()
+    };
+    return { ...session, subagentSummary: summary, updatedAt: Date.now() };
+  });
 }
 
 // 执行中允许用户中断并进入重规划，保持与 Claude Code 相近的交互方式。
@@ -1595,7 +1649,9 @@ export async function getTaskSessionContextState(taskSessionId: string) {
     pendingToolCall: session.pendingToolCall,
     runtimeEvidence: session.runtimeEvidence,
     deliveryUnits: session.deliveryUnits ?? [],
-    activeDeliveryUnitId: session.activeDeliveryUnitId
+    activeDeliveryUnitId: session.activeDeliveryUnitId,
+    // 阶段 4：子代理快照列表，供完成门禁计算未回收子代理数。
+    subagents: session.subagents ?? []
   };
 }
 

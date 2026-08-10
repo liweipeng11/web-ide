@@ -118,6 +118,8 @@ export type AgentRuntimeOptions = {
   /** 阶段六按稳定任务桶灰度，shadow 状态只记录安全指标。 */
   progressiveDeliveryRollout?: ProgressiveDeliveryRolloutConfig;
   contextWindowTokens?: number;
+  // 阶段 4：子代理标志，透传到审批、完成门禁和恢复链路，避免子代理行为绕过主链路。
+  isSubagent?: boolean;
   maxOutputTokens?: number;
   contextSafetyMarginTokens?: number;
   // 受控评测可覆盖阈值；生产默认读取集中配置。
@@ -129,7 +131,7 @@ export type AgentRuntimeOptions = {
 };
 
 async function loadRuntimeContextState(taskSessionId: string | null | undefined) {
-  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, deliveryUnits: [] as DeliveryUnit[], activeDeliveryUnit: undefined as DeliveryUnit | undefined };
+  if (!taskSessionId) return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, deliveryUnits: [] as DeliveryUnit[], activeDeliveryUnit: undefined as DeliveryUnit | undefined, subagents: [] as import("./agentToolTypes.js").SubagentSnapshot[] };
   try {
     const session = await getTaskSessionContextState(taskSessionId);
     return {
@@ -144,11 +146,13 @@ async function loadRuntimeContextState(taskSessionId: string | null | undefined)
       pendingToolCall: session.pendingToolCall ?? null,
       runtimeEvidence: session.runtimeEvidence,
       deliveryUnits: session.deliveryUnits ?? [],
-      activeDeliveryUnit: session.deliveryUnits?.find((unit) => unit.id === session.activeDeliveryUnitId)
+      activeDeliveryUnit: session.deliveryUnits?.find((unit) => unit.id === session.activeDeliveryUnitId),
+      // 阶段 4：子代理快照列表，供完成门禁计算未回收数。
+      subagents: (session as unknown as { subagents?: import("./agentToolTypes.js").SubagentSnapshot[] }).subagents ?? []
     };
   } catch {
     // 无持久化任务的单元调用继续使用 Runtime 内存状态。
-    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, deliveryUnits: [] as DeliveryUnit[], activeDeliveryUnit: undefined as DeliveryUnit | undefined };
+    return { planStatus: [] as string[], planItems: [] as TaskPlanItem[], filesModified: [] as string[], unresolvedQuestions: [] as string[], contextSummary: null as StructuredContextSummary | null, pendingToolCall: null as PendingAgentToolCall | null, runtimeEvidence: undefined as TaskRuntimeEvidence | undefined, deliveryUnits: [] as DeliveryUnit[], activeDeliveryUnit: undefined as DeliveryUnit | undefined, subagents: [] as import("./agentToolTypes.js").SubagentSnapshot[] };
   }
 }
 
@@ -550,6 +554,12 @@ async function collectCompletionEvidence(input: {
           ? "passed"
           : "failed";
 
+  // 阶段 4：计算未回收的子代理数。已回收（succeeded/failed/cancelled）的不算。
+  const subagents = taskState.subagents ?? [];
+  const unrecoveredSubagentCount = subagents.filter(
+    (s) => s.status !== "succeeded" && s.status !== "failed" && s.status !== "cancelled"
+  ).length;
+
   return {
     workflowType: input.workflowType,
     mutationExpected: input.mutationExpected,
@@ -568,7 +578,9 @@ async function collectCompletionEvidence(input: {
     activeCommandCount: commands.filter((command) => command.status === "running").length,
     failedToolCallCount: input.failedToolCallCount,
     lastMutationAt: input.lastMutationAt,
-    lastValidationAt: Math.max(input.lastValidationAt ?? 0, latestValidation?.finishedAt ?? 0) || undefined
+    lastValidationAt: Math.max(input.lastValidationAt ?? 0, latestValidation?.finishedAt ?? 0) || undefined,
+    // 阶段 4：未回收子代理数，父代理完成门禁使用。
+    unrecoveredSubagentCount
   };
 }
 
@@ -584,6 +596,12 @@ async function createProgressSnapshot(
     ...agentContext.relevantFiles
   ]);
 
+  // 阶段 4：统计已完成的子代理数（从 task session 的子代理快照中计算）。
+  const subagents = taskState.subagents ?? [];
+  const subagentCompleted = subagents.filter(
+    (s) => s.status === "succeeded" || s.status === "failed" || s.status === "cancelled"
+  ).length;
+
   return {
     discoveredFiles: discoveredFiles.size,
     filesRead: new Set([
@@ -595,7 +613,8 @@ async function createProgressSnapshot(
     generatedPatches: new Set(generatedPatchIds).size,
     modifiedFiles: new Set(taskState.filesModified).size,
     commandsRun: agentContext.commandsRun?.length ?? 0,
-    completedWorkflowSteps: taskState.planStatus.filter((status) => status.startsWith("completed:")).length
+    completedWorkflowSteps: taskState.planStatus.filter((status) => status.startsWith("completed:")).length,
+    subagentCompleted
   };
 }
 
@@ -609,7 +628,7 @@ function getSuccessfulReadScope(toolCall: ModelToolCall) {
 
 function hasAgentProgress(before: AgentProgressSnapshot, after: AgentProgressSnapshot) {
   return (Object.keys(before) as Array<keyof AgentProgressSnapshot>)
-    .some((key) => after[key] > before[key]);
+    .some((key) => (after[key] ?? 0) > (before[key] ?? 0));
 }
 
 function buildRecoveryFacts(agentContext: AgentContext, generatedPatchIds: string[]) {
@@ -1644,11 +1663,15 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         });
         metrics.recordToolResult({ signature, noProgress: true });
       }
+      // 阶段 5：子代理预算打满时输出可诊断的失败原因，父代理可据此决定重试/缩小范围/降级。
+      const forceFinalReason = options.isSubagent
+        ? `子代理在预算 ${maxSteps} 步中耗尽步数，在强制结论轮仍尝试调用工具 ${toolCalls.map((tc) => tc.name).join("、")}。该调用已被硬性拦截。子代理应通过 completeTask 提前返回部分结果，而不是继续探索。`
+        : "模型在强制结论轮仍尝试调用工具，该调用已被硬性拦截。";
       const content = message.content?.trim() || createBudgetLimitContent(
         maxSteps,
         agentContext,
         generatedPatchIds,
-        "模型在强制结论轮仍尝试调用工具，该调用已被硬性拦截。"
+        forceFinalReason
       );
       const assistantMessage: ModelMessage = { role: "assistant", content };
       messages.push(assistantMessage);
@@ -1704,7 +1727,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         recoveryAttempted: completionRecoveryAttempted,
         editingToolsAvailable: registry.definitions.some((definition) =>
           ["proposePatch", "replaceInFile", "writeFile"].includes(definition.name)
-        )
+        ),
+        isSubagent: options.isSubagent
       });
       const legacyCompletionDecision = (evidence.pendingPatchCount ?? 0) > 0
         ? { status: "awaiting_approval" as const, code: "PENDING_APPROVAL" as const, reason: "已生成待审核补丁。", suggestedAction: "审核待处理补丁。", shouldRecover: false }
@@ -1900,7 +1924,8 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         recoveryAttempted: completionRecoveryAttempted,
         editingToolsAvailable: registry.definitions.some((definition) =>
           ["proposePatch", "replaceInFile", "writeFile"].includes(definition.name)
-        )
+        ),
+        isSubagent: options.isSubagent
       });
       const requestedDecision = completionInput.verified
         ? evidenceDecision
@@ -2208,7 +2233,7 @@ export async function runAgentRuntime(options: AgentRuntimeOptions): Promise<Age
         });
         continue;
       }
-      const approval = evaluateAgentToolApproval(toAgentToolCall(toolCall), definition);
+      const approval = evaluateAgentToolApproval(toAgentToolCall(toolCall), definition, options.isSubagent);
 
       if (approval.status === "blocked") {
         metrics.recordToolFailure();

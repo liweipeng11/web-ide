@@ -18,6 +18,9 @@ export type CompletionEvidence = {
   failedToolCallCount: number;
   lastMutationAt?: number;
   lastValidationAt?: number;
+  // 阶段 4：父代理审批恢复时需要知道哪些子代理结果已回收、哪些未回收。
+  // 子代理运行时完成不设此值；父代理完成门禁检查时按此判断是否需要等待子代理回收。
+  unrecoveredSubagentCount?: number;
 };
 
 export type CompletionDecision = {
@@ -34,6 +37,8 @@ export type CompletionPolicyInput = {
   finalContent: string;
   recoveryAttempted: boolean;
   editingToolsAvailable: boolean;
+  // 阶段 4：当前运行是否为子代理。子代理完成只代表子任务完成，不触发任务级完成流程。
+  isSubagent?: boolean;
 };
 
 export type CompletionEvidenceFingerprintInput = Pick<CompletionEvidence,
@@ -48,6 +53,7 @@ export type CompletionEvidenceFingerprintInput = Pick<CompletionEvidence,
   | "lastMutationAt"
   | "lastValidationAt"
   | "pendingPlanItems"
+  | "unrecoveredSubagentCount"
 >;
 
 export type CompletionRejectionState = {
@@ -87,7 +93,8 @@ export function createCompletionEvidenceFingerprint(evidence: CompletionEvidence
     // 展示标题可能包含业务文本且不影响完成裁决，指纹只保留稳定步骤与状态。
     (evidence.pendingPlanItems ?? []).map((item) => [item.workflowStepId ?? null, item.status]),
     evidence.lastMutationAt ?? null,
-    evidence.lastValidationAt ?? null
+    evidence.lastValidationAt ?? null,
+    evidence.unrecoveredSubagentCount ?? 0
   ]);
 }
 
@@ -142,10 +149,34 @@ export function finalContentHasNonRecoverableBlock(content: string) {
 }
 
 /**
- * 使用可审计的交付证据判定终态，禁止把“模型返回文本”直接等价为任务完成。
+ * 使用可审计的交付证据判定终态，禁止把"模型返回文本"直接等价为任务完成。
+ * 阶段 4：isSubagent=true 时，子代理完成只代表子任务结束，不触发任务级完成流程。
  */
 export function evaluateAgentCompletion(input: CompletionPolicyInput): CompletionDecision {
   const { evidence } = input;
+
+  // 阶段 4：子代理完成门禁 — 子代理完成只代表"子任务完成"，不是"任务级完成"。
+  // 子代理应返回结构化结果（analysis/proposed_patch）给父代理，由父代理汇总后统一判断任务是否完成。
+  if (input.isSubagent) {
+    return {
+      status: "completed",
+      code: "COMPLETED",
+      reason: "子代理子任务完成。结果将由父代理回收后统一完成判断。",
+      shouldRecover: false
+    };
+  }
+
+  // 阶段 4：父代理审批恢复时，检查是否有未回收的子代理结果。
+  if ((evidence.unrecoveredSubagentCount ?? 0) > 0) {
+    return {
+      status: "incomplete",
+      code: "PENDING_SUBAGENT_RECOVERY",
+      reason: `仍有 ${evidence.unrecoveredSubagentCount} 个子代理结果未回收，任务不能视为完成。`,
+      suggestedAction: "等待子代理完成并回收结果，或通过 subagent_artifacts_recovered 步骤恢复历史产物。",
+      pendingPlanItems: evidence.pendingPlanItems ?? [],
+      shouldRecover: false
+    };
+  }
 
   if ((evidence.pendingPatchCount ?? 0) > 0) {
     return {

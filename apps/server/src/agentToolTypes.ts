@@ -58,6 +58,8 @@ export type AgentProgressSnapshot = {
   modifiedFiles: number;
   commandsRun: number;
   completedWorkflowSteps: number;
+  // 阶段 4：子代理完成计数，父代理回收子代理结果时递增。
+  subagentCompleted?: number;
 };
 
 /**
@@ -135,6 +137,14 @@ export type AgentContext = {
   }>;
   /** 保存本轮检索或抓取使用的外部来源，便于审批恢复、引用和审计。 */
   externalSources?: ExternalContextSource[];
+  // 阶段 1：父子代理关系字段，用于运行时区分当前 agent 是父代理还是子代理。
+  // 子代理运行时为 true，parentRunId 指向委派方父代理的 runId；父代理运行为 false/null。
+  isSubagent?: boolean;
+  parentRunId?: string | null;
+  // 阶段 3：子代理身份字段，用于 proposePatch 标记 patch 来源。
+  // 子代理运行时由 subagentRuntime 设置，父代理运行时为空。
+  subagentDelegationId?: string;
+  subagentId?: string;
 };
 
 export type AgentToolCall = {
@@ -224,4 +234,133 @@ export type AgentCompletionResponse = {
     prompt_tokens_details?: { cached_tokens?: number };
     completion_tokens_details?: { reasoning_tokens?: number };
   };
+};
+
+export type SubagentKind = "analysis" | "implementation" | "verification" | "planning";
+
+export type SubagentStatus =
+  | "created"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "awaiting_parent_review";
+
+export type SubagentArtifactsKind = "analysis" | "proposed_patch" | "execution_report" | "modification_plan";
+
+export type SubagentDelegationScope = {
+  allowedFilePaths?: string[];
+  allowedFileGlobs?: string[];
+  allowedToolNames?: string[];
+  blockedToolNames?: string[];
+  canMutateWorkspace?: boolean;
+  canRequestApproval?: boolean;
+  canCompleteTask?: boolean;
+};
+
+export type SubagentBudgetPolicy = {
+  maxSteps?: number;
+  maxOutputTokens?: number;
+  maxReadFiles?: number;
+  maxPromptTokens?: number;
+  timeoutMs?: number;
+};
+
+export type SubagentIdentity = {
+  subagentId: string;
+  delegationId: string;
+  parentRunId: string;
+  parentAgentMode?: import("./types.js").AgentMode;
+  kind: SubagentKind;
+  title: string;
+  ownerRunId?: string;
+};
+
+export type SubagentArtifactsPatch = {
+  patchIds: string[];
+  suggestedValidationCommands?: string[];
+  fileConflictHints?: string[];
+};
+
+export type SubagentArtifacts = {
+  kind: SubagentArtifactsKind;
+  summary: string;
+  structuredEvidence?: Record<string, unknown>;
+  relevantFiles?: string[];
+  risks?: string[];
+  nextActions?: string[];
+  patch?: SubagentArtifactsPatch;
+  /** planning 子代理产出的结构化修改计划 */
+  modificationPlan?: {
+    planId: string;
+    taskDescription: string;
+    files: Array<{
+      filePath: string;
+      changeKind: string;
+      reason: string;
+      symbolName?: string;
+      responsibility?: string;
+    }>;
+  };
+};
+
+export type SubagentFailure = {
+  code: string;
+  reason: string;
+  recoverable: boolean;
+  suggestedAction?: string;
+  budgetExceeded?: boolean;
+  timeout?: boolean;
+};
+
+export type SubagentRuntimeRef = {
+  runId: string;
+  mode?: import("./types.js").AgentMode;
+  startedAt: number;
+  finishedAt?: number;
+  durationMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  stepsUsed?: number;
+};
+
+export type SubagentSnapshot = SubagentIdentity & {
+  goal: string;
+  scope: SubagentDelegationScope;
+  budget: SubagentBudgetPolicy;
+  status: SubagentStatus;
+  artifacts?: SubagentArtifacts;
+  failure?: SubagentFailure;
+  runtime?: SubagentRuntimeRef;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type AgentSubagentDelegationInput = {
+  title: string;
+  kind: SubagentKind;
+  goal: string;
+  scope?: SubagentDelegationScope;
+  budget?: SubagentBudgetPolicy;
+  expectedArtifactsKind: SubagentArtifactsKind;
+  hints?: string[];
+};
+
+export type AgentSubagentDelegationResult = SubagentIdentity & {
+  status: SubagentStatus;
+  artifacts?: SubagentArtifacts;
+  failure?: SubagentFailure;
+  runtime?: SubagentRuntimeRef;
+};
+
+export type AgentSubagentDelegationSummary = {
+  delegationId: string;
+  subagentId: string;
+  kind: SubagentKind;
+  title: string;
+  status: SubagentStatus;
+  summary: string;
+  relevantFiles?: string[];
+  producedPatchCount?: number;
+  hasFailure: boolean;
 };

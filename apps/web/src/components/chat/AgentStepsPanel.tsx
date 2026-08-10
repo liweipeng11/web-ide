@@ -89,6 +89,35 @@ function formatAgentStepDetail(step: AgentStep) {
     };
   } else if (step.type === "tool_blocked") {
     detail = { type: step.type, toolName: step.toolName, message: step.message };
+  } else if (step.type === "subagent_created") {
+    detail = {
+      type: step.type, delegationId: step.delegationId, subagentId: step.subagentId,
+      title: step.title, kind: step.kind, goal: step.goal, scope: step.scope, budget: step.budget
+    };
+  } else if (step.type === "subagent_started") {
+    detail = {
+      type: step.type, delegationId: step.delegationId, subagentId: step.subagentId,
+      parentRunId: step.parentRunId, runId: step.runId, mode: step.mode
+    };
+  } else if (step.type === "subagent_succeeded") {
+    detail = {
+      type: step.type, delegationId: step.delegationId, subagentId: step.subagentId,
+      artifactsKind: step.artifactsKind, summary: step.summary,
+      relevantFiles: step.relevantFiles, producedPatchCount: step.producedPatchCount
+    };
+  } else if (step.type === "subagent_failed") {
+    detail = {
+      type: step.type, delegationId: step.delegationId, subagentId: step.subagentId, failure: step.failure
+    };
+  } else if (step.type === "subagent_cancelled") {
+    detail = {
+      type: step.type, delegationId: step.delegationId, subagentId: step.subagentId, reason: step.reason
+    };
+  } else if (step.type === "subagent_artifacts_recovered") {
+    detail = {
+      type: step.type, delegationId: step.delegationId, subagentId: step.subagentId,
+      artifactsKind: step.artifactsKind, summary: step.summary, source: step.source
+    };
   } else {
     detail = { type: step.type, message: step.message };
   }
@@ -175,6 +204,27 @@ function getAgentObservationChips(step: AgentStep) {
   }
 
   if (step.type === "tool_blocked") return [`工具：${step.toolName}`, "策略门禁"];
+
+  // 阶段 7：子代理步骤观测信息
+  if (step.type === "subagent_created") {
+    const chips: string[] = [`种类：${step.kind === "analysis" ? "分析" : step.kind === "implementation" ? "实施" : step.kind === "planning" ? "规划" : "验证"}`];
+    if (step.scope.allowedFilePaths?.length) chips.push(`${step.scope.allowedFilePaths.length}个文件`);
+    if (step.scope.allowedFileGlobs?.length) chips.push(`${step.scope.allowedFileGlobs.length}个glob`);
+    return chips;
+  }
+  if (step.type === "subagent_succeeded") {
+    const chips: string[] = [`产物：${step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : step.artifactsKind === "modification_plan" ? "修改计划" : "执行报告"}`];
+    if (step.relevantFiles?.length) chips.push(`${step.relevantFiles.length}个文件`);
+    if (step.producedPatchCount) chips.push(`${step.producedPatchCount}个补丁`);
+    return chips;
+  }
+  if (step.type === "subagent_failed") {
+    return [`失败码：${step.failure.code}`, step.failure.recoverable ? "可重试" : "不可恢复"];
+  }
+  if (step.type === "subagent_artifacts_recovered") {
+    const sourceLabel = step.source === "current_run" ? "当前运行" : step.source === "task_session_history" ? "历史" : "审批恢复";
+    return [`来源：${sourceLabel}`, `产物：${step.artifactsKind}`];
+  }
 
   if (step.type !== "tool_result") return [];
 
@@ -388,6 +438,49 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
   if (step.type === "checkpoint") {
     const sourceTool = step.source?.toolName || "workspace change";
     return { label: "Checkpoint", title: `Created checkpoint ${step.checkpointId}`, detail: `${sourceTool} / ${step.files.length} file(s)` };
+  }
+
+  // 阶段 7：子代理生命周期步骤视图
+  if (step.type === "subagent_created") {
+    const kindLabel = step.kind === "analysis" ? "分析" : step.kind === "implementation" ? "实施" : step.kind === "planning" ? "规划" : "验证";
+    return {
+      label: `委派${kindLabel}子代理`,
+      title: step.title,
+      detail: `目标：${step.goal.slice(0, 80)}${step.goal.length > 80 ? "..." : ""} / 预算：${step.budget.maxSteps ?? "?"}步`
+    };
+  }
+  if (step.type === "subagent_started") {
+    return { label: "子代理启动", title: `子代理 ${step.subagentId} 开始运行`, detail: `模式：${step.mode} / runId：${step.runId.slice(0, 8)}...` };
+  }
+  if (step.type === "subagent_succeeded") {
+    const kindLabel = step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : step.artifactsKind === "modification_plan" ? "修改计划" : "执行报告";
+    return {
+      label: "子代理完成",
+      title: `子代理 ${step.subagentId} 成功完成`,
+      detail: `产物：${kindLabel} / ${step.relevantFiles?.length ?? 0}个文件${step.producedPatchCount ? ` / ${step.producedPatchCount}个补丁` : ""}`
+    };
+  }
+  if (step.type === "subagent_failed") {
+    return {
+      label: "子代理失败",
+      title: `子代理 ${step.subagentId} 执行失败`,
+      detail: `${step.failure.code}: ${step.failure.reason.slice(0, 60)}${step.failure.recoverable ? "（可重试）" : ""}`
+    };
+  }
+  if (step.type === "subagent_cancelled") {
+    return {
+      label: "子代理取消",
+      title: `子代理 ${step.subagentId} 已取消`,
+      detail: step.reason ?? "父代理终止或用户取消"
+    };
+  }
+  if (step.type === "subagent_artifacts_recovered") {
+    const kindLabel = step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : step.artifactsKind === "modification_plan" ? "修改计划" : "执行报告";
+    return {
+      label: "产物恢复",
+      title: `已恢复子代理 ${step.subagentId} 的${kindLabel}产物`,
+      detail: `来源：${step.source === "current_run" ? "当前运行" : step.source === "task_session_history" ? "历史会话" : "审批恢复"}`
+    };
   }
 
   return { label: "Error", title: "Tool failed", detail: step.message };
@@ -654,7 +747,8 @@ export default function AgentStepsPanel({ activeDeliveryUnitId, disabled = false
           return (
             <li key={step.id} className={`agent-step-${step.type}${step.type === "strategy" ? ` agent-step-strategy-${step.event}` : ""}${step.type === "completion_rejected" ? ` status-${step.completionStatus}` : ""}${step.type === "approval_request" || step.type === "command" ? ` status-${step.status ?? "suggested"}` : ""}`}>
               <span>{view.label}</span>
-              <details open={(step.type === "approval_request" && step.status === "pending") || step.type === "completion_rejected"}>
+              {/* 阶段 7：子代理完成/失败/取消/产物恢复步骤默认展开 */}
+              <details open={(step.type === "approval_request" && step.status === "pending") || step.type === "completion_rejected" || step.type === "subagent_succeeded" || step.type === "subagent_failed" || step.type === "subagent_cancelled" || step.type === "subagent_artifacts_recovered"}>
                 <summary>
                   <b>{view.title}</b>
                   {view.detail && <small>{view.detail}</small>}

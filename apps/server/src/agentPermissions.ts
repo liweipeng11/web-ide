@@ -154,8 +154,9 @@ function getApprovalSummary(toolName: string, args: Record<string, unknown>) {
 
 /**
  * 统一评估模型工具调用的审批策略，Runtime 只根据这里的结果决定自动执行、暂停等待或阻断。
+ * 阶段 4：isSubagent=true 时，子代理禁止 askUser 和任何需要用户审批的高风险工具。
  */
-export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: AgentToolDefinition): AgentToolApprovalDecision {
+export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: AgentToolDefinition, isSubagent?: boolean): AgentToolApprovalDecision {
   const toolName = toolCall.function.name;
   const args = parseToolArguments(toolCall);
 
@@ -163,6 +164,22 @@ export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: 
     return {
       status: "blocked",
       reason: `Unknown tool: ${toolName}`
+    };
+  }
+
+  // 阶段 4：子代理不允许请求用户审批（askUser），子代理遇到不确定情况应通过 completeTask 报告给父代理。
+  if (isSubagent && toolName === "askUser") {
+    return {
+      status: "blocked",
+      reason: "子代理不允许调用 askUser。遇到不确定情况请通过 completeTask 向父代理报告未解决事项。"
+    };
+  }
+
+  // 阶段 4：子代理不允许高风险审批操作，应产出 reviewable 结果由父代理统一审批。
+  if (isSubagent && requiresUserApproval(toolName, args)) {
+    return {
+      status: "blocked",
+      reason: `子代理不允许执行需用户审批的工具 "${toolName}"。请产出 reviewable 结果（analysis 或 proposed_patch）由父代理统一审批。`
     };
   }
 
@@ -190,7 +207,7 @@ export function evaluateAgentToolApproval(toolCall: AgentToolCall, definition?: 
     details: {
       toolName,
       arguments: args,
-      approvalSource: "agent_runtime"
+      approvalSource: isSubagent ? "subagent_runtime" : "agent_runtime"
     }
   });
 

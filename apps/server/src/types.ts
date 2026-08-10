@@ -342,6 +342,53 @@ export type AgentStep = {
       message: string;
       details: Record<string, unknown>;
     }
+  | {
+      type: "subagent_created";
+      delegationId: string;
+      subagentId: string;
+      title: string;
+      kind: import("./agentToolTypes.js").SubagentKind;
+      goal: string;
+      scope: import("./agentToolTypes.js").SubagentDelegationScope;
+      budget: import("./agentToolTypes.js").SubagentBudgetPolicy;
+    }
+  | {
+      type: "subagent_started";
+      delegationId: string;
+      subagentId: string;
+      parentRunId: string;
+      runId: string;
+      mode: AgentMode;
+    }
+  | {
+      type: "subagent_succeeded";
+      delegationId: string;
+      subagentId: string;
+      artifactsKind: import("./agentToolTypes.js").SubagentArtifactsKind;
+      summary: string;
+      relevantFiles?: string[];
+      producedPatchCount?: number;
+    }
+  | {
+      type: "subagent_failed";
+      delegationId: string;
+      subagentId: string;
+      failure: import("./agentToolTypes.js").SubagentFailure;
+    }
+  | {
+      type: "subagent_cancelled";
+      delegationId: string;
+      subagentId: string;
+      reason?: string;
+    }
+  | {
+      type: "subagent_artifacts_recovered";
+      delegationId: string;
+      subagentId: string;
+      artifactsKind: import("./agentToolTypes.js").SubagentArtifactsKind;
+      summary: string;
+      source: "current_run" | "task_session_history" | "approval_resume";
+    }
 );
 
 export type AgentMessageRole = "system" | "user" | "assistant" | "tool";
@@ -622,6 +669,19 @@ export type TaskSession = {
     files: string[];
     createdAt: number;
   }[];
+  // 阶段 0：父子代理编排契约；空数组代表会话在旧字段语义下的默认值，读取层会为历史任务补齐空数组。
+  subagents?: import("./agentToolTypes.js").SubagentSnapshot[];
+  // 父子代理最新完成摘要；供后续 Runtime、完成门禁和恢复逻辑快速判断 Subagent 状态，避免每次全量解析 subagents。
+  subagentSummary?: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    running: number;
+    cancelled: number;
+    awaitingParentReview: number;
+    producedPatchIds?: string[];
+    lastUpdatedAt?: number;
+  };
   createdAt: number;
   updatedAt: number;
 };
@@ -861,4 +921,8 @@ export type PendingPatch = {
   commandsToRun?: string[];
   diagnostics?: PatchGenerationDiagnostics;
   createdAt: number;
+  // 阶段 3：子代理关联字段，标记 patch 由哪个委派的子代理产出。
+  // 父代理合并时可据此按 delegationId 去重/去冲突。
+  delegationId?: string;
+  subagentId?: string;
 };

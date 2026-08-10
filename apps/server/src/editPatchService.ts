@@ -433,7 +433,8 @@ export async function createEditPatchResponse(
   taskSessionId?: string,
   safeEditRecommendationOverride?: import("./safeEditor/index.js").SafeEditRecommendation,
   modificationPlanOverride?: import("./safeEditor/index.js").StructuredModificationPlan,
-  safeEditOptions: EditPatchSafeEditOptions = {}
+  safeEditOptions: EditPatchSafeEditOptions = {},
+  subagentInfo?: { delegationId?: string; subagentId?: string }
 ) {
   const workspaceRoot = getWorkspaceRoot();
   if (!workspaceRoot) throw new HttpError(400, "No workspace selected");
@@ -725,7 +726,7 @@ export async function createEditPatchResponse(
     safeEditReport,
     safeEditTelemetry: recoveredSafeEdit.telemetry
   });
-  const patch = createPendingPatch(files, taskSessionId, commandsToRun, diagnosticsWithoutPatchId);
+  const patch = createPendingPatch(files, taskSessionId, commandsToRun, diagnosticsWithoutPatchId, subagentInfo);
   const diagnostics = {
     ...diagnosticsWithoutPatchId,
     patchId: patch.patchId

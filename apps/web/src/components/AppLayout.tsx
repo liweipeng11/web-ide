@@ -1,4 +1,4 @@
-import { lazy, Suspense, type Dispatch, type PointerEvent, type SetStateAction } from "react";
+import { lazy, Suspense, useMemo, type Dispatch, type PointerEvent, type SetStateAction } from "react";
 import type { AgentMode, AgentStep, CommandResult, FileTreeNode, PatchFileChange, SourceLocation, TaskPlanItemStatus, UnifiedDiagnostic, VerificationIssueCategory } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
@@ -151,6 +151,20 @@ export default function AppLayout({
   onAnalyzePatchImpact,
   onRejectExpansionFiles
 }: Props) {
+  // 从实时步骤流中计算当前正在运行的子代理
+  const runningSubagents = useMemo(() => {
+    if (!state.loading) return [];
+    const created = new Map<string, { title: string; kind: string }>();
+    const finished = new Set<string>();
+    for (const step of state.agentSteps) {
+      if (step.type === "subagent_created") {
+        created.set(step.subagentId, { title: step.title, kind: step.kind });
+      } else if (step.type === "subagent_succeeded" || step.type === "subagent_failed" || step.type === "subagent_cancelled") {
+        finished.add(step.subagentId);
+      }
+    }
+    return [...created.entries()].filter(([id]) => !finished.has(id));
+  }, [state.agentSteps, state.loading]);
   // 优先展示当前正在运行的任务计划，历史任务详情仍在展开面板里维护。
   const activeTaskSession = state.taskSessions.find((session) => session.id === state.currentTaskSessionId) || state.selectedTaskSession || null;
   const visibleCheckpoint = state.lastCheckpoint && state.lastCheckpoint.id !== state.dismissedCheckpointId ? state.lastCheckpoint : null;
@@ -191,7 +205,11 @@ export default function AppLayout({
         <button type="button" className={focusMode ? "icon-button active" : "icon-button"} title="切换编辑器专注模式" aria-label="切换编辑器专注模式" aria-pressed={focusMode} onClick={onToggleFocusMode}>
           <Icon name="focus" />
         </button>
-        {state.loading && <strong className="app-header-status">处理中...</strong>}
+        {state.loading && (
+          <strong className="app-header-status">
+            处理中{runningSubagents.length > 0 && `（已委派 ${runningSubagents.length} 个子代理）`}...
+          </strong>
+        )}
       </header>
 
       {state.error && <div className="error-banner">{state.error}</div>}

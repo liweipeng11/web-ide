@@ -1,5 +1,6 @@
 import type { CommandPolicyResult, CommandResult } from "./types.js";
 import type { AgentStep } from "./types.js";
+import type { SubagentKind, SubagentDelegationScope, SubagentBudgetPolicy, SubagentArtifactsKind, SubagentFailure } from "./agentToolTypes.js";
 
 export type ApprovalActionType = "inspect_project" | "search_code" | "read_file" | "edit_files" | "run_command" | "apply_patch" | "write_file" | "delete_file" | "ask_user" | "tool_call";
 export type ApprovalRiskLevel = "low" | "medium" | "high";
@@ -132,5 +133,78 @@ export function createApprovalRequestStep(input: {
     command: input.command,
     details: input.details
   });
+}
+
+// 阶段 1：子代理生命周期步骤创建函数，供父代理 Runtime 在委派、执行、回收各阶段发送标准步骤。
+
+/** 父代理创建子代理委派时发送，记录委派身份、目标、范围和预算。 */
+export function createSubagentCreatedStep(input: {
+  delegationId: string;
+  subagentId: string;
+  title: string;
+  kind: SubagentKind;
+  goal: string;
+  scope: SubagentDelegationScope;
+  budget: SubagentBudgetPolicy;
+}): AgentStep {
+  const type = "subagent_created" as const;
+  return { id: `${type}:${Date.now()}:${Math.random().toString(36).slice(2)}`, createdAt: Date.now(), type, ...input } as AgentStep;
+}
+
+/** 子代理开始执行时发送，记录 parentRunId 和子代理自身 runId，塑造父子运行树。 */
+export function createSubagentStartedStep(input: {
+  delegationId: string;
+  subagentId: string;
+  parentRunId: string;
+  runId: string;
+  mode: string;
+}): AgentStep {
+  const type = "subagent_started" as const;
+  return { id: `${type}:${Date.now()}:${Math.random().toString(36).slice(2)}`, createdAt: Date.now(), type, ...input } as AgentStep;
+}
+
+/** 子代理成功完成时发送，记录产物类型、摘要和产出补丁数。 */
+export function createSubagentSucceededStep(input: {
+  delegationId: string;
+  subagentId: string;
+  artifactsKind: SubagentArtifactsKind;
+  summary: string;
+  relevantFiles?: string[];
+  producedPatchCount?: number;
+}): AgentStep {
+  const type = "subagent_succeeded" as const;
+  return { id: `${type}:${Date.now()}:${Math.random().toString(36).slice(2)}`, createdAt: Date.now(), type, ...input } as AgentStep;
+}
+
+/** 子代理执行失败时发送，记录失败原因、可恢复性和预算/超时标志。 */
+export function createSubagentFailedStep(input: {
+  delegationId: string;
+  subagentId: string;
+  failure: SubagentFailure;
+}): AgentStep {
+  const type = "subagent_failed" as const;
+  return { id: `${type}:${Date.now()}:${Math.random().toString(36).slice(2)}`, createdAt: Date.now(), type, ...input } as AgentStep;
+}
+
+/** 子代理被取消时发送（用户主动取消或父代理中断委派）。 */
+export function createSubagentCancelledStep(input: {
+  delegationId: string;
+  subagentId: string;
+  reason?: string;
+}): AgentStep {
+  const type = "subagent_cancelled" as const;
+  return { id: `${type}:${Date.now()}:${Math.random().toString(36).slice(2)}`, createdAt: Date.now(), type, ...input } as AgentStep;
+}
+
+/** 父代理从会话历史恢复子代理产物时发送，区分来源（当前运行/历史/审批恢复）。 */
+export function createSubagentArtifactsRecoveredStep(input: {
+  delegationId: string;
+  subagentId: string;
+  artifactsKind: SubagentArtifactsKind;
+  summary: string;
+  source: "current_run" | "task_session_history" | "approval_resume";
+}): AgentStep {
+  const type = "subagent_artifacts_recovered" as const;
+  return { id: `${type}:${Date.now()}:${Math.random().toString(36).slice(2)}`, createdAt: Date.now(), type, ...input } as AgentStep;
 }
 

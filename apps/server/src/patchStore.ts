@@ -7,14 +7,16 @@ export function normalizePatchPath(filePath: string) {
   return filePath.replace(/\\/g, "/").toLowerCase();
 }
 
-export function createPendingPatch(files: PatchFileChange[], taskSessionId?: string, commandsToRun?: string[], diagnostics?: PatchGenerationDiagnostics) {
+export function createPendingPatch(files: PatchFileChange[], taskSessionId?: string, commandsToRun?: string[], diagnostics?: PatchGenerationDiagnostics, subagentInfo?: { delegationId?: string; subagentId?: string }) {
   const patch: PendingPatch = {
     patchId: crypto.randomUUID(),
     taskSessionId,
     files,
     commandsToRun,
     diagnostics,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    delegationId: subagentInfo?.delegationId,
+    subagentId: subagentInfo?.subagentId
   };
 
   patches.set(patch.patchId, patch);

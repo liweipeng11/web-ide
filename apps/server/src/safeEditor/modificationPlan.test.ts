@@ -71,7 +71,7 @@ test("planFileChanges 同步更新 Agent 上下文和任务会话", async () => 
     await fs.mkdir(path.join(workspaceRoot, "src"), { recursive: true });
     await fs.writeFile(path.join(workspaceRoot, "src/main.js"), "new Vue({}).$mount('#app');\n", "utf8");
     const session = await createTaskSession("新增 Vue Router");
-    const agentContext: AgentContext = { userGoal: session.userGoal, filesRead: [], searchQueries: [], searchResultFiles: [], relevantFiles: [] };
+    const agentContext: AgentContext = { userGoal: session.userGoal, filesRead: [], searchQueries: [], searchResultFiles: [], relevantFiles: [], isSubagent: false, parentRunId: null };
     const response = await executeAgentToolCall({
       id: "plan-file-changes",
       type: "function",
