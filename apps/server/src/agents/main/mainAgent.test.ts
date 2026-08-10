@@ -208,7 +208,7 @@ test("direct 路由不能通过 NextAction 绕过工具限制", async () => {
   assert.match(result.result.blockers[0], /direct 路由不能调用工具/);
 });
 
-test("阶段 1 识别 planned 路由但不伪造 Planner 执行", async () => {
+test("绕过正式入口执行 planned 路由时要求回到 MainAgentRuntime", async () => {
   const goal = "重构整个认证系统";
   const model = new FakeDecisionModel({
     intent: "code_change",
@@ -220,7 +220,7 @@ test("阶段 1 识别 planned 路由但不伪造 Planner 执行", async () => {
   const result = await createKernel(main, goal).execute("main", createTask(goal));
 
   assert.equal(result.result.status, "blocked");
-  assert.match(result.result.blockers[0], /尚未接入 Planner/);
+  assert.match(result.result.blockers[0], /MainAgentRuntime/);
   assert.equal(model.actionCalls, 0);
 });
 

@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { appendAgentMessage, clearPendingAgentToolCall, getPendingAgentToolCall, listAgentMessages, setPendingAgentToolCall } from "./agentMessageStore.js";
 import { createCheckpoint } from "./checkpointStore.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
-import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionRecoveryDecision, appendTaskSessionStep, appendTaskSessionToolFailureDiagnostic, approveTaskSessionPlan, completeTaskSessionDeliveryUnit, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setActiveTaskSessionDeliveryUnit, setTaskPlanItems, setTaskSessionContinuation, setTaskSessionDeliveryUnits, setTaskSessionModificationPlan, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCheckpoint, addTaskSessionFilesChanged, advanceTaskPlanProgress, appendTaskSessionAgentMessage, appendTaskSessionFileEditEvent, appendTaskSessionPatchEvent, appendTaskSessionRecoveryDecision, appendTaskSessionStep, appendTaskSessionToolFailureDiagnostic, approveTaskSessionPlan, completeTaskSessionDeliveryUnit, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, reconcileTaskPlanFromRuntimeEvidence, recordTaskSessionContextBudget, recordTaskSessionPatchDiagnostics, setActiveTaskSessionDeliveryUnit, setTaskPlanItems, setTaskSessionContinuation, setTaskSessionDeliveryUnits, setTaskSessionModificationPlan, setTaskSessionPendingToolCall, setTaskSessionRuntimeEvidence, setTaskSessionRuntimePlanning, updateTaskPlanItem, updateTaskSessionChatId, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { setWorkspaceRoot } from "./workspaceStore.js";
 import { buildDeliveryUnitsFromTaskPlan, createFallbackTaskPlan, initializeTaskPlan, rewriteTaskPlanWithInstruction, shouldInitializeTaskPlan } from "./taskPlanService.js";
 import { clearTaskMetricsForTest, getTaskSessionPersistenceMetrics, RunMetricsTracker } from "./observability/index.js";
@@ -22,6 +22,112 @@ async function createIsolatedTaskSession(userGoal = "实现任务计划器") {
     session: await createTaskSession(userGoal)
   };
 }
+
+test("新 Runtime DAG 与 Planner 结果可在任务会话中持久化恢复", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("迁移认证系统");
+  const plan = {
+    version: 1,
+    goal: session.userGoal,
+    assumptions: [],
+    completionCriteria: ["迁移完成"],
+    tasks: [{
+      id: "T1",
+      type: "explore" as const,
+      goal: "确认认证现状",
+      dependencies: [],
+      requiredCapabilities: ["exploration"],
+      readScope: ["**"],
+      writeScope: [],
+      acceptanceCriteria: ["输出认证事实"],
+      status: "pending" as const
+    }]
+  };
+  try {
+    await setTaskSessionRuntimePlanning(session.id, { status: "ready", plan });
+    const restored = await getTaskSession(session.id);
+    assert.equal(restored.plannerOutcome?.status, "ready");
+    assert.equal(restored.runtimePlan?.tasks[0]?.id, "T1");
+
+    await setTaskSessionRuntimePlanning(session.id, { status: "missing_context", required: ["需要认证模块结构"] });
+    const waiting = await getTaskSession(session.id);
+    assert.equal(waiting.status, "awaiting_user");
+    assert.deepEqual(waiting.plannerOutcome?.required, ["需要认证模块结构"]);
+    assert.equal(waiting.runtimePlan?.version, 1);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("生产计划初始化通过 Main 规划入口保存 DAG", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("重构整个认证系统");
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+  try {
+    const planned = await initializeTaskPlan(session, {
+      intent: "edit",
+      confidence: 1,
+      normalizedGoal: session.userGoal,
+      reason: "跨模块迁移"
+    }, {
+      runtimePlanning: true,
+      runtimePlanner: {
+        async plan() {
+          return {
+            decision: { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: ["planning"] } as const,
+            planning: {
+              status: "ready" as const,
+              plan: {
+                version: 1,
+                goal: session.userGoal,
+                assumptions: [],
+                completionCriteria: ["迁移完成"],
+                tasks: [{
+                  id: "T1", type: "implement" as const, goal: "迁移认证", dependencies: [], requiredCapabilities: ["editing"],
+                  readScope: ["**"], writeScope: ["**"], acceptanceCriteria: ["完成兼容迁移"], status: "pending" as const
+                }]
+              }
+            }
+          };
+        }
+      }
+    });
+
+    assert.equal(planned?.runtimePlan?.tasks[0]?.goal, "迁移认证");
+    assert.equal(planned?.plannerOutcome?.status, "ready");
+    assert.ok(planned?.planItems?.length);
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("生产计划缺少上下文时暂停任务且不生成伪计划", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("重构未知认证系统");
+  try {
+    const planned = await initializeTaskPlan(session, {
+      intent: "edit",
+      confidence: 1,
+      normalizedGoal: session.userGoal,
+      reason: "缺少仓库事实"
+    }, {
+      runtimePlanning: true,
+      runtimePlanner: {
+        async plan() {
+          return {
+            decision: { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: ["planning"] } as const,
+            planning: { status: "missing_context" as const, required: ["需要认证模块结构"] }
+          };
+        }
+      }
+    });
+
+    assert.equal(planned?.status, "awaiting_user");
+    assert.equal(planned?.plannerOutcome?.status, "missing_context");
+    assert.deepEqual(planned?.planItems, []);
+  } finally {
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
 
 test("阶段 1 状态可持久化、脱敏并与计划双向同步", async () => {
   const { workspaceRoot, session } = await createIsolatedTaskSession("持久化交付单元");

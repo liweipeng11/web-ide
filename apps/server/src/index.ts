@@ -24,7 +24,7 @@ import { applyPendingPatch } from "./patchApplyService.js";
 import { discoverProjectRules, ensureGlobalRulesDirectory, ensureProjectRulesDirectory, readAgentRulesSettings, writeAgentRulesSettings } from "./projectRules.js";
 import { createAgentStep } from "./routeAgentSteps.js";
 import type { ApplyPatchRequest, ApprovalDecisionRequest, AutoValidationRequest, FileChatMessage, FileChatRequest, GenerateEditRequest, GenerateEditResponse, InterruptTaskPlanRequest, RejectPatchRequest, RewriteTaskPlanRequest, RollbackCheckpointRequest, RunCommandRequest, SaveFileRequest, TaskPlanItemStatus, TaskSession, UpdateAgentModeRequest, UpdateTaskPlanItemRequest, UpsertTaskPlanItemRequest } from "./types.js";
-import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionUserGoal } from "./taskSessionStore.js";
+import { addTaskPlanItem, addTaskSessionCommand, addTaskSessionFilesRead, advanceTaskPlanProgress, appendTaskSessionPatchEvent, appendTaskSessionStep, approveTaskSessionPlan, createTaskSession, decideTaskSessionApproval, deleteTaskPlanItem, deleteTaskSession, flushPendingTaskSessionWrites, getTaskSession, interruptTaskSessionForReplan, listTaskSessions, setTaskSessionRuntimePlanning, updateTaskPlanItem, updateTaskSessionAgentMode, updateTaskSessionChatId, updateTaskSessionUserGoal } from "./taskSessionStore.js";
 import { initializeTaskPlan, rewriteTaskPlanWithInstruction } from "./taskPlanService.js";
 import { buildTaskPlanContinuationRequest, decideTaskPlanContinuation, MAX_AUTOMATIC_PLAN_CONTINUATIONS } from "./taskPlanContinuation.js";
 import { attachTerminalServer } from "./terminalServer.js";
@@ -41,6 +41,7 @@ import { createInlineEditRouter } from "./inlineEdit/routes.js";
 import { initializeProviderSettings } from "./providerSettingsStore.js";
 import { createCommandExecutionRouter } from "./commandExecution/commandExecutionRoutes.js";
 import { commandExecutionService } from "./commandExecution/index.js";
+import { MainAgentRuntime } from "./agents/main/mainAgentRuntime.js";
 
 const initialProviders = await initializeProviderSettings();
 configureProviderGateway(initialProviders.filter((provider) => provider.enabled));
@@ -56,6 +57,16 @@ async function classifyDirectEditRequest(userRequest: string) {
 
 function runWithTaskModel<T>(taskSessionId: string, mode: "chat" | "plan" | "act", selection: import("./contracts/model.js").ModelSelection, callback: () => T) {
   return withModelExecution({ selection, taskSessionId, mode }, callback);
+}
+
+function getPlannerPauseMessage(session: TaskSession | null | undefined) {
+  if (session?.plannerOutcome?.status === "missing_context") {
+    return `Planner 需要补充上下文：${session.plannerOutcome.required?.join("；") || "请补充相关项目结构和约束"}`;
+  }
+  if (session?.plannerOutcome?.status === "failed") {
+    return session.plannerOutcome.blockers?.[0] || "Planner 计划生成失败，请稍后重试。";
+  }
+  return null;
 }
 
 function selectInitialModelMode(userRequest: string, requestedMode: "plan" | "act"): "chat" | "plan" | "act" {
@@ -497,7 +508,17 @@ app.post(
     const modelSelection = await resolveRequestModel({}, "act");
     const taskSession = await createTaskSession(userRequest.trim(), { agentMode: "act", modelSelection });
     const classification = await runWithTaskModel(taskSession.id, "act", modelSelection, () => classifyDirectEditRequest(userRequest.trim()));
-    const plannedTaskSession = await runWithTaskModel(taskSession.id, "act", modelSelection, () => initializeTaskPlan(taskSession, classification, { forceApproval: true }));
+    const plannedTaskSession = await runWithTaskModel(taskSession.id, "act", modelSelection, () => initializeTaskPlan(taskSession, classification, { forceApproval: true, selectedPath: filePath, runtimePlanning: true }));
+    const plannerPauseMessage = getPlannerPauseMessage(plannedTaskSession);
+    if (plannerPauseMessage) {
+      response.status(202).json({
+        taskSessionId: taskSession.id,
+        plannerBlocked: true,
+        summary: plannerPauseMessage,
+        agentSteps: []
+      });
+      return;
+    }
 
     if (plannedTaskSession?.planApproval?.status === "pending") {
       response.status(202).json({
@@ -564,7 +585,7 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
     const taskSession = await createTaskSession(userRequest.trim(), { agentMode: "act", modelSelection });
     taskSessionId = taskSession.id;
     const classification = await runWithTaskModel(taskSession.id, "act", modelSelection, () => classifyDirectEditRequest(userRequest.trim()));
-    const plannedTaskSession = await runWithTaskModel(taskSession.id, "act", modelSelection, () => initializeTaskPlan(taskSession, classification, { forceApproval: true }));
+    const plannedTaskSession = await runWithTaskModel(taskSession.id, "act", modelSelection, () => initializeTaskPlan(taskSession, classification, { forceApproval: true, selectedPath: filePath, runtimePlanning: true }));
 
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -582,6 +603,14 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
     };
 
     sendEvent("task_session", { session: plannedTaskSession || taskSession });
+
+    const plannerPauseMessage = getPlannerPauseMessage(plannedTaskSession);
+    if (plannerPauseMessage) {
+      completed = true;
+      sendEvent("planner_blocked", { taskSessionId: taskSession.id, message: plannerPauseMessage });
+      response.end();
+      return;
+    }
 
     if (plannedTaskSession?.planApproval?.status === "pending") {
       completed = true;
@@ -752,7 +781,19 @@ app.post(
   asyncRoute(async (request, response) => {
     const taskSessionId = String(request.params.taskSessionId || "");
     const { instruction } = request.body as Partial<InterruptTaskPlanRequest>;
-    response.json({ session: await interruptTaskSessionForReplan(taskSessionId, instruction || "") });
+    let session = await interruptTaskSessionForReplan(taskSessionId, instruction || "");
+    if (session?.runtimePlan) {
+      const selection = await resolveModelSelection(session.agentMode === "plan" ? "plan" : "act", session.modelSelection);
+      const planning = await runWithTaskModel(session.id, session.agentMode === "plan" ? "plan" : "act", selection, () => new MainAgentRuntime().replan({
+        oldPlan: session!.runtimePlan!,
+        completedTasks: session!.runtimePlan!.tasks.filter((task) => task.status === "completed").map((task) => task.id),
+        newFacts: [instruction?.trim() || "用户请求重新规划", ...session!.filesRead.map((filePath) => `已读取文件：${filePath}`)],
+        readScope: [...new Set(session!.runtimePlan!.tasks.flatMap((task) => task.readScope))],
+        writeScope: [...new Set(session!.runtimePlan!.tasks.flatMap((task) => task.writeScope))]
+      }));
+      session = (await setTaskSessionRuntimePlanning(session.id, planning)) || session;
+    }
+    response.json({ session });
   })
 );
 
@@ -760,6 +801,9 @@ app.post(
   "/api/task-sessions/:taskSessionId/plan/approve",
   asyncRoute(async (request, response) => {
     const taskSessionId = String(request.params.taskSessionId || "");
+    const session = await getTaskSession(taskSessionId);
+    const plannerPauseMessage = getPlannerPauseMessage(session);
+    if (plannerPauseMessage) throw new HttpError(409, plannerPauseMessage);
     response.json({ session: await approveTaskSessionPlan(taskSessionId) });
   })
 );
@@ -921,7 +965,13 @@ app.post(
       await addTaskSessionFilesRead(taskSession.id, contextFiles.map((file) => file.path));
       const history = await getFileChatMessages(chatKey);
       const classification = await runWithTaskModel(taskSession.id, initialModelMode, modelSelection, () => classifyAgentRequest(history, userRequest.trim()));
-      const plannedTaskSession = await runWithTaskModel(taskSession.id, initialModelMode, modelSelection, () => initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length }));
+      const plannedTaskSession = await runWithTaskModel(taskSession.id, initialModelMode, modelSelection, () => initializeTaskPlan(taskSession, classification, { contextFileCount: contextPaths.length, runtimePlanning: true }));
+      const plannerPauseMessage = getPlannerPauseMessage(plannedTaskSession);
+      if (plannerPauseMessage) {
+        const messages = await appendFileChatTurn(chatKey, userRequest.trim(), plannerPauseMessage);
+        response.status(202).json({ messages, taskSessionId: taskSession.id, plannerBlocked: true });
+        return;
+      }
 
       if (plannedTaskSession?.planApproval?.status === "pending") {
         const answer = "已根据你的需求生成执行计划，请批准后再开始修改代码。";
@@ -1025,9 +1075,21 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       : await runWithTaskModel(taskSession.id, executionMode, modelSelection, () => initializeTaskPlan(taskSession, classification, {
           contextFileCount: contextPaths.length,
           selectedPath,
-          forceApproval: requestedAgentMode === "plan" ? false : undefined
+          forceApproval: requestedAgentMode === "plan" ? false : undefined,
+          runtimePlanning: true
         }));
     sendEvent("task_session", { session: plannedTaskSession || taskSession });
+    const plannerPauseMessage = getPlannerPauseMessage(plannedTaskSession);
+    if (plannerPauseMessage) {
+      sendEvent("delta", { id: turn.assistantMessage.id, delta: plannerPauseMessage });
+      const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, plannerPauseMessage);
+      completed = true;
+      await Promise.all(taskStepWrites);
+      sendEvent("planner_blocked", { taskSessionId: taskSession.id, message: plannerPauseMessage });
+      sendEvent("done", { messages });
+      response.end();
+      return;
+    }
     pushAgentStep(
       createAgentStep({
         type: "message",

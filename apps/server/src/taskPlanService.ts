@@ -3,11 +3,12 @@ import { createAiRunId, logAi } from "./aiHttp.js";
 import { requestJsonChatCompletion } from "./modelGatewayClient.js";
 import { getActiveModelId } from "./modelExecutionContext.js";
 import { AI_TASK_PLAN_REWRITE_SYSTEM_PROMPT, AI_TASK_PLAN_SYSTEM_PROMPT } from "./prompts.js";
-import { setTaskPlanItems, setTaskSessionWorkflow } from "./taskSessionStore.js";
+import { setTaskPlanItems, setTaskSessionRuntimePlanning, setTaskSessionWorkflow } from "./taskSessionStore.js";
 import { createTaskWorkflow, getTaskWorkflowSteps, type TaskWorkflowSnapshot, type TaskWorkflowType } from "./taskWorkflow/index.js";
 import type { AgentIntent, AgentRequestClassification } from "./aiClient.js";
 import type { DeliveryUnit, TaskPlanItem, TaskPlanItemStatus, TaskSession } from "./types.js";
 import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
+import { MainAgentRuntime } from "./agents/main/mainAgentRuntime.js";
 
 type GeneratedPlanItem = {
   id?: string;
@@ -293,17 +294,32 @@ export async function generateTaskPlan(userGoal: string, classification?: AgentR
   return fallback;
 }
 
-export async function initializeTaskPlan(session: TaskSession, classification?: AgentRequestClassification, options: { force?: boolean; forceApproval?: boolean; selectedPath?: string | null; contextFileCount?: number } = {}) {
+export async function initializeTaskPlan(session: TaskSession, classification?: AgentRequestClassification, options: { force?: boolean; forceApproval?: boolean; selectedPath?: string | null; contextFileCount?: number; runtimePlanning?: boolean; runtimePlanner?: Pick<MainAgentRuntime, "plan"> } = {}) {
   // 纯命令请求不属于四类代码任务工作流，保持原有命令执行链路。
   if (classification?.intent === "command") {
     return session;
   }
 
   const workflow = createTaskWorkflow(classification?.normalizedGoal || session.userGoal, classification);
-  const workflowSession = (await setTaskSessionWorkflow(session.id, workflow)) || session;
+  let workflowSession = (await setTaskSessionWorkflow(session.id, workflow)) || session;
 
   if (!shouldInitializeTaskPlan(classification?.normalizedGoal || session.userGoal, classification, options)) {
     return workflowSession;
+  }
+
+  if (options.runtimePlanning) {
+    const planningResult = await (options.runtimePlanner ?? new MainAgentRuntime()).plan({
+      goal: classification?.normalizedGoal || session.userGoal,
+      knownFacts: workflowSession.filesRead.map((filePath) => `已读取文件：${filePath}`),
+      constraints: classification?.reason ? [classification.reason] : [],
+      // Planner 只声明后续任务边界，不直接获得这些路径对应的工具权限。
+      readScope: ["**"],
+      writeScope: classification?.intent === "inspect" ? [] : options.selectedPath ? [options.selectedPath] : ["**"]
+    });
+    if (planningResult.planning) {
+      workflowSession = (await setTaskSessionRuntimePlanning(session.id, planningResult.planning)) || workflowSession;
+      if (planningResult.planning.status !== "ready") return workflowSession;
+    }
   }
 
   const items = await generateTaskPlan(classification?.normalizedGoal || session.userGoal, classification, workflow);

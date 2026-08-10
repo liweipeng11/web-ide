@@ -15,6 +15,9 @@ import { getTaskMetricsSnapshot, recordTaskSessionPersistenceMetrics, scheduleTa
 import type { ContextBudgetSnapshot, StructuredContextSummary } from "./contracts/context.js";
 import { deleteStoredContextArtifacts } from "./contextBudget/artifactStore.js";
 import { normalizeStructuredModificationPlan, type StructuredModificationPlan } from "./safeEditor/index.js";
+import type { Plan } from "./runtime/contracts.js";
+import { validatePlan } from "./runtime/stateManager.js";
+import type { PlannerResult } from "./agents/planner/contracts.js";
 
 function taskSessionDirectory() {
   return projectRuntimeDirectory("task-sessions");
@@ -38,6 +41,29 @@ function legacyTaskSessionPath(taskSessionId: string) {
 
 function unique(values: string[]) {
   return [...new Set(values.filter((value) => value.trim()))];
+}
+
+function normalizeRuntimePlan(value: unknown): Plan | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  try {
+    validatePlan(value as Plan);
+    return value as Plan;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizePlannerOutcome(value: unknown): TaskSession["plannerOutcome"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.status !== "ready" && record.status !== "missing_context" && record.status !== "failed") return undefined;
+  if (typeof record.updatedAt !== "number") return undefined;
+  return {
+    status: record.status,
+    required: Array.isArray(record.required) ? unique(record.required.filter((item): item is string => typeof item === "string")) : undefined,
+    blockers: Array.isArray(record.blockers) ? unique(record.blockers.filter((item): item is string => typeof item === "string")) : undefined,
+    updatedAt: record.updatedAt
+  };
 }
 
 function normalizeTaskRuntimeEvidence(value: unknown): TaskRuntimeEvidence | undefined {
@@ -815,6 +841,8 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     pendingToolCall: normalizePendingToolCall(session.pendingToolCall),
     planItems: normalizeTaskPlanItems(session.planItems),
     planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
+    runtimePlan: normalizeRuntimePlan(session.runtimePlan),
+    plannerOutcome: normalizePlannerOutcome(session.plannerOutcome),
     deliveryUnits,
     activeDeliveryUnitId,
     toolFailureDiagnostics: normalizeToolFailureDiagnostics(session.toolFailureDiagnostics),
@@ -1077,6 +1105,25 @@ export async function setTaskPlanItems(taskSessionId: string | null | undefined,
       updatedAt: now
     };
   });
+}
+
+/** 持久化新 Runtime 的完整 DAG；旧 planItems 继续作为兼容 UI 投影独立维护。 */
+export async function setTaskSessionRuntimePlanning(taskSessionId: string | null | undefined, result: PlannerResult) {
+  if (!taskSessionId) return null;
+  const now = Date.now();
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    runtimePlan: result.status === "ready" ? result.plan : session.runtimePlan,
+    plannerOutcome: {
+      status: result.status,
+      ...(result.status === "missing_context" ? { required: result.required } : {}),
+      ...(result.status === "failed" ? { blockers: result.blockers } : {}),
+      updatedAt: now
+    },
+    // 缺少上下文或规划失败时保持可恢复状态，不能继续伪装成已规划完成。
+    status: result.status === "ready" ? session.status : "awaiting_user",
+    updatedAt: now
+  }));
 }
 
 export async function approveTaskSessionPlan(taskSessionId: string | null | undefined) {

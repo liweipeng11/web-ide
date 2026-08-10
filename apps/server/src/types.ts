@@ -642,6 +642,14 @@ export type TaskSession = {
   planItems?: TaskPlanItem[];
   planRevisions?: TaskPlanRevision[];
   planApproval?: TaskPlanApproval;
+  // 新 Runtime 的 DAG 计划与旧 UI 线性计划分开保存，避免丢失依赖和安全范围。
+  runtimePlan?: import("./runtime/contracts.js").Plan;
+  plannerOutcome?: {
+    status: "ready" | "missing_context" | "failed";
+    required?: string[];
+    blockers?: string[];
+    updatedAt: number;
+  };
   // 旧会话缺失阶段 1 字段时，读取层会补齐为空值，保持历史兼容。
   deliveryUnits?: DeliveryUnit[];
   activeDeliveryUnitId?: string;

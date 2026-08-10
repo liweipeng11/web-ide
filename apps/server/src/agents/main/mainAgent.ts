@@ -198,7 +198,7 @@ export class MainAgent implements Agent {
     if (routeDecision.route === "planned") {
       return createResult(task.taskId, "blocked", "该任务需要 Planner 生成计划。", {
         facts: [`路由结果：${routeDecision.intent}/${routeDecision.complexity}/${routeDecision.route}`],
-        blockers: ["阶段 1 尚未接入 Planner Agent。"]
+        blockers: ["planned 路由必须由 MainAgentRuntime 规划入口执行。"]
       });
     }
 
@@ -241,7 +241,7 @@ export class MainAgent implements Agent {
       }
       if (action.type === "replan") {
         return createResult(task.taskId, "blocked", "任务需要重新规划。", {
-          blockers: [action.reason, "阶段 1 尚未接入 Planner Agent。"]
+          blockers: [action.reason, "当前执行已安全停止，请由 MainAgentRuntime.replan 创建新版计划。"]
         });
       }
       if (routeDecision.route === "direct") {
