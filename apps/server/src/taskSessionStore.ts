@@ -829,7 +829,7 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     fileEditEvents: normalizeFileEditLifecycleEvents(session.fileEditEvents),
     // 阶段 1：确保旧 TaskSession 在读取时有默认的子代理字段，避免解构 undefined。
     subagents: Array.isArray(session.subagents) ? session.subagents : [],
-    subagentSummary: session.subagentSummary && typeof session.subagentSummary === "object" ? session.subagentSummary : null
+    subagentSummary: session.subagentSummary && typeof session.subagentSummary === "object" ? session.subagentSummary : undefined
   };
 }
 
@@ -963,7 +963,7 @@ export async function createTaskSession(userGoal: string, options: { chatId?: st
     updatedAt: now,
     // 阶段 1：新建会话时初始化空的子代理记录，后续运行时通过 enqueueTaskSessionUpdate 写入。
     subagents: [],
-    subagentSummary: null
+    subagentSummary: undefined
   };
 
   await writeTaskSession(session);
@@ -1203,7 +1203,7 @@ export async function setSubagentSummary(taskSessionId: string | null | undefine
       running: subagents.filter((s) => s.status === "running").length,
       cancelled: subagents.filter((s) => s.status === "cancelled").length,
       awaitingParentReview: subagents.filter((s) => s.status === "awaiting_parent_review").length,
-      producedPatchIds: subagents.flatMap((s) => s.artifacts?.patch ? [s.artifacts.patch.patchId] : []),
+      producedPatchIds: subagents.flatMap((s) => s.artifacts?.patch?.patchIds ?? []),
       lastUpdatedAt: Date.now()
     };
     return { ...session, subagentSummary: summary, updatedAt: Date.now() };

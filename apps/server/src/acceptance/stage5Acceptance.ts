@@ -80,8 +80,7 @@ export async function runStage5Acceptance(options: { evaluation?: EvaluationRepo
     defaultModel: "acceptance-model"
   });
 
-  const featureNames = Object.keys(featureLabels) as Array<keyof typeof featureLabels>;
-  const checks: Stage5AcceptanceCheck[] = featureNames.flatMap((name) => [
+  const checks: Stage5AcceptanceCheck[] = stage5FeatureNames.flatMap((name) => [
     {
       id: `default-${name}`,
       category: "default_activation" as const,
@@ -121,3 +120,6 @@ export async function runStage5Acceptance(options: { evaluation?: EvaluationRepo
     evaluation: evaluation.summary
   };
 }
+
+/** 阶段 5 的历史能力清单，新增灰度能力由各自阶段的专用验收覆盖。 */
+export const stage5FeatureNames = Object.keys(featureLabels) as Array<keyof typeof featureLabels>;

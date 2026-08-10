@@ -375,12 +375,12 @@ function extractQuotedSearchKeywords(source: string) {
     }
   };
 
-  for (const match of source.matchAll(/["""''']([^"""''']{2,40})["""''']/g)) {
+  for (const match of source.matchAll(/["“”'‘’]([^"“”'‘’]{2,40})["“”'‘’]/g)) {
     addKeyword(match[1]);
   }
 
-  // 仅保留控件名前缀，避免把"把新增工具按钮改成二级样式"整段都当成搜索词。
-  for (const match of source.matchAll(/(?:^|[\s，。、""'''"":(（【[])([\u4e00-\u9fa5A-Za-z0-9 _-]{2,24}?)(?:按钮|文案|标题|菜单|文本)/g)) {
+  // 仅保留控件名前缀，避免把“把新增工具按钮改成二级样式”整段都当成搜索词。
+  for (const match of source.matchAll(/(?:^|[\s，。、“”'"：（【])([\u4e00-\u9fa5A-Za-z0-9 _-]{2,24}?)(?:按钮|文案|标题|菜单|文本)/g)) {
     addKeyword(match[1]);
   }
 

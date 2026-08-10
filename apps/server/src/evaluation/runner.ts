@@ -211,10 +211,16 @@ export const deterministicMockAgent: EvaluationAgent = async (scenario, workspac
   if (scenario.id === "validation_retry") return runValidationRetryEvaluation(scenario, workspaceRoot);
   let providerStep = 0;
   let validationAttempts = 0;
-  let commandExecutions = 0;
+  let controlledToolExecutions = 0;
   let capturedMetrics: RunMetrics | undefined;
   const patchScenario = isPatchScenario(scenario);
-  const toolName = patchScenario ? "proposePatch" : scenario.id === "dangerous_command_blocking" || scenario.id === "approval_resume" ? "runCommand" : "evaluationAction";
+  const toolName = patchScenario
+    ? "proposePatch"
+    : scenario.id === "dangerous_command_blocking"
+      ? "runCommand"
+      : scenario.id === "approval_resume"
+        ? "deleteFile"
+        : "evaluationAction";
   const definition: AgentToolDefinition = {
     name: toolName,
     description: "阶段 0 离线评测工具",
@@ -226,8 +232,12 @@ export const deterministicMockAgent: EvaluationAgent = async (scenario, workspac
         return { patchId: patch.patchId, files: patch.files.map((file) => ({ path: file.path })) };
       }
       if (toolName === "runCommand") {
-        commandExecutions += 1;
+        controlledToolExecutions += 1;
         return { exitCode: 0, command: args.command };
+      }
+      if (toolName === "deleteFile") {
+        controlledToolExecutions += 1;
+        return { deleted: true, filePath: args.filePath };
       }
       const attempt = typeof args.attempt === "number" ? args.attempt : 1;
       if (scenario.id === "long_terminal_output") return { output: `${"ok\n".repeat(10_000)}Error: expected true` };
@@ -256,8 +266,12 @@ export const deterministicMockAgent: EvaluationAgent = async (scenario, workspac
       return { message: { role: "assistant", toolCalls: [{ id: `apply-${scenario.id}`, name: "applyPatch", arguments: { patchId } }] }, usage };
     }
     if (providerStep === 1) {
-      const command = scenario.id === "dangerous_command_blocking" ? "rm -rf ." : scenario.id === "approval_resume" ? "pnpm test" : undefined;
-      return { message: { role: "assistant", toolCalls: [{ id: `evaluation-${scenario.id}`, name: toolName, arguments: command ? { command } : { attempt: 1 } }] }, usage };
+      const argumentsRecord = scenario.id === "dangerous_command_blocking"
+        ? { command: "rm -rf ." }
+        : scenario.id === "approval_resume"
+          ? { filePath: "src/value.ts" }
+          : { attempt: 1 };
+      return { message: { role: "assistant", toolCalls: [{ id: `evaluation-${scenario.id}`, name: toolName, arguments: argumentsRecord }] }, usage };
     }
     return { message: { role: "assistant", content: "评测任务已完成" }, usage, finishReason: "stop" };
   };
@@ -265,7 +279,7 @@ export const deterministicMockAgent: EvaluationAgent = async (scenario, workspac
   // 阶段评估必须稳定覆盖上下文预算路径，不能受运行测试进程时的生产 Feature Flag 影响。
   const runtimeOptions = { userRequest: scenario.instruction, projectMemoryPrompt: "", registry, completeModel, metricsRecorder, runId: `evaluation-${scenario.id}`, providerId: "mock", modelId: "deterministic-mock-v1", contextBudgetEnabled: true } as const;
   const firstResult = await runAgentRuntime(runtimeOptions);
-  const blockedByPolicy = scenario.id === "dangerous_command_blocking" && commandExecutions === 0 && firstResult.messages.some((message) => message.role === "tool" && message.content?.includes("blocked"));
+  const blockedByPolicy = scenario.id === "dangerous_command_blocking" && controlledToolExecutions === 0 && firstResult.messages.some((message) => message.role === "tool" && message.content?.includes("blocked"));
   let finalResult = firstResult;
 
   if (firstResult.status === "awaiting_approval" && firstResult.pendingToolCall) {
@@ -282,7 +296,7 @@ export const deterministicMockAgent: EvaluationAgent = async (scenario, workspac
     success: finalResult.status === "completed",
     modifiedFiles,
     dangerousCommandBlocked: blockedByPolicy,
-    resumedAfterApproval: scenario.id === "approval_resume" && firstResult.status === "awaiting_approval" && finalResult.status === "completed" && commandExecutions === 1,
+    resumedAfterApproval: scenario.id === "approval_resume" && firstResult.status === "awaiting_approval" && finalResult.status === "completed" && controlledToolExecutions === 1,
     validationAttempts,
     metrics: capturedMetrics
   };

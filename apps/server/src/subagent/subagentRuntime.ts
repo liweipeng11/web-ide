@@ -181,7 +181,7 @@ async function runSubagentCore(options: SubagentRuntimeOptions, config: Subagent
         // 子代理步数耗尽但有有效内容，视为部分成功
         const artifactsKind: SubagentArtifactsKind = config.kind === "implementation" ? "proposed_patch" : config.kind === "planning" ? "modification_plan" : "analysis";
         const artifacts = extractArtifactsFromRuntimeResult(runtimeResult, artifactsKind);
-        artifacts.risks = [{ severity: "medium", description: "子代理步数耗尽但产出了部分有效内容，父代理需评估是否需补充分析或直接使用。", filePaths: artifacts.relevantFiles }];
+        artifacts.risks = ["子代理步数耗尽但产出了部分有效内容，父代理需评估是否需要补充分析或直接使用。"];
 
         options.onAgentStep?.(createSubagentSucceededStep({
           delegationId,

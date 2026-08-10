@@ -21,11 +21,12 @@ function recentFailures(messages: ModelMessage[]) {
     .map((message) => compactFailureEvidence(message.content || ""));
 }
 
-function modifiedFiles(messages: ModelMessage[]) {
+function modifiedFiles(messages: ModelMessage[], pendingToolCallId?: string) {
   const editTools = /patch|write|replace|edit|delete/i;
   return messages.flatMap((message) =>
     (message.toolCalls ?? [])
-      .filter((call) => editTools.test(call.name))
+      // 待审批工具尚未执行，不能提前作为文件变更事实写入上下文摘要。
+      .filter((call) => call.id !== pendingToolCallId && editTools.test(call.name))
       .map((call) => {
         const args = call.arguments as Record<string, unknown>;
         return typeof args.filePath === "string" ? args.filePath : typeof args.path === "string" ? args.path : "";
@@ -62,7 +63,7 @@ export function createStructuredContextSummary(input: {
       ? structuredClone(input.agentContext.referenceChecks)
       : undefined,
     filesRead: unique(input.agentContext.filesRead),
-    filesModified: unique([...(input.filesModified ?? []), ...modifiedFiles(input.messages)]),
+    filesModified: unique([...(input.filesModified ?? []), ...modifiedFiles(input.messages, input.pendingToolCall?.toolCallId)]),
     commands: (input.agentContext.commandsRun ?? []).slice(-10).map((command) => ({ ...command })),
     planStatus: input.planStatus ?? [],
     recentValidationFailures: recentFailures(input.messages),

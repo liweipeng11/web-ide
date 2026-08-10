@@ -68,7 +68,8 @@ test("阶段七：Vue 2 路由缺失场景在预算内生成三文件补丁并�
         proposedFiles.push(change.path);
       }
       runtime.generatedPatchIds?.push("stage7-vue2-router-patch");
-      return { patchId: "stage7-vue2-router-patch", files: changes.map((change) => change.path) };
+      // Fixture 工具实际写入了文件，必须显式返回 applied，供完成门禁记录可审计变更证据。
+      return { applied: true, patchId: "stage7-vue2-router-patch", files: changes.map((change) => change.path) };
     }),
     createTool("validateFixtureBuild", async () => {
       toolNames.push("validateFixtureBuild");
@@ -192,7 +193,7 @@ test("阶段七：Vue 2 路由缺失场景在预算内生成三文件补丁并�
     assert.match(await readFile(join(workspace, "src/main.js"), "utf8"), /router,/);
     assert.match(await readFile(join(workspace, "src/App.vue"), "utf8"), /router-view/);
     assert.match(result.content, /build 验证/);
-    assert.equal(steps.some((step) => step.type === "strategy" && step.event === "negative_evidence"), true);
+    assert.equal(steps.some((step) => step.type === "strategy" && step.event === "create_intent"), true);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

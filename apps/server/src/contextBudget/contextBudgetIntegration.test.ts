@@ -45,14 +45,14 @@ test("Runtime 使用真实计划和模型元数据，并在待审批时刷新摘
     await setTaskPlanItems(session.id, [
       { title: "定位失败", status: "completed" },
       { title: "修改实现", status: "in_progress" },
-      { title: "运行验证", status: "blocked", note: "等待命令审批" }
+      { title: "执行高风险操作", status: "blocked", note: "等待删除审批" }
     ]);
     await addTaskSessionFilesChanged(session.id, ["src/changed.ts"]);
     const budgetEvents: Array<{ summary: { pendingApproval?: { actionId: string } | null; planStatus: string[]; filesModified: string[] } | null; contextWindow: number }> = [];
     const registry = createAgentToolRegistry([{
-      name: "runCommand",
-      description: "需要审批的测试命令",
-      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+      name: "deleteFile",
+      description: "需要审批的测试删除工具",
+      parameters: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] },
       async execute() { return { exitCode: 0 }; },
       summarize(result) { return result; }
     }]);
@@ -75,7 +75,7 @@ test("Runtime 使用真实计划和模型元数据，并在待审批时刷新摘
         { id: "current-real-state", role: "user", content: "继续执行" }
       ],
       completeModel: async () => ({
-        message: { role: "assistant", toolCalls: [{ id: "approval-tool-1", name: "runCommand", arguments: { command: "pnpm test" } }] },
+        message: { role: "assistant", toolCalls: [{ id: "approval-tool-1", name: "deleteFile", arguments: { filePath: "src/obsolete.ts" } }] },
         usage: { inputTokens: 1, outputTokens: 1, reasoningTokens: 0, cachedInputTokens: 0 }
       }),
       metricsRecorder: async () => undefined,
@@ -88,7 +88,7 @@ test("Runtime 使用真实计划和模型元数据，并在待审批时刷新摘
     assert.equal(budgetEvents.at(-1)?.summary?.pendingApproval?.actionId, result.pendingToolCall?.actionId);
     assert.ok(budgetEvents.at(-1)?.summary?.planStatus.some((item) => item.includes("in_progress: 修改实现")));
     assert.deepEqual(budgetEvents.at(-1)?.summary?.filesModified, ["src/changed.ts"]);
-    assert.equal(loaded.contextSummary?.pendingApproval?.toolName, "runCommand");
+    assert.equal(loaded.contextSummary?.pendingApproval?.toolName, "deleteFile");
   } finally {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }

@@ -875,7 +875,9 @@ test("context budget feature flag override can return to the legacy message path
   });
 
   assert.equal(sentMessageCount, messages.length - 1);
-  assert.equal(sentSystemPrompt, "rules");
+  assert.match(sentSystemPrompt, /^rules/);
+  // 即使关闭上下文压缩，Runtime 仍必须声明本轮没有可调用工具，避免模型伪造工具调用。
+  assert.match(sentSystemPrompt, /当前轮次没有可调用工具/);
   assert.equal(result.contextBudgetSnapshot, undefined);
 });
 
