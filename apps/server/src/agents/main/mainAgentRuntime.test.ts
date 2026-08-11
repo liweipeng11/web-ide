@@ -129,6 +129,58 @@ test("正式入口只执行一次路由并完成 direct 请求", async () => {
   assert.equal(result.execution.result.summary, "直接回答");
 });
 
+test("计划准备阶段将无依赖关系的 explore Task 按并发上限执行", async () => {
+  const routeModel = new RuntimeDecisionModel(
+    { intent: "analysis", complexity: "complex", route: "planned", requiredCapabilities: [] },
+    []
+  );
+  const planner = new PlannerAgent(new RuntimePlannerModel({
+    status: "ready",
+    plan: {
+      assumptions: [],
+      tasks: [
+        { id: "E1", type: "explore", goal: "读取入口", dependencies: [], acceptanceCriteria: ["入口已确认"] },
+        { id: "E2", type: "explore", goal: "读取配置", dependencies: [], acceptanceCriteria: ["配置已确认"] },
+        { id: "I1", type: "implement", goal: "等待人工批准", dependencies: ["E1", "E2"], acceptanceCriteria: ["不在计划阶段执行"] }
+      ],
+      completionCriteria: ["探索完成"]
+    }
+  }));
+  let active = 0;
+  let maxActive = 0;
+  const runtime = new MainAgentRuntime({
+    agent: new MainAgent(routeModel),
+    planner,
+    explorationConcurrency: 2,
+    explorer: {
+      async executePlanTask(plan, taskId) {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        active -= 1;
+        const artifact = successfulExploration();
+        return {
+          ...artifact,
+          result: { ...artifact.result, taskId },
+          state: {
+            ...artifact.state,
+            plan: { ...plan, tasks: plan.tasks.map((task) => task.id === taskId ? { ...task, status: "completed" as const } : { ...task }) },
+            status: "running"
+          }
+        };
+      }
+    }
+  });
+
+  const result = await runtime.planWithExploration({ goal: "分析认证系统", readScope: ["src/**"] });
+  assert.equal(maxActive, 2);
+  assert.equal(result.planning?.status, "ready");
+  if (result.planning?.status !== "ready") return;
+  assert.equal(result.planning.plan.tasks.find((task) => task.id === "E1")?.status, "completed");
+  assert.equal(result.planning.plan.tasks.find((task) => task.id === "E2")?.status, "completed");
+  assert.equal(result.planning.plan.tasks.find((task) => task.id === "I1")?.status, "pending");
+});
+
 test("direct 请求把入口已读代码作为事实交给 Main", async () => {
   const model = new RuntimeDecisionModel(
     { intent: "question", complexity: "simple", route: "direct", requiredCapabilities: [] },

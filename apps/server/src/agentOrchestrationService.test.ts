@@ -147,7 +147,26 @@ test("批准后的流水线连续持久化 Developer 和 Tester 产物", async (
             changedFiles: ["src/auth.ts"],
             results: [developer.execution.result, tester.execution.result],
             executions: [developer, tester],
-            trace: { calledAgents: ["main", "developer", "tester"], events: [] }
+            trace: {
+              traceId: "trace-stage8",
+              startedAt: 100,
+              finishedAt: 140,
+              calledAgents: ["main", "developer", "tester"],
+              events: [{
+                agent: "developer",
+                action: "execute",
+                taskId: "T1",
+                status: "success",
+                startedAt: 100,
+                finishedAt: 140,
+                durationMs: 40,
+                attempt: 2,
+                retries: 1,
+                timeoutMs: 60_000,
+                retryable: false,
+                failureCategory: "none"
+              }]
+            }
           };
         }
       },
@@ -166,6 +185,9 @@ test("批准后的流水线连续持久化 Developer 和 Tester 产物", async (
     assert.equal(restored.testerArtifacts?.at(-1)?.validation.status, "passed");
     assert.deepEqual(restored.commandsRun, ["pnpm test"]);
     assert.deepEqual(restored.orchestrationTrace?.calledAgents, ["main", "developer", "tester"]);
+    assert.equal(restored.orchestrationTrace?.traceId, "trace-stage8");
+    assert.equal(restored.orchestrationTrace?.events[0]?.durationMs, 40);
+    assert.equal(restored.orchestrationTrace?.events[0]?.retries, 1);
     assert.equal(restored.orchestrationSummary, result.orchestration.summary);
   });
 });

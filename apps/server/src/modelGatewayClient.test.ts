@@ -4,9 +4,45 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
-import { requestChatCompletion, requestChatCompletionStream } from "./modelGatewayClient.js";
+import { requestChatCompletion, requestChatCompletionStream, requestModelCompletionWithMetrics } from "./modelGatewayClient.js";
 import { withModelExecution } from "./modelExecutionContext.js";
 import { clearTaskMetricsForTest, getTaskMetricsSnapshot } from "./observability/index.js";
+
+test("Agent 模型入口只重试 Provider 明确标记的瞬时错误", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = config.aiApiKey;
+  const originalModels = config.aiModels;
+  const originalBaseDelay = config.agentRuntimeStabilityPolicy.retryBaseDelayMs;
+  const originalMaxDelay = config.agentRuntimeStabilityPolicy.retryMaxDelayMs;
+  const modelId = "stability-model";
+  let calls = 0;
+  config.aiApiKey = "test-key";
+  config.aiModels = [modelId];
+  config.agentRuntimeStabilityPolicy.retryBaseDelayMs = 1;
+  config.agentRuntimeStabilityPolicy.retryMaxDelayMs = 1;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) return new Response("temporarily unavailable", { status: 503 });
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "{}" } }],
+      usage: { prompt_tokens: 2, completion_tokens: 1 }
+    }), { status: 200 });
+  };
+  try {
+    const response = await requestModelCompletionWithMetrics(
+      { providerId: "openai-compatible", modelId },
+      { messages: [{ role: "user", content: "test" }], responseFormat: "json_object" }
+    );
+    assert.equal(response.message.content, "{}");
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.aiApiKey = originalKey;
+    config.aiModels = originalModels;
+    config.agentRuntimeStabilityPolicy.retryBaseDelayMs = originalBaseDelay;
+    config.agentRuntimeStabilityPolicy.retryMaxDelayMs = originalMaxDelay;
+  }
+});
 
 test("任务执行上下文覆盖请求体模型并记录普通聊天 Usage", async () => {
   const originalFetch = globalThis.fetch;

@@ -1,7 +1,7 @@
 import type { ModelSelection } from "../../contracts/model.js";
 import { config } from "../../config.js";
 import { getModelExecutionContext } from "../../modelExecutionContext.js";
-import { providerGateway } from "../../providers/index.js";
+import { requestModelCompletionWithMetrics } from "../../modelGatewayClient.js";
 import {
   MAIN_ACTION_SYSTEM_PROMPT,
   MAIN_REPLAN_SYSTEM_PROMPT,
@@ -10,10 +10,10 @@ import {
 } from "./prompt.js";
 
 export interface MainAgentDecisionModel {
-  route(userRequest: string): Promise<unknown>;
-  nextAction(input: string): Promise<unknown>;
-  summarize?(input: string): Promise<unknown>;
-  shouldReplan?(input: string): Promise<unknown>;
+  route(userRequest: string, signal?: AbortSignal): Promise<unknown>;
+  nextAction(input: string, signal?: AbortSignal): Promise<unknown>;
+  summarize?(input: string, signal?: AbortSignal): Promise<unknown>;
+  shouldReplan?(input: string, signal?: AbortSignal): Promise<unknown>;
 }
 
 function parseJsonResponse(content: string | null | undefined) {
@@ -26,33 +26,33 @@ function parseJsonResponse(content: string | null | undefined) {
 export class ProviderMainAgentDecisionModel implements MainAgentDecisionModel {
   constructor(private readonly selection?: ModelSelection) {}
 
-  private async complete(systemPrompt: string, content: string) {
+  private async complete(systemPrompt: string, content: string, signal?: AbortSignal) {
     const selection = this.selection ?? getModelExecutionContext()?.selection ?? {
       providerId: "openai-compatible",
       modelId: config.aiModel
     };
-    const response = await providerGateway.complete(selection, {
+    const response = await requestModelCompletionWithMetrics(selection, {
       systemPrompt,
       messages: [{ role: "user", content }],
       temperature: 0,
       responseFormat: "json_object"
-    });
+    }, signal);
     return parseJsonResponse(response.message.content);
   }
 
-  route(userRequest: string) {
-    return this.complete(MAIN_ROUTE_SYSTEM_PROMPT, userRequest);
+  route(userRequest: string, signal?: AbortSignal) {
+    return this.complete(MAIN_ROUTE_SYSTEM_PROMPT, userRequest, signal);
   }
 
-  nextAction(input: string) {
-    return this.complete(MAIN_ACTION_SYSTEM_PROMPT, input);
+  nextAction(input: string, signal?: AbortSignal) {
+    return this.complete(MAIN_ACTION_SYSTEM_PROMPT, input, signal);
   }
 
-  summarize(input: string) {
-    return this.complete(MAIN_SUMMARY_SYSTEM_PROMPT, input);
+  summarize(input: string, signal?: AbortSignal) {
+    return this.complete(MAIN_SUMMARY_SYSTEM_PROMPT, input, signal);
   }
 
-  shouldReplan(input: string) {
-    return this.complete(MAIN_REPLAN_SYSTEM_PROMPT, input);
+  shouldReplan(input: string, signal?: AbortSignal) {
+    return this.complete(MAIN_REPLAN_SYSTEM_PROMPT, input, signal);
   }
 }

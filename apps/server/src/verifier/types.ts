@@ -56,4 +56,5 @@ export type RunVerificationOptions = {
   changedFiles?: string[];
   failureCategories?: VerificationIssueCategory[];
   confirmed?: boolean;
+  signal?: AbortSignal;
 };

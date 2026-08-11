@@ -1,4 +1,4 @@
-import type { AgentResult, AgentTaskPacket, Plan, Task } from "../../runtime/contracts.js";
+import type { AgentResult, AgentTaskPacket, Plan, RuntimeExecutionDiagnostics, Task } from "../../runtime/contracts.js";
 import { AgentRegistry } from "../../runtime/agentRegistry.js";
 import { PermissionManager } from "../../runtime/permissionManager.js";
 import { RuntimeKernel } from "../../runtime/runtimeKernel.js";
@@ -8,10 +8,12 @@ import { runtimeError } from "../../runtime/errors.js";
 import type { DeveloperAgentResult, DeveloperCompletion } from "./contracts.js";
 import { DeveloperAgent } from "./developerAgent.js";
 import { DEVELOPER_TOOL_NAMES, developerRuntimeTools } from "./developerTools.js";
+import { config } from "../../config.js";
 
 export type DeveloperTaskOptions = {
   context?: unknown;
   constraints?: string[];
+  signal?: AbortSignal;
 };
 
 export type DeveloperExecution = {
@@ -19,6 +21,7 @@ export type DeveloperExecution = {
   implementation?: DeveloperCompletion;
   checkpointIds: string[];
   state: ReturnType<StateManager["getState"]>;
+  diagnostics?: RuntimeExecutionDiagnostics;
 };
 
 function packetFromTask(task: Task, options: DeveloperTaskOptions): AgentTaskPacket {
@@ -58,9 +61,10 @@ export class DeveloperAgentRuntime {
       agents: new AgentRegistry([this.agent]),
       tools: new ToolRegistry(developerRuntimeTools),
       permissions: new PermissionManager([{ agentId: this.agent.id, allowedTools: [...DEVELOPER_TOOL_NAMES] }]),
-      state
+      state,
+      executionPolicy: config.agentRuntimeStabilityPolicy
     });
-    const execution = await kernel.execute(this.agent.id, packetFromTask(task, options));
+    const execution = await kernel.execute(this.agent.id, packetFromTask(task, options), { signal: options.signal });
     const result = execution.result as Partial<DeveloperAgentResult>;
     if (execution.result.status === "success" && !result.implementation) {
       throw runtimeError("INVALID_CONTRACT", "Developer 成功结果缺少结构化实现摘要。", { taskId });
@@ -69,7 +73,8 @@ export class DeveloperAgentRuntime {
       result: execution.result,
       ...(result.implementation ? { implementation: result.implementation } : {}),
       checkpointIds: result.checkpointIds ?? [],
-      state: execution.state
+      state: execution.state,
+      diagnostics: execution.diagnostics
     };
   }
 }

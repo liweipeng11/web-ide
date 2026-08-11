@@ -161,6 +161,7 @@ export type MainNextActionContext = {
   routeDecision: RouteDecision;
   availableTools: RuntimeToolDescriptor[];
   observations: Array<{ tool: string; result: unknown }>;
+  signal?: AbortSignal;
 };
 
 export type MainSummaryInput = {
@@ -184,12 +185,13 @@ export class MainAgent implements Agent {
     }
   }
 
-  async route(userRequest: string) {
+  async route(userRequest: string, signal?: AbortSignal) {
     const goal = nonEmptyString(userRequest);
     if (!goal) throw runtimeError("INVALID_CONTRACT", "用户目标不能为空。");
     try {
-      return parseRouteDecision(await this.model.route(goal), goal);
-    } catch {
+      return parseRouteDecision(await this.model.route(goal, signal), goal);
+    } catch (error) {
+      if (signal?.aborted) throw runtimeError("AGENT_CANCELLED", "Main Agent 路由已取消。", { cause: error instanceof Error ? error.name : "unknown" });
       // 模型不可用或结构化输出非法时保守降级，复杂修改不会误入直接执行路径。
       return fallbackRoute(goal);
     }
@@ -223,7 +225,7 @@ export class MainAgent implements Agent {
       state,
       availableTools: context.availableTools,
       observations: context.observations
-    }));
+    }), context.signal);
     return parseNextAction(rawAction, context.availableTools);
   }
 
@@ -271,7 +273,8 @@ export class MainAgent implements Agent {
         task,
         routeDecision,
         availableTools: context.availableTools,
-        observations
+        observations,
+        signal: context.signal
       });
 
       if (action.type === "respond") {

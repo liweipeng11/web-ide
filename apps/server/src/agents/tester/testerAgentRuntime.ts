@@ -1,4 +1,4 @@
-import type { AgentResult, AgentTaskPacket, Plan, Task } from "../../runtime/contracts.js";
+import type { AgentResult, AgentTaskPacket, Plan, RuntimeExecutionDiagnostics, Task } from "../../runtime/contracts.js";
 import { AgentRegistry } from "../../runtime/agentRegistry.js";
 import { PermissionManager } from "../../runtime/permissionManager.js";
 import { RuntimeKernel } from "../../runtime/runtimeKernel.js";
@@ -8,6 +8,7 @@ import { runtimeError } from "../../runtime/errors.js";
 import type { AcceptanceEvidenceInput, TesterAgentResult, ValidationReport } from "./contracts.js";
 import { TesterAgent } from "./testerAgent.js";
 import { TESTER_TOOL_NAMES, testerRuntimeTools } from "./testerTools.js";
+import { config } from "../../config.js";
 
 export type TesterTaskOptions = {
   context?: unknown;
@@ -15,12 +16,14 @@ export type TesterTaskOptions = {
   changedFiles: string[];
   testScope: string[];
   acceptanceEvidence?: AcceptanceEvidenceInput[];
+  signal?: AbortSignal;
 };
 
 export type TesterExecution = {
   result: AgentResult;
   validation?: ValidationReport;
   state: ReturnType<StateManager["getState"]>;
+  diagnostics?: RuntimeExecutionDiagnostics;
 };
 
 function packetFromTask(task: Task, options: TesterTaskOptions): AgentTaskPacket {
@@ -65,9 +68,10 @@ export class TesterAgentRuntime {
       agents: new AgentRegistry([this.agent]),
       tools: new ToolRegistry(testerRuntimeTools),
       permissions: new PermissionManager([{ agentId: this.agent.id, allowedTools: [...TESTER_TOOL_NAMES] }]),
-      state
+      state,
+      executionPolicy: config.agentRuntimeStabilityPolicy
     });
-    const execution = await kernel.execute(this.agent.id, packetFromTask(task, options));
+    const execution = await kernel.execute(this.agent.id, packetFromTask(task, options), { signal: options.signal });
     const result = execution.result as Partial<TesterAgentResult>;
     if (execution.result.status === "success" && !result.validation) {
       throw runtimeError(
@@ -79,7 +83,8 @@ export class TesterAgentRuntime {
     return {
       result: execution.result,
       ...(result.validation ? { validation: result.validation } : {}),
-      state: execution.state
+      state: execution.state,
+      diagnostics: execution.diagnostics
     };
   }
 }

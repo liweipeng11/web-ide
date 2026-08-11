@@ -792,6 +792,9 @@ export type DeveloperArtifact = {
 };
 
 export type OrchestrationTrace = {
+  traceId?: string;
+  startedAt?: number;
+  finishedAt?: number;
   calledAgents: Array<"main" | "planner" | "explorer" | "developer" | "tester">;
   events: Array<{
     agent: "main" | "planner" | "explorer" | "developer" | "tester";
@@ -799,6 +802,15 @@ export type OrchestrationTrace = {
     taskId?: string;
     status?: "success" | "failed" | "blocked" | "ready" | "missing_context";
     reason?: string;
+    startedAt?: number;
+    finishedAt?: number;
+    durationMs?: number;
+    attempt?: number;
+    retries?: number;
+    timeoutMs?: number;
+    retryable?: boolean;
+    failureCategory?: "none" | "timeout" | "cancelled" | "model_error" | "tool_error" | "validation_failure" | "contract_error" | "permission_error" | "internal_error";
+    concurrencyGroup?: string;
   }>;
 };
 

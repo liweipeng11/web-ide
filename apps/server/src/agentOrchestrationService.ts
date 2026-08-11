@@ -199,6 +199,7 @@ export async function executeApprovedAgentPipeline(
     orchestrator?: OrchestratorFacade;
     testScope?: string[];
     acceptanceEvidence?: AcceptanceEvidenceInput[];
+    signal?: AbortSignal;
   } = {}
 ): Promise<ApprovedAgentPipelineResult> {
   if (session.agentMode !== "act") return { outcome: "not_applicable", reason: "任务不处于 act 模式。" };
@@ -233,7 +234,8 @@ export async function executeApprovedAgentPipeline(
     onPlanUpdate: async (plan) => {
       await setTaskSessionRuntimePlanning(session.id, { status: "ready", plan });
     },
-    onReplanExplorations: (plan, explorations) => persistReplanExplorations(session.id, plan, explorations)
+    onReplanExplorations: (plan, explorations) => persistReplanExplorations(session.id, plan, explorations),
+    signal: options.signal
   };
   const orchestration = await orchestrator.executePlan(
     decision,

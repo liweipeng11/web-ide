@@ -142,6 +142,22 @@ const agentRepeatToolCallThresholds = resolveAgentRepeatToolCallThresholds();
 const agentNoProgressPolicy = resolveAgentNoProgressPolicy();
 const agentBudgetPolicy = resolveAgentBudgetPolicy();
 
+export function resolveAgentRuntimeStabilityPolicy(env: NodeJS.ProcessEnv = process.env) {
+  const retryBaseDelayMs = positiveIntegerFromEnv("AI_AGENT_RETRY_BASE_DELAY_MS", 400, env);
+  const retryMaxDelayMs = positiveIntegerFromEnv("AI_AGENT_RETRY_MAX_DELAY_MS", 2_000, env);
+  return {
+    timeoutMs: positiveIntegerFromEnv("AI_AGENT_TIMEOUT_MS", 60_000, env),
+    maxAttempts: positiveIntegerFromEnv("AI_AGENT_MAX_ATTEMPTS", 3, env),
+    retryBaseDelayMs,
+    retryMaxDelayMs: Math.max(retryBaseDelayMs, retryMaxDelayMs),
+    maxConcurrency: positiveIntegerFromEnv("AI_AGENT_MAX_CONCURRENCY", 3, env),
+    maxOrchestrationSteps: positiveIntegerFromEnv("AI_AGENT_MAX_ORCHESTRATION_STEPS", 30, env),
+    maxReplans: positiveIntegerFromEnv("AI_AGENT_MAX_REPLANS", 3, env)
+  };
+}
+
+const agentRuntimeStabilityPolicy = resolveAgentRuntimeStabilityPolicy();
+
 export const config = {
   aiApiKey: process.env.AI_API_KEY || "",
   aiBaseUrl: process.env.AI_BASE_URL || "https://api.openai.com/v1",
@@ -164,6 +180,7 @@ export const config = {
   aiAgentRepeatBlockThreshold: agentRepeatToolCallThresholds.block,
   aiAgentMaxNoProgressSteps: agentNoProgressPolicy.maxSteps,
   aiAgentRecoveryAttempts: agentNoProgressPolicy.recoveryAttempts,
+  agentRuntimeStabilityPolicy,
   braveSearchApiKey: process.env.BRAVE_SEARCH_API_KEY || "",
   braveSearchBaseUrl: process.env.BRAVE_SEARCH_BASE_URL || "https://api.search.brave.com/res/v1/web/search",
   externalContextTimeoutMs: numberFromEnv("EXTERNAL_CONTEXT_TIMEOUT_MS", 15_000),

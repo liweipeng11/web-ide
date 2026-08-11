@@ -1188,7 +1188,7 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         taskSession.id,
         "act",
         modelSelection,
-        () => executeApprovedAgentPipeline(plannedTaskSession)
+        () => executeApprovedAgentPipeline(plannedTaskSession, { signal: controller.signal })
       );
       if (pipelineResult.outcome === "executed") {
         const { orchestration } = pipelineResult;
@@ -1340,7 +1340,8 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     const directMain = await runWithTaskModel(taskSession.id, "chat", modelSelection, () =>
       executeDirectMainRequest(plannedTaskSession || taskSession, {
         goal: userRequest.trim(),
-        knownFacts: contextFiles.map((file) => `文件 ${file.path}：\n${file.content}`)
+        knownFacts: contextFiles.map((file) => `文件 ${file.path}：\n${file.content}`),
+        signal: controller.signal
       })
     );
     if (directMain.outcome === "executed") {

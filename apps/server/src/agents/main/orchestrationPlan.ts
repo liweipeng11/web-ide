@@ -64,6 +64,14 @@ export function findRunnableTask(plan: Plan) {
   );
 }
 
+/** 返回同一依赖快照下全部可运行任务，具体并发权限仍由 Orchestrator 决定。 */
+export function findRunnableTasks(plan: Plan) {
+  const completed = new Set(plan.tasks.filter((task) => task.status === "completed").map((task) => task.id));
+  return plan.tasks.filter((task) =>
+    task.status === "pending" && task.dependencies.every((dependency) => completed.has(dependency))
+  );
+}
+
 export function concreteTestFiles(task: Task) {
   return task.readScope.filter((filePath) =>
     !/[?*]/.test(filePath) && /(?:^|\/)(?:tests?|__tests__)(?:\/|$)|\.(?:test|spec)\./i.test(filePath)

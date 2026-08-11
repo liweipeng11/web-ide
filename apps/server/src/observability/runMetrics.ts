@@ -255,7 +255,8 @@ export async function appendRunMetrics(metrics: RunMetrics, filePath = appStateP
 export function classifyRunFailure(error: unknown): RunFailureCategory {
   const detail = error && typeof error === "object" ? error as { name?: unknown; code?: unknown; status?: unknown; category?: unknown; message?: unknown } : {};
   if (detail.category && ["timeout", "model_error", "tool_error", "validation_failure", "cancelled", "internal_error"].includes(String(detail.category))) return detail.category as RunFailureCategory;
-  if (detail.name === "AbortError" || detail.code === "ABORT_ERR") return "cancelled";
+  if (detail.name === "AbortError" || detail.code === "ABORT_ERR" || detail.code === "AGENT_CANCELLED") return "cancelled";
+  if (detail.code === "AGENT_TIMEOUT") return "timeout";
   if (detail.code === "ETIMEDOUT" || detail.code === "UND_ERR_CONNECT_TIMEOUT" || detail.status === 408 || detail.status === 504) return "timeout";
   if (typeof detail.status === "number" && detail.status >= 400) return "model_error";
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();

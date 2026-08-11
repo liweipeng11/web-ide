@@ -2,7 +2,7 @@ import type { AcceptanceEvidenceInput } from "../tester/contracts.js";
 import type { ExplorerExecution } from "../explorer/explorerAgentRuntime.js";
 import type { DeveloperExecution } from "../developer/developerAgentRuntime.js";
 import type { TesterExecution } from "../tester/testerAgentRuntime.js";
-import type { AgentResult, Plan, RouteDecision, Task } from "../../runtime/contracts.js";
+import type { AgentResult, Plan, RouteDecision, RuntimeFailureCategory, Task } from "../../runtime/contracts.js";
 import type { MainAgentRequest, MainAgentRuntimeResult } from "./mainAgentRuntime.js";
 
 export type OrchestrationAgentId = "main" | "planner" | "explorer" | "developer" | "tester";
@@ -13,12 +13,24 @@ export interface OrchestrationTraceEvent {
   taskId?: string;
   status?: AgentResult["status"] | "ready" | "missing_context";
   reason?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  durationMs?: number;
+  attempt?: number;
+  retries?: number;
+  timeoutMs?: number;
+  retryable?: boolean;
+  failureCategory?: RuntimeFailureCategory;
+  concurrencyGroup?: string;
 }
 
 export interface OrchestrationTrace {
   /** 按首次调用顺序去重，便于 E2E 稳定断言实际参与的 Agent。 */
   calledAgents: OrchestrationAgentId[];
   events: OrchestrationTraceEvent[];
+  traceId?: string;
+  startedAt?: number;
+  finishedAt?: number;
 }
 
 export interface MainOrchestrationRequest extends MainAgentRequest {
@@ -60,8 +72,10 @@ export interface ExecuteOrchestrationPlanOptions {
     changedFiles: string[]
   ) => Promise<{ testScope: string[]; acceptanceEvidence: AcceptanceEvidenceInput[] }>;
   onExecution?: (execution: OrchestrationExecution) => Promise<void> | void;
-  onPlanUpdate?: (plan: Plan, reason: "scope_expansion" | "retry" | "replan") => Promise<void> | void;
+  onPlanUpdate?: (plan: Plan, reason: "scope_expansion" | "retry" | "replan" | "concurrency_merge") => Promise<void> | void;
   onReplanExplorations?: (plan: Plan, explorations: ExplorerExecution[]) => Promise<void> | void;
+  signal?: AbortSignal;
+  maxConcurrency?: number;
 }
 
 export type OrchestrationExecution =
@@ -70,7 +84,7 @@ export type OrchestrationExecution =
   | { agent: "tester"; execution: TesterExecution };
 
 export type MainOrchestrationResult = {
-  status: "completed" | "failed" | "blocked";
+  status: "completed" | "failed" | "blocked" | "cancelled";
   decision: RouteDecision;
   plan?: Plan;
   summary: string;

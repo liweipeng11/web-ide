@@ -31,15 +31,17 @@ import {
   createMainLoopPlan,
   DEFAULT_TEST_SCOPE,
   findRunnableTask,
+  findRunnableTasks,
   uniqueStrings
 } from "./orchestrationPlan.js";
+import { config } from "../../config.js";
 
 const DEFAULT_MAX_ORCHESTRATION_STEPS = 30;
 
 export interface MainOrchestrationRuntimeFacade {
   executeDecision(request: MainOrchestrationRequest, decision: RouteDecision): Promise<MainAgentRuntimeResult>;
   planWithExploration(request: MainOrchestrationRequest): Promise<MainAgentExplorationPlanningResult>;
-  executeExploreTask(plan: Plan, taskId: string, context?: unknown): Promise<ExplorerExecution>;
+  executeExploreTask(plan: Plan, taskId: string, context?: unknown, options?: { signal?: AbortSignal }): Promise<ExplorerExecution>;
   executeDeveloperTask(plan: Plan, taskId: string, options?: DeveloperTaskOptions): ReturnType<MainAgentRuntime["executeDeveloperTask"]>;
   executeTestTask(plan: Plan, taskId: string, options: TesterTaskOptions): ReturnType<MainAgentRuntime["executeTestTask"]>;
   summarize(input: MainSummaryInput): Promise<string>;
@@ -54,17 +56,23 @@ export interface MainOrchestrationRuntimeFacade {
 }
 
 function createTrace(): OrchestrationTrace {
-  return { calledAgents: [], events: [] };
+  const startedAt = Date.now();
+  return {
+    traceId: `orchestration-${startedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    startedAt,
+    calledAgents: [],
+    events: []
+  };
 }
 
 function recordTrace(trace: OrchestrationTrace, event: OrchestrationTraceEvent) {
   if (!trace.calledAgents.includes(event.agent)) trace.calledAgents.push(event.agent);
-  trace.events.push(event);
+  trace.events.push({ startedAt: Date.now(), ...event });
 }
 
 function cloneTrace(trace?: OrchestrationTrace): OrchestrationTrace {
   return trace
-    ? { calledAgents: [...trace.calledAgents], events: trace.events.map((event) => ({ ...event })) }
+    ? { ...trace, calledAgents: [...trace.calledAgents], events: trace.events.map((event) => ({ ...event })) }
     : createTrace();
 }
 
@@ -72,14 +80,18 @@ function cloneTrace(trace?: OrchestrationTrace): OrchestrationTrace {
 export class MainAgentOrchestrator {
   constructor(
     private readonly runtime: MainOrchestrationRuntimeFacade = new MainAgentRuntime(),
-    private readonly maxSteps = DEFAULT_MAX_ORCHESTRATION_STEPS,
-    private readonly maxReplans = DEFAULT_MAX_REPLANS
+    private readonly maxSteps = config.agentRuntimeStabilityPolicy.maxOrchestrationSteps ?? DEFAULT_MAX_ORCHESTRATION_STEPS,
+    private readonly maxReplans = config.agentRuntimeStabilityPolicy.maxReplans ?? DEFAULT_MAX_REPLANS,
+    private readonly maxConcurrency = config.agentRuntimeStabilityPolicy.maxConcurrency
   ) {
     if (!Number.isInteger(maxSteps) || maxSteps < 1) {
       throw runtimeError("INVALID_CONTRACT", "编排最大步数必须是正整数。", { maxSteps });
     }
     if (!Number.isInteger(maxReplans) || maxReplans < 1) {
       throw runtimeError("INVALID_CONTRACT", "最大重规划次数必须是正整数。", { maxReplans });
+    }
+    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
+      throw runtimeError("INVALID_CONTRACT", "最大并发数必须是正整数。", { maxConcurrency });
     }
   }
 
@@ -141,6 +153,7 @@ export class MainAgentOrchestrator {
   async run(request: MainOrchestrationRequest): Promise<MainOrchestrationResult> {
     const prepared = await this.prepare(request);
     if (prepared.status === "blocked") {
+      prepared.trace.finishedAt = Date.now();
       return {
         status: "blocked",
         decision: prepared.decision,
@@ -155,6 +168,7 @@ export class MainAgentOrchestrator {
       const execution = await this.runtime.executeDecision(request, prepared.decision);
       const successful = execution.outcome === "executed" && execution.execution.result.status === "success";
       recordTrace(prepared.trace, { agent: "main", action: successful ? "finish" : "stop" });
+      prepared.trace.finishedAt = Date.now();
       return {
         status: successful ? "completed" : "blocked",
         decision: prepared.decision,
@@ -186,6 +200,10 @@ export class MainAgentOrchestrator {
     options: ExecuteOrchestrationPlanOptions = {}
   ): Promise<MainOrchestrationResult> {
     validatePlan(initialPlan);
+    const executionConcurrency = options.maxConcurrency ?? this.maxConcurrency;
+    if (!Number.isInteger(executionConcurrency) || executionConcurrency < 1) {
+      throw runtimeError("INVALID_CONTRACT", "本次编排最大并发数必须是正整数。", { maxConcurrency: executionConcurrency });
+    }
     let plan = initialPlan;
     const trace = cloneTrace(options.trace);
     if (!trace.calledAgents.includes("main")) recordTrace(trace, { agent: "main", action: "route" });
@@ -203,6 +221,20 @@ export class MainAgentOrchestrator {
     };
 
     for (let step = 0; step < this.maxSteps; step += 1) {
+      if (options.signal?.aborted) {
+        recordTrace(trace, { agent: "main", action: "stop", status: "failed", reason: "用户已取消 Agent 编排。", failureCategory: "cancelled" });
+        trace.finishedAt = Date.now();
+        return {
+          status: "cancelled",
+          decision,
+          plan,
+          summary: "Agent 编排已取消。",
+          changedFiles,
+          results,
+          executions,
+          trace
+        };
+      }
       if (plan.tasks.every((task) => task.status === "completed")) {
         const summary = await this.runtime.summarize({
           goal: plan.goal,
@@ -211,6 +243,7 @@ export class MainAgentOrchestrator {
           changedFiles
         });
         recordTrace(trace, { agent: "main", action: "finish" });
+        trace.finishedAt = Date.now();
         return {
           status: "completed",
           decision,
@@ -227,6 +260,7 @@ export class MainAgentOrchestrator {
       if (!task) {
         const terminal = plan.tasks.find((item) => item.status === "failed" || item.status === "blocked");
         recordTrace(trace, { agent: "main", action: "stop", taskId: terminal?.id });
+        trace.finishedAt = Date.now();
         return {
           status: terminal?.status === "failed" ? "failed" : "blocked",
           decision,
@@ -239,19 +273,115 @@ export class MainAgentOrchestrator {
         };
       }
 
+      const runnableExplorers = findRunnableTasks(plan).filter((item) => item.type === "explore");
+      const availableSlots = Math.max(1, this.maxSteps - step);
+      const explorerBatch = runnableExplorers.slice(0, Math.min(executionConcurrency, availableSlots));
+      if (explorerBatch.length > 1) {
+        const concurrencyGroup = `explore-${plan.version}-${step + 1}`;
+        const batchExecutions = await Promise.all(explorerBatch.map(async (batchTask): Promise<OrchestrationExecution> => ({
+          agent: "explorer",
+          execution: await this.runtime.executeExploreTask(plan, batchTask.id, options.context ?? {}, { signal: options.signal })
+        })));
+        step += batchExecutions.length - 1;
+
+        // 各 Explorer 基于同一 Plan 快照运行，结果必须合并回唯一 Plan，不能采用最后返回者覆盖前者。
+        const batchStatuses = new Map(batchExecutions.map(({ execution }) => [
+          execution.result.taskId,
+          execution.result.status === "success" ? "completed" as const : execution.result.status
+        ]));
+        plan = {
+          ...plan,
+          tasks: plan.tasks.map((item) => batchStatuses.has(item.id)
+            ? { ...item, status: batchStatuses.get(item.id)! }
+            : item)
+        };
+        for (const batchExecution of batchExecutions) {
+          const batchResult = batchExecution.execution.result;
+          // 持久化回调接收合并后的统一 Plan，进程中断也不会恢复到同批次的局部快照。
+          batchExecution.execution.state.plan = plan;
+          executions.push(batchExecution);
+          results.push(batchResult);
+          changedFiles.splice(0, changedFiles.length, ...uniqueStrings([...changedFiles, ...batchResult.changedFiles]));
+          await options.onExecution?.(batchExecution);
+          const diagnostics = batchExecution.execution.diagnostics;
+          recordTrace(trace, {
+            agent: "explorer",
+            action: "execute",
+            taskId: batchResult.taskId,
+            status: batchResult.status,
+            concurrencyGroup,
+            ...(diagnostics
+              ? {
+                  startedAt: diagnostics.startedAt,
+                  finishedAt: diagnostics.finishedAt,
+                  durationMs: diagnostics.durationMs,
+                  attempt: diagnostics.attempts,
+                  retries: diagnostics.retries,
+                  timeoutMs: diagnostics.timeoutMs,
+                  retryable: diagnostics.retryable,
+                  failureCategory: diagnostics.failureCategory
+                }
+              : {})
+          });
+        }
+        await options.onPlanUpdate?.(plan, "concurrency_merge");
+
+        const cancelled = batchExecutions.find((item) => item.execution.diagnostics?.failureCategory === "cancelled");
+        if (cancelled) {
+          recordTrace(trace, { agent: "main", action: "stop", taskId: cancelled.execution.result.taskId, reason: "用户已取消 Agent 编排。", failureCategory: "cancelled" });
+          trace.finishedAt = Date.now();
+          return { status: "cancelled", decision, plan, summary: "Agent 编排已取消。", changedFiles, results, executions, trace };
+        }
+
+        const failedExecution = batchExecutions.find((item) => item.execution.result.status !== "success");
+        if (!failedExecution) continue;
+        const failedResult = failedExecution.execution.result;
+        const transition = await handleOrchestrationReplan({
+          runtime: this.runtime,
+          agent: "explorer",
+          plan,
+          result: failedResult,
+          results,
+          failureCounts,
+          authorizedScope,
+          constraints: options.constraints,
+          replanCount,
+          maxReplans: this.maxReplans,
+          runtimeDiagnostics: failedExecution.execution.diagnostics,
+          signal: options.signal
+        });
+        replanCount = transition.replanCount;
+        plan = transition.plan;
+        if (transition.traceEvent) recordTrace(trace, transition.traceEvent);
+        if (transition.planUpdate) {
+          validatePlan(plan);
+          await options.onPlanUpdate?.(plan, transition.planUpdate);
+        }
+        if (transition.action === "stop") {
+          const status = transition.status ?? "blocked";
+          const summary = transition.summary ?? failedResult.summary;
+          recordTrace(trace, { agent: "main", action: "stop", taskId: failedResult.taskId, status, reason: summary });
+          trace.finishedAt = Date.now();
+          return { status, decision, plan, summary, changedFiles, results, executions, trace };
+        }
+        continue;
+      }
+
       let execution: OrchestrationExecution | null = null;
       if (task.type === "explore") {
-        const explored = await this.runtime.executeExploreTask(plan, task.id, options.context ?? {});
+        const explored = await this.runtime.executeExploreTask(plan, task.id, options.context ?? {}, { signal: options.signal });
         execution = { agent: "explorer", execution: explored };
       } else if (task.type === "implement") {
         const developed = await this.runtime.executeDeveloperTask(plan, task.id, {
           context: options.context,
-          constraints: options.constraints
+          constraints: options.constraints,
+          signal: options.signal
         });
         execution = { agent: "developer", execution: developed };
       } else if (task.type === "test") {
         if (!changedFiles.length) {
           recordTrace(trace, { agent: "main", action: "stop", taskId: task.id });
+          trace.finishedAt = Date.now();
           return {
             status: "blocked",
             decision,
@@ -278,7 +408,8 @@ export class MainAgentOrchestrator {
           testScope,
           acceptanceEvidence: resolvedTestContext?.acceptanceEvidence.length
             ? resolvedTestContext.acceptanceEvidence
-            : acceptanceEvidenceForTask(task, options.acceptanceEvidence)
+            : acceptanceEvidenceForTask(task, options.acceptanceEvidence),
+          signal: options.signal
         });
         execution = { agent: "tester", execution: tested };
       } else {
@@ -307,8 +438,26 @@ export class MainAgentOrchestrator {
         agent: execution.agent,
         action: "execute",
         taskId: result.taskId,
-        status: result.status
+        status: result.status,
+        ...(execution.execution.diagnostics
+          ? {
+              startedAt: execution.execution.diagnostics.startedAt,
+              finishedAt: execution.execution.diagnostics.finishedAt,
+              durationMs: execution.execution.diagnostics.durationMs,
+              attempt: execution.execution.diagnostics.attempts,
+              retries: execution.execution.diagnostics.retries,
+              timeoutMs: execution.execution.diagnostics.timeoutMs,
+              retryable: execution.execution.diagnostics.retryable,
+              failureCategory: execution.execution.diagnostics.failureCategory
+            }
+          : {})
       });
+
+      if (execution.execution.diagnostics?.failureCategory === "cancelled") {
+        recordTrace(trace, { agent: "main", action: "stop", taskId: result.taskId, reason: "用户已取消 Agent 编排。", failureCategory: "cancelled" });
+        trace.finishedAt = Date.now();
+        return { status: "cancelled", decision, plan, summary: "Agent 编排已取消。", changedFiles, results, executions, trace };
+      }
 
       const transition = await handleOrchestrationReplan({
         runtime: this.runtime,
@@ -320,7 +469,9 @@ export class MainAgentOrchestrator {
         authorizedScope,
         constraints: options.constraints,
         replanCount,
-        maxReplans: this.maxReplans
+        maxReplans: this.maxReplans,
+        runtimeDiagnostics: execution.execution.diagnostics,
+        signal: options.signal
       });
       if (result.status === "success") failureCounts.delete(result.taskId);
       replanCount = transition.replanCount;
@@ -348,6 +499,7 @@ export class MainAgentOrchestrator {
         const status = transition.status ?? "blocked";
         const summary = transition.summary ?? result.summary;
         recordTrace(trace, { agent: "main", action: "stop", taskId: result.taskId, status, reason: summary });
+        trace.finishedAt = Date.now();
         return {
           status,
           decision,

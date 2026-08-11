@@ -1,6 +1,6 @@
 import { config } from "./config.js";
 import { fromOpenAiChatCompletionBody } from "./contracts/openAiCompatibility.js";
-import type { ModelEvent, ModelResponse, ModelSelection, ModelUsage } from "./contracts/model.js";
+import type { ModelEvent, ModelRequest, ModelResponse, ModelSelection, ModelUsage } from "./contracts/model.js";
 import {
   requestChatCompletion as requestLegacyCompletion,
   requestChatCompletionStream as requestLegacyStream,
@@ -11,6 +11,8 @@ import {
 import { getModelExecutionContext } from "./modelExecutionContext.js";
 import { RunMetricsTracker, classifyRunFailure } from "./observability/index.js";
 import { ProviderError, providerGateway } from "./providers/index.js";
+import { abortableDelay, retryDelayMs, runControlled } from "./runtime/executionControl.js";
+import { AgentRuntimeError, runtimeError } from "./runtime/errors.js";
 
 export type GatewayCompatibleCompletionResponse = {
   choices?: Array<{
@@ -73,14 +75,51 @@ async function createMetrics(selection: ModelSelection) {
   return tracker;
 }
 
+/** 五 Agent 共用的带 Usage/费用采集模型入口，避免绕过任务级资源指标。 */
+export async function requestModelCompletionWithMetrics(
+  selection: ModelSelection,
+  request: Omit<ModelRequest, "model">,
+  signal?: AbortSignal
+): Promise<ModelResponse> {
+  const policy = config.agentRuntimeStabilityPolicy;
+  for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
+    const tracker = await createMetrics(selection);
+    const startedAt = Date.now();
+    try {
+      const response = await runControlled({
+        timeoutMs: policy.timeoutMs,
+        signal,
+        operation: (controlledSignal) => providerGateway.complete(selection, request, controlledSignal)
+      });
+      tracker?.recordFirstTokenLatency(response.firstTokenLatencyMs ?? Date.now() - startedAt, response.firstTokenLatencyMs === undefined ? "completion_upper_bound" : "provider");
+      tracker?.addUsage(response.usage);
+      await tracker?.finish({ status: "completed" });
+      return response;
+    } catch (error) {
+      await tracker?.finish({
+        status: error instanceof ProviderError && error.code === "cancelled" ? "cancelled" : "failed",
+        failureCategory: classifyRunFailure(error)
+      });
+      const retryable = (error instanceof ProviderError && error.retryable)
+        || (error instanceof AgentRuntimeError && error.code === "AGENT_TIMEOUT");
+      if (!retryable) throw error;
+      if (attempt >= policy.maxAttempts) {
+        throw runtimeError("AGENT_RETRY_EXHAUSTED", `模型服务在 ${attempt} 次尝试后仍不可用。`, {
+          attempts: attempt,
+          providerCode: error instanceof ProviderError ? error.code : "timeout"
+        });
+      }
+      await abortableDelay(retryDelayMs(policy, attempt), signal);
+    }
+  }
+  throw runtimeError("AGENT_RETRY_EXHAUSTED", "模型服务重试次数已耗尽。");
+}
+
 export async function requestChatCompletion(body: Record<string, unknown>, signal?: AbortSignal): Promise<GatewayCompatibleCompletionResponse> {
   if (!config.featureFlags.modelProviderGateway) return requestLegacyCompletion(body, signal);
   const selection = selectionFor(body);
   const request = fromOpenAiChatCompletionBody({ ...body, model: selection.modelId });
-  const tracker = await createMetrics(selection);
-  const startedAt = Date.now();
-  try {
-    const response = await providerGateway.complete(selection, {
+  const response = await requestModelCompletionWithMetrics(selection, {
       systemPrompt: request.systemPrompt,
       messages: request.messages,
       temperature: request.temperature,
@@ -88,14 +127,7 @@ export async function requestChatCompletion(body: Record<string, unknown>, signa
       toolChoice: request.toolChoice,
       responseFormat: request.responseFormat
     }, signal);
-    tracker?.recordFirstTokenLatency(response.firstTokenLatencyMs ?? Date.now() - startedAt, response.firstTokenLatencyMs === undefined ? "completion_upper_bound" : "provider");
-    tracker?.addUsage(response.usage);
-    await tracker?.finish({ status: "completed" });
-    return toCompatibleResponse(response);
-  } catch (error) {
-    await tracker?.finish({ status: error instanceof ProviderError && error.code === "cancelled" ? "cancelled" : "failed", failureCategory: classifyRunFailure(error) });
-    throw error;
-  }
+  return toCompatibleResponse(response);
 }
 
 function isCompatibilityError(error: unknown) {

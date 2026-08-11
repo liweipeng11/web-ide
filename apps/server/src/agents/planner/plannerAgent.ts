@@ -226,14 +226,16 @@ export class PlannerAgent {
         goal,
         knownFacts: stringArray(input.knownFacts, "knownFacts", { allowEmpty: true }),
         constraints: stringArray(input.constraints, "constraints", { allowEmpty: true }),
+        signal: input.signal,
         ...scope
       };
     } catch (error) {
       return failedResult(error, "input");
     }
     try {
-      return parseResult(await this.model.createPlan(buildCreatePlanPrompt(normalizedInput)), normalizedInput.goal, 1, normalizedInput);
+      return parseResult(await this.model.createPlan(buildCreatePlanPrompt(normalizedInput), normalizedInput.signal), normalizedInput.goal, 1, normalizedInput);
     } catch (error) {
+      if (normalizedInput.signal?.aborted) throw runtimeError("AGENT_CANCELLED", "Planner 创建计划已取消。");
       return failedResult(error, "model");
     }
   }
@@ -248,6 +250,7 @@ export class PlannerAgent {
         completedTasks: stringArray(input.completedTasks, "completedTasks", { allowEmpty: true }),
         newFacts: stringArray(input.newFacts, "newFacts", { allowEmpty: true }),
         constraints: stringArray(input.constraints, "constraints", { allowEmpty: true }),
+        signal: input.signal,
         ...scope
       };
     } catch (error) {
@@ -255,7 +258,7 @@ export class PlannerAgent {
     }
     try {
       const result = parseResult(
-        await this.model.replan(buildReplanPrompt(normalizedInput)),
+        await this.model.replan(buildReplanPrompt(normalizedInput), normalizedInput.signal),
         input.oldPlan.goal,
         input.oldPlan.version + 1,
         normalizedInput,
@@ -265,6 +268,7 @@ export class PlannerAgent {
       if (result.status === "ready") preserveCompletedTasks(result.plan, normalizedInput);
       return result;
     } catch (error) {
+      if (normalizedInput.signal?.aborted) throw runtimeError("AGENT_CANCELLED", "Planner 重规划已取消。");
       return failedResult(error, "model");
     }
   }

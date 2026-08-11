@@ -1,11 +1,11 @@
 import type { ModelSelection } from "../../contracts/model.js";
 import { config } from "../../config.js";
 import { getModelExecutionContext } from "../../modelExecutionContext.js";
-import { providerGateway } from "../../providers/index.js";
+import { requestModelCompletionWithMetrics } from "../../modelGatewayClient.js";
 import { DEVELOPER_SYSTEM_PROMPT } from "./prompt.js";
 
 export interface DeveloperAgentDecisionModel {
-  nextAction(input: string): Promise<unknown>;
+  nextAction(input: string, signal?: AbortSignal): Promise<unknown>;
 }
 
 function parseJsonResponse(content: string | null | undefined) {
@@ -18,17 +18,17 @@ function parseJsonResponse(content: string | null | undefined) {
 export class ProviderDeveloperAgentDecisionModel implements DeveloperAgentDecisionModel {
   constructor(private readonly selection?: ModelSelection) {}
 
-  async nextAction(input: string) {
+  async nextAction(input: string, signal?: AbortSignal) {
     const selection = this.selection ?? getModelExecutionContext()?.selection ?? {
       providerId: "openai-compatible",
       modelId: config.aiModel
     };
-    const response = await providerGateway.complete(selection, {
+    const response = await requestModelCompletionWithMetrics(selection, {
       systemPrompt: DEVELOPER_SYSTEM_PROMPT,
       messages: [{ role: "user", content: input }],
       temperature: 0,
       responseFormat: "json_object"
-    });
+    }, signal);
     return parseJsonResponse(response.message.content);
   }
 }

@@ -90,6 +90,8 @@ export type RuntimeToolEffect = "none" | "read" | "write" | "execute";
 export interface RuntimeToolExecutionContext {
   agentId: string;
   task: AgentTaskPacket;
+  /** 由 Runtime 统一管理的取消信号，工具应在长耗时边界主动响应。 */
+  signal?: AbortSignal;
 }
 
 /** 工具必须声明副作用，并向权限层暴露实际目标路径。 */
@@ -111,6 +113,8 @@ export interface AgentContext {
   agentId: string;
   state: Readonly<AgentState>;
   availableTools: RuntimeToolDescriptor[];
+  /** 同时响应用户取消和 Agent 超时。 */
+  signal?: AbortSignal;
   getState: () => Readonly<AgentState>;
   callTool: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
 }
@@ -129,4 +133,29 @@ export interface AgentPermissionPolicy {
 export interface RuntimeExecutionResult {
   result: AgentResult;
   state: AgentState;
+  /** 旧测试替身和历史适配器可不提供，生产 Runtime 始终生成。 */
+  diagnostics?: RuntimeExecutionDiagnostics;
+}
+
+export type RuntimeFailureCategory =
+  | "none"
+  | "timeout"
+  | "cancelled"
+  | "model_error"
+  | "tool_error"
+  | "validation_failure"
+  | "contract_error"
+  | "permission_error"
+  | "internal_error";
+
+/** 不包含提示词或文件正文，只记录稳定性诊断所需的有界元数据。 */
+export interface RuntimeExecutionDiagnostics {
+  attempts: number;
+  retries: number;
+  startedAt: number;
+  finishedAt: number;
+  durationMs: number;
+  timeoutMs: number;
+  failureCategory: RuntimeFailureCategory;
+  retryable: boolean;
 }

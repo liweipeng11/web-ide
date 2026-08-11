@@ -18,6 +18,7 @@ export type RunProjectCommandOptions = {
   readyPattern?: string;
   initiator?: "agent" | "validation" | "user";
   ci?: boolean;
+  signal?: AbortSignal;
 };
 
 export function resolveCommandCwd(cwd?: string) {
@@ -41,6 +42,7 @@ export function resolveCommandCwd(cwd?: string) {
 export async function runProjectCommand(command: string, cwd?: string, chatId?: string, confirmed = false, options: RunProjectCommandOptions = {}) {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) throw new HttpError(400, "command is required");
+  if (options.signal?.aborted) throw new HttpError(499, "Command execution cancelled");
 
   const workspaceRoot = getWorkspaceRoot();
   if (!workspaceRoot) throw new HttpError(400, "Open a workspace before running commands");
@@ -64,11 +66,19 @@ export async function runProjectCommand(command: string, cwd?: string, chatId?: 
     executionTimeoutMs: options.executionTimeoutMs ?? (mode === "background" ? undefined : commandTimeoutMs),
     readyPattern: options.readyPattern
   });
-  const execution = await commandExecutionService.waitForState(started.id, {
-    until: mode === "background" ? "ready_or_finished" : "finished",
-    timeoutMs: options.waitTimeoutMs ?? (mode === "background" ? 15_000 : commandTimeoutMs),
-    killOnTimeout: false
-  });
+  const onAbort = () => { void commandExecutionService.stop(started.id); };
+  if (options.signal?.aborted) onAbort();
+  else options.signal?.addEventListener("abort", onAbort, { once: true });
+  let execution;
+  try {
+    execution = await commandExecutionService.waitForState(started.id, {
+      until: mode === "background" ? "ready_or_finished" : "finished",
+      timeoutMs: options.waitTimeoutMs ?? (mode === "background" ? 15_000 : commandTimeoutMs),
+      killOnTimeout: false
+    });
+  } finally {
+    options.signal?.removeEventListener("abort", onAbort);
+  }
   const { stdout, stderr } = commandExecutionService.readCapturedOutput(started.id);
   const summary = parseCommandOutput({
     command: trimmedCommand,

@@ -1001,19 +1001,36 @@ function normalizeOrchestrationTrace(value: unknown): TaskSession["orchestration
         const item = event as Record<string, unknown>;
         if (typeof item.agent !== "string" || !allowedAgents.has(item.agent)
           || typeof item.action !== "string" || !allowedActions.has(item.action)) return [];
-        const status: "success" | "failed" | "blocked" | "ready" | "missing_context" | undefined =
+         const status: "success" | "failed" | "blocked" | "ready" | "missing_context" | undefined =
           item.status === "success" || item.status === "failed" || item.status === "blocked"
           || item.status === "ready" || item.status === "missing_context" ? item.status : undefined;
         return [{
           agent: item.agent as "main" | "planner" | "explorer" | "developer" | "tester",
           action: item.action as "route" | "plan" | "replan" | "execute" | "finish" | "stop",
           ...(typeof item.taskId === "string" && item.taskId.trim() ? { taskId: item.taskId } : {}),
-          ...(status ? { status } : {}),
-          ...(typeof item.reason === "string" && item.reason.trim() ? { reason: item.reason.trim() } : {})
-        }];
+           ...(status ? { status } : {}),
+           ...(typeof item.reason === "string" && item.reason.trim() ? { reason: item.reason.trim() } : {}),
+           ...(typeof item.startedAt === "number" && Number.isFinite(item.startedAt) ? { startedAt: item.startedAt } : {}),
+           ...(typeof item.finishedAt === "number" && Number.isFinite(item.finishedAt) ? { finishedAt: item.finishedAt } : {}),
+           ...(typeof item.durationMs === "number" && Number.isFinite(item.durationMs) && item.durationMs >= 0 ? { durationMs: item.durationMs } : {}),
+           ...(typeof item.attempt === "number" && Number.isInteger(item.attempt) && item.attempt > 0 ? { attempt: item.attempt } : {}),
+           ...(typeof item.retries === "number" && Number.isInteger(item.retries) && item.retries >= 0 ? { retries: item.retries } : {}),
+           ...(typeof item.timeoutMs === "number" && Number.isInteger(item.timeoutMs) && item.timeoutMs > 0 ? { timeoutMs: item.timeoutMs } : {}),
+           ...(typeof item.retryable === "boolean" ? { retryable: item.retryable } : {}),
+           ...(["none", "timeout", "cancelled", "model_error", "tool_error", "validation_failure", "contract_error", "permission_error", "internal_error"].includes(String(item.failureCategory))
+             ? { failureCategory: item.failureCategory as import("./runtime/contracts.js").RuntimeFailureCategory }
+             : {}),
+           ...(typeof item.concurrencyGroup === "string" && item.concurrencyGroup.trim() ? { concurrencyGroup: item.concurrencyGroup.trim() } : {})
+         }];
       }).slice(-200)
     : [];
-  return { calledAgents, events };
+  return {
+    calledAgents,
+    events,
+    ...(typeof record.traceId === "string" && record.traceId.trim() ? { traceId: record.traceId.trim() } : {}),
+    ...(typeof record.startedAt === "number" && Number.isFinite(record.startedAt) ? { startedAt: record.startedAt } : {}),
+    ...(typeof record.finishedAt === "number" && Number.isFinite(record.finishedAt) ? { finishedAt: record.finishedAt } : {})
+  };
 }
 
 function normalizeTaskSession(session: TaskSession): TaskSession {

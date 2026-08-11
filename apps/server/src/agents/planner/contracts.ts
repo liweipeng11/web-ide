@@ -3,6 +3,7 @@ import type { AgentState, Plan } from "../../runtime/contracts.js";
 export type PlannerScope = {
   readScope: string[];
   writeScope: string[];
+  signal?: AbortSignal;
 };
 
 /** Planner 创建计划时只消费 Main 提供的目标、事实和安全边界。 */

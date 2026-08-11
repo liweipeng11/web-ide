@@ -1,12 +1,12 @@
 import type { ModelSelection } from "../../contracts/model.js";
 import { config } from "../../config.js";
 import { getModelExecutionContext } from "../../modelExecutionContext.js";
-import { providerGateway } from "../../providers/index.js";
+import { requestModelCompletionWithMetrics } from "../../modelGatewayClient.js";
 import { PLANNER_CREATE_SYSTEM_PROMPT, PLANNER_REPLAN_SYSTEM_PROMPT } from "./prompt.js";
 
 export interface PlannerAgentDecisionModel {
-  createPlan(input: string): Promise<unknown>;
-  replan(input: string): Promise<unknown>;
+  createPlan(input: string, signal?: AbortSignal): Promise<unknown>;
+  replan(input: string, signal?: AbortSignal): Promise<unknown>;
 }
 
 function parseJsonResponse(content: string | null | undefined) {
@@ -19,26 +19,26 @@ function parseJsonResponse(content: string | null | undefined) {
 export class ProviderPlannerAgentDecisionModel implements PlannerAgentDecisionModel {
   constructor(private readonly selection?: ModelSelection) {}
 
-  private async complete(systemPrompt: string, content: string) {
+  private async complete(systemPrompt: string, content: string, signal?: AbortSignal) {
     // 生产任务优先复用当前 AsyncLocalStorage 中的模型选择，测试和独立调用仍可显式注入。
     const selection = this.selection ?? getModelExecutionContext()?.selection ?? {
       providerId: "openai-compatible",
       modelId: config.aiModel
     };
-    const response = await providerGateway.complete(selection, {
+    const response = await requestModelCompletionWithMetrics(selection, {
       systemPrompt,
       messages: [{ role: "user", content }],
       temperature: 0,
       responseFormat: "json_object"
-    });
+    }, signal);
     return parseJsonResponse(response.message.content);
   }
 
-  createPlan(input: string) {
-    return this.complete(PLANNER_CREATE_SYSTEM_PROMPT, input);
+  createPlan(input: string, signal?: AbortSignal) {
+    return this.complete(PLANNER_CREATE_SYSTEM_PROMPT, input, signal);
   }
 
-  replan(input: string) {
-    return this.complete(PLANNER_REPLAN_SYSTEM_PROMPT, input);
+  replan(input: string, signal?: AbortSignal) {
+    return this.complete(PLANNER_REPLAN_SYSTEM_PROMPT, input, signal);
   }
 }

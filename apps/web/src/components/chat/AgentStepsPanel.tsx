@@ -207,13 +207,13 @@ function getAgentObservationChips(step: AgentStep) {
 
   // 阶段 7：子代理步骤观测信息
   if (step.type === "subagent_created") {
-    const chips: string[] = [`种类：${step.kind === "analysis" ? "分析" : step.kind === "implementation" ? "实施" : step.kind === "planning" ? "规划" : "验证"}`];
+    const chips: string[] = [`种类：${step.kind === "analysis" ? "分析" : step.kind === "implementation" ? "实施" : "验证"}`];
     if (step.scope.allowedFilePaths?.length) chips.push(`${step.scope.allowedFilePaths.length}个文件`);
     if (step.scope.allowedFileGlobs?.length) chips.push(`${step.scope.allowedFileGlobs.length}个glob`);
     return chips;
   }
   if (step.type === "subagent_succeeded") {
-    const chips: string[] = [`产物：${step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : step.artifactsKind === "modification_plan" ? "修改计划" : "执行报告"}`];
+    const chips: string[] = [`产物：${step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : "执行报告"}`];
     if (step.relevantFiles?.length) chips.push(`${step.relevantFiles.length}个文件`);
     if (step.producedPatchCount) chips.push(`${step.producedPatchCount}个补丁`);
     return chips;
@@ -442,7 +442,7 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
 
   // 阶段 7：子代理生命周期步骤视图
   if (step.type === "subagent_created") {
-    const kindLabel = step.kind === "analysis" ? "分析" : step.kind === "implementation" ? "实施" : step.kind === "planning" ? "规划" : "验证";
+    const kindLabel = step.kind === "analysis" ? "分析" : step.kind === "implementation" ? "实施" : "验证";
     return {
       label: `委派${kindLabel}子代理`,
       title: step.title,
@@ -453,7 +453,7 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
     return { label: "子代理启动", title: `子代理 ${step.subagentId} 开始运行`, detail: `模式：${step.mode} / runId：${step.runId.slice(0, 8)}...` };
   }
   if (step.type === "subagent_succeeded") {
-    const kindLabel = step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : step.artifactsKind === "modification_plan" ? "修改计划" : "执行报告";
+    const kindLabel = step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : "执行报告";
     return {
       label: "子代理完成",
       title: `子代理 ${step.subagentId} 成功完成`,
@@ -475,7 +475,7 @@ function getAgentStepView(step: AgentStep): { label: string; title: string; deta
     };
   }
   if (step.type === "subagent_artifacts_recovered") {
-    const kindLabel = step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : step.artifactsKind === "modification_plan" ? "修改计划" : "执行报告";
+    const kindLabel = step.artifactsKind === "analysis" ? "分析" : step.artifactsKind === "proposed_patch" ? "补丁" : "执行报告";
     return {
       label: "产物恢复",
       title: `已恢复子代理 ${step.subagentId} 的${kindLabel}产物`,

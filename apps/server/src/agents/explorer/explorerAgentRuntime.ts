@@ -1,4 +1,4 @@
-import type { AgentResult, AgentTaskPacket, Plan, Task } from "../../runtime/contracts.js";
+import type { AgentResult, AgentTaskPacket, Plan, RuntimeExecutionDiagnostics, Task } from "../../runtime/contracts.js";
 import { AgentRegistry } from "../../runtime/agentRegistry.js";
 import { PermissionManager } from "../../runtime/permissionManager.js";
 import { RuntimeKernel } from "../../runtime/runtimeKernel.js";
@@ -8,11 +8,13 @@ import { runtimeError } from "../../runtime/errors.js";
 import type { ExplorerAgentResult, ExplorerResult } from "./contracts.js";
 import { ExplorerAgent } from "./explorerAgent.js";
 import { EXPLORER_TOOL_NAMES, explorerRuntimeTools } from "./explorerTools.js";
+import { config } from "../../config.js";
 
 export type ExplorerExecution = {
   result: AgentResult;
   exploration?: ExplorerResult;
   state: ReturnType<StateManager["getState"]>;
+  diagnostics?: RuntimeExecutionDiagnostics;
 };
 
 function packetFromTask(task: Task, context: unknown = {}): AgentTaskPacket {
@@ -32,7 +34,7 @@ function packetFromTask(task: Task, context: unknown = {}): AgentTaskPacket {
 export class ExplorerAgentRuntime {
   constructor(private readonly agent: ExplorerAgent = new ExplorerAgent()) {}
 
-  async executePlanTask(plan: Plan, taskId: string, context: unknown = {}): Promise<ExplorerExecution> {
+  async executePlanTask(plan: Plan, taskId: string, context: unknown = {}, options: { signal?: AbortSignal } = {}): Promise<ExplorerExecution> {
     validatePlan(plan);
     const task = plan.tasks.find((item) => item.id === taskId);
     if (!task) throw runtimeError("TASK_NOT_FOUND", `计划中不存在任务 ${taskId}。`, { taskId });
@@ -48,9 +50,10 @@ export class ExplorerAgentRuntime {
       agents: new AgentRegistry([this.agent]),
       tools: new ToolRegistry(explorerRuntimeTools),
       permissions: new PermissionManager([{ agentId: this.agent.id, allowedTools: [...EXPLORER_TOOL_NAMES] }]),
-      state
+      state,
+      executionPolicy: config.agentRuntimeStabilityPolicy
     });
-    const execution = await kernel.execute(this.agent.id, packetFromTask(task, context));
+    const execution = await kernel.execute(this.agent.id, packetFromTask(task, context), options);
     const result = execution.result as Partial<ExplorerAgentResult>;
     if (execution.result.status === "success" && !result.exploration) {
       throw runtimeError("INVALID_CONTRACT", "Explorer 成功结果缺少结构化探索产物。", { taskId });
@@ -58,7 +61,8 @@ export class ExplorerAgentRuntime {
     return {
       result: execution.result,
       ...(result.exploration ? { exploration: result.exploration } : {}),
-      state: execution.state
+      state: execution.state,
+      diagnostics: execution.diagnostics
     };
   }
 }

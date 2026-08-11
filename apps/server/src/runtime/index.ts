@@ -6,3 +6,5 @@ export * from "./toolRegistry.js";
 export * from "./permissionManager.js";
 export * from "./runtimeKernel.js";
 export * from "./legacyToolAdapter.js";
+export * from "./executionControl.js";
+export * from "./retryPolicy.js";

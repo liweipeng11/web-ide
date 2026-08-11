@@ -101,7 +101,8 @@ export function createTesterRuntimeTools(dependencies: TesterToolDependencies = 
       return dependencies.runVerification({
         workspaceRoot,
         changedFiles: [...new Set([...changedFiles, ...matchedTests])],
-        confirmed: false
+        confirmed: false,
+        signal: context.signal
       });
     }
   }];

@@ -629,6 +629,11 @@ export default function ChatPanel({
                 {agentLabels[event.agent]} · {actionLabels[event.action]}
                 {event.taskId ? ` · ${event.taskId}` : ""}
                 {event.status ? ` · ${event.status}` : ""}
+                {event.durationMs !== undefined ? ` · ${event.durationMs}ms` : ""}
+                {event.attempt && event.attempt > 1 ? ` · 第 ${event.attempt} 次尝试` : ""}
+                {event.retries ? ` · 重试 ${event.retries} 次` : ""}
+                {event.failureCategory && event.failureCategory !== "none" ? ` · ${event.failureCategory}` : ""}
+                {event.concurrencyGroup ? ` · 并发组 ${event.concurrencyGroup}` : ""}
                 {event.reason ? ` · ${event.reason}` : ""}
               </li>
             ))}

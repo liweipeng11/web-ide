@@ -25,7 +25,7 @@ export type DeveloperToolDependencies = {
     cwd?: string,
     chatId?: string,
     confirmed?: boolean,
-    options?: { mode?: "foreground"; initiator?: "agent" }
+    options?: { mode?: "foreground"; initiator?: "agent"; signal?: AbortSignal }
   ) => Promise<CommandResult>;
 };
 
@@ -229,7 +229,7 @@ function createLocalCheckTool(dependencies: DeveloperToolDependencies): RuntimeT
       required: ["command"],
       additionalProperties: false
     },
-    async execute(args) {
+    async execute(args, context) {
       const command = requiredString(args, "command");
       const cwd = optionalString(args, "cwd");
       const script = parsePackageScript(command)?.script;
@@ -248,7 +248,8 @@ function createLocalCheckTool(dependencies: DeveloperToolDependencies): RuntimeT
       }
       const result = await dependencies.runProjectCommand(command, cwd, undefined, false, {
         mode: "foreground",
-        initiator: "agent"
+        initiator: "agent",
+        signal: context.signal
       });
       return summarizeCommandResult(result);
     }

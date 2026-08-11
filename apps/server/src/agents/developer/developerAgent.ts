@@ -141,7 +141,7 @@ export class DeveloperAgent implements Agent {
 
     for (let step = 1; step <= this.maxSteps; step += 1) {
       const action = parseAction(
-        await this.model.nextAction(buildDeveloperPrompt(task, context.availableTools, observations)),
+        await this.model.nextAction(buildDeveloperPrompt(task, context.availableTools, observations), context.signal),
         context.availableTools
       );
       if (action.type === "request_scope_change") {

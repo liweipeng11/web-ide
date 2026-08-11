@@ -27,6 +27,7 @@ import { MainAgent } from "./mainAgent.js";
 import type { MainSummaryInput } from "./mainAgent.js";
 import type { ReplanPolicyInput } from "./replanPolicy.js";
 import { DEFAULT_MAX_REPLANS, SAME_TASK_FAILURE_REPLAN_THRESHOLD } from "./replanPolicy.js";
+import { config } from "../../config.js";
 
 export type MainAgentRequest = {
   goal: string;
@@ -36,6 +37,7 @@ export type MainAgentRequest = {
   readScope?: string[];
   writeScope?: string[];
   allowedTools?: string[];
+  signal?: AbortSignal;
 };
 
 export type MainAgentRuntimeResult =
@@ -71,6 +73,7 @@ export type MainAgentReplanRequest = {
   constraints?: string[];
   readScope?: string[];
   writeScope?: string[];
+  signal?: AbortSignal;
 };
 
 export type MainAgentReplanExecution = {
@@ -99,6 +102,8 @@ export type MainAgentRuntimeOptions = {
   tester?: Pick<TesterAgentRuntime, "executePlanTask">;
   tools?: RuntimeTool[];
   allowedTools?: string[];
+  /** 计划准备阶段同层 explore 任务的最大并发数，默认复用运行时稳定性策略。 */
+  explorationConcurrency?: number;
 };
 
 function taskTypeFor(decision: RouteDecision): TaskType {
@@ -156,6 +161,7 @@ export class MainAgentRuntime {
   private readonly tester: Pick<TesterAgentRuntime, "executePlanTask">;
   private readonly tools: ToolRegistry;
   private readonly policyTools: string[];
+  private readonly explorationConcurrency: number;
 
   constructor(options: MainAgentRuntimeOptions = {}) {
     this.agent = options.agent ?? new MainAgent();
@@ -165,6 +171,7 @@ export class MainAgentRuntime {
     this.tester = options.tester ?? new TesterAgentRuntime();
     this.tools = new ToolRegistry(options.tools ?? []);
     this.policyTools = [...new Set(options.allowedTools ?? [])];
+    this.explorationConcurrency = options.explorationConcurrency ?? config.agentRuntimeStabilityPolicy.maxConcurrency;
   }
 
   async execute(request: MainAgentRequest): Promise<MainAgentRuntimeResult> {
@@ -204,13 +211,14 @@ export class MainAgentRuntime {
       agents: new AgentRegistry([this.agent]),
       tools: this.tools,
       permissions: new PermissionManager([{ agentId: this.agent.id, allowedTools: this.policyTools }]),
-      state
+      state,
+      executionPolicy: config.agentRuntimeStabilityPolicy
     });
 
     return {
       outcome: "executed",
       decision,
-      execution: await kernel.execute(this.agent.id, task)
+      execution: await kernel.execute(this.agent.id, task, { signal: request.signal })
     };
   }
 
@@ -218,7 +226,7 @@ export class MainAgentRuntime {
   async plan(request: MainAgentRequest): Promise<MainAgentPlanningResult> {
     const goal = request.goal.trim();
     if (!goal) throw runtimeError("INVALID_CONTRACT", "用户目标不能为空。");
-    const decision = await this.agent.route(goal);
+    const decision = await this.agent.route(goal, request.signal);
     if (decision.route !== "planned") return { decision, planning: null };
 
     const planning = await this.planner.createPlan({
@@ -227,14 +235,15 @@ export class MainAgentRuntime {
       constraints: request.constraints ?? [],
       state: createAgentState(goal),
       readScope: request.readScope ?? [],
-      writeScope: decision.intent === "code_change" ? request.writeScope ?? [] : []
+      writeScope: decision.intent === "code_change" ? request.writeScope ?? [] : [],
+      signal: request.signal
     });
     return { decision, planning };
   }
 
   /** Main 只调度 Plan 中明确声明的 explore Task，不在阶段 3 执行实现或测试任务。 */
-  executeExploreTask(plan: Plan, taskId: string, context: unknown = {}) {
-    return this.explorer.executePlanTask(plan, taskId, context);
+  executeExploreTask(plan: Plan, taskId: string, context: unknown = {}, options: { signal?: AbortSignal } = {}) {
+    return this.explorer.executePlanTask(plan, taskId, context, options);
   }
 
   /** Main 仅在显式执行阶段调度 implement Task；计划初始化不会自动进入该入口。 */
@@ -324,7 +333,7 @@ export class MainAgentRuntime {
   private async executeRunnableExploreTasks(
     planning: Extract<PlannerResult, { status: "ready" }>,
     previousExplorations: ExplorerExecution[] = [],
-    replanContext: Pick<MainAgentRequest, "constraints" | "readScope" | "writeScope"> = {}
+    replanContext: Pick<MainAgentRequest, "constraints" | "readScope" | "writeScope" | "signal"> = {}
   ) {
     let plan = planning.plan;
     const explorations = [...previousExplorations];
@@ -333,52 +342,60 @@ export class MainAgentRuntime {
 
     while (true) {
       const completedTaskIds = new Set(plan.tasks.filter((task) => task.status === "completed").map((task) => task.id));
-      const task = plan.tasks.find((candidate) =>
+      const runnableTasks = plan.tasks.filter((candidate) =>
         candidate.type === "explore"
         && (candidate.status === "pending" || candidate.status === "blocked")
         && candidate.dependencies.every((dependency) => completedTaskIds.has(dependency))
       );
-      if (!task) break;
+      if (!runnableTasks.length) break;
 
-      const execution = await this.executeExploreTask(plan, task.id, { source: "planner_ready_task" });
-      explorations.push(execution);
-      // Runtime 持有真实 Task 状态；Main 只接收更新后的 Plan 和结构化探索制品。
-      if (!execution.state.plan) {
-        throw runtimeError("INVALID_CONTRACT", `Explorer 执行后没有返回 Plan 状态：${task.id}`, { taskId: task.id });
-      }
-      plan = execution.state.plan;
-
-      if (execution.result.status === "failed") {
-        const failures = (failureCounts.get(task.id) ?? 0) + 1;
-        failureCounts.set(task.id, failures);
-        if (failures < SAME_TASK_FAILURE_REPLAN_THRESHOLD) {
-          plan = {
-            ...plan,
-            tasks: plan.tasks.map((item) => item.id === task.id ? { ...item, status: "pending" as const } : item)
-          };
-          continue;
+      // 同一依赖层的探索均为只读任务，可受限并发；合并结果时始终回写同一份 Plan，避免各自 State 覆盖。
+      const taskBatch = runnableTasks.slice(0, this.explorationConcurrency);
+      const batchPlan = plan;
+      const batchExecutions = await Promise.all(taskBatch.map((task) =>
+        this.executeExploreTask(batchPlan, task.id, { source: "planner_ready_task" }, { signal: replanContext.signal })
+      ));
+      for (const execution of batchExecutions) {
+        if (!execution.state.plan) {
+          throw runtimeError("INVALID_CONTRACT", `Explorer 执行后没有返回 Plan 状态：${execution.result.taskId}`, { taskId: execution.result.taskId });
         }
       }
+      const statusByTaskId = new Map(batchExecutions.map((execution) => [execution.result.taskId, execution.result.status]));
+      plan = {
+        ...batchPlan,
+        tasks: batchPlan.tasks.map((item) => {
+          const status = statusByTaskId.get(item.id);
+          return status ? { ...item, status: status === "success" ? "completed" as const : status } : item;
+        })
+      };
+      for (const execution of batchExecutions) execution.state.plan = plan;
+      explorations.push(...batchExecutions);
 
-      const replanDecision = await this.agent.shouldReplan({
-        plan,
-        result: execution.result,
-        sameTaskFailures: failureCounts.get(task.id) ?? 0
-      });
-      if (execution.result.status !== "success" && !replanDecision.shouldReplan) {
-        return {
-          planning: {
-            status: "failed",
-            reason: "model_error",
-            blockers: execution.result.blockers.length
-              ? execution.result.blockers
-              : [`Explorer 任务 ${task.id} 未能完成。`]
-          } as const,
-          explorations,
-          replans
-        };
-      }
-      if (replanDecision.shouldReplan) {
+      let replanned = false;
+      for (const execution of batchExecutions) {
+        const taskId = execution.result.taskId;
+        if (execution.result.status === "failed") {
+          const failures = (failureCounts.get(taskId) ?? 0) + 1;
+          failureCounts.set(taskId, failures);
+          if (failures < SAME_TASK_FAILURE_REPLAN_THRESHOLD) {
+            plan = { ...plan, tasks: plan.tasks.map((item) => item.id === taskId ? { ...item, status: "pending" as const } : item) };
+            continue;
+          }
+        }
+
+        const replanDecision = await this.agent.shouldReplan({ plan, result: execution.result, sameTaskFailures: failureCounts.get(taskId) ?? 0 });
+        if (execution.result.status !== "success" && !replanDecision.shouldReplan) {
+          return {
+            planning: {
+              status: "failed",
+              reason: "model_error",
+              blockers: execution.result.blockers.length ? execution.result.blockers : [`Explorer 任务 ${taskId} 未能完成。`]
+            } as const,
+            explorations,
+            replans
+          };
+        }
+        if (!replanDecision.shouldReplan) continue;
         if (replans.length >= DEFAULT_MAX_REPLANS) {
           const limitFailure: PlannerResult = {
             status: "failed",
@@ -400,12 +417,15 @@ export class MainAgentRuntime {
           writeScope: replanContext.writeScope
         });
         explorations.push(...replanning.explorations);
-        replans.push({ taskId: task.id, reason: replanDecision.reason, status: replanning.planning.status });
+        replans.push({ taskId, reason: replanDecision.reason, status: replanning.planning.status });
         if (replanning.planning.status !== "ready") {
           return { planning: replanning.planning, explorations, replans };
         }
         plan = replanning.planning.plan;
+        replanned = true;
+        break;
       }
+      if (replanned) continue;
     }
 
     return {
@@ -454,7 +474,7 @@ export class MainAgentRuntime {
     const exploration = await this.executeExploreTask(explorationPlan, explorationTask.id, {
       source: "planner_missing_context",
       required
-    });
+    }, { signal: request.signal });
     if (exploration.result.status !== "success" || !exploration.exploration) {
       return { ...initial, explorations: [exploration] };
     }
@@ -467,7 +487,8 @@ export class MainAgentRuntime {
       constraints: request.constraints ?? [],
       state: createAgentState(request.goal.trim()),
       readScope,
-      writeScope: initial.decision.intent === "code_change" ? request.writeScope ?? [] : []
+      writeScope: initial.decision.intent === "code_change" ? request.writeScope ?? [] : [],
+      signal: request.signal
     });
     if (planning.status === "ready") {
       const executed = await this.executeRunnableExploreTasks(planning, [exploration], request);
@@ -491,7 +512,8 @@ export class MainAgentRuntime {
       constraints: request.constraints ?? [],
       readScope: request.readScope ?? [...new Set(request.oldPlan.tasks.flatMap((task) => task.readScope))],
       writeScope: request.writeScope ?? [...new Set(request.oldPlan.tasks.flatMap((task) => task.writeScope))],
-      state
+      state,
+      signal: request.signal
     });
   }
 
@@ -524,7 +546,7 @@ export class MainAgentRuntime {
     const exploration = await this.executeExploreTask(explorationPlan, task.id, {
       source: "planner_replan_missing_context",
       required: initial.required
-    });
+    }, { signal: request.signal });
     if (exploration.result.status !== "success") {
       return {
         planning: {

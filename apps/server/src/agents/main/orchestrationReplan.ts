@@ -1,4 +1,4 @@
-import type { AgentResult, Plan } from "../../runtime/contracts.js";
+import type { AgentResult, Plan, RuntimeExecutionDiagnostics } from "../../runtime/contracts.js";
 import type { ExplorerExecution } from "../explorer/explorerAgentRuntime.js";
 import type {
   DeveloperScopeChangeDecision,
@@ -55,6 +55,8 @@ export async function handleOrchestrationReplan(input: {
   constraints?: string[];
   replanCount: number;
   maxReplans: number;
+  runtimeDiagnostics?: RuntimeExecutionDiagnostics;
+  signal?: AbortSignal;
 }): Promise<ReplanTransition> {
   let forceReason: string | undefined;
   if (input.agent === "developer" && input.result.status === "blocked" && input.result.scopeChangeRequest) {
@@ -98,7 +100,8 @@ export async function handleOrchestrationReplan(input: {
       return { action: "continue", plan: input.plan, replanCount: input.replanCount };
     }
     const failureCount = input.failureCounts.get(input.result.taskId) ?? 0;
-    if (input.result.status === "failed"
+    if (!input.runtimeDiagnostics
+      && input.result.status === "failed"
       && !input.result.changedFiles.length
       && failureCount < SAME_TASK_FAILURE_REPLAN_THRESHOLD) {
       return {
@@ -133,7 +136,8 @@ export async function handleOrchestrationReplan(input: {
     newFacts: uniqueStrings(input.results.flatMap((result) => result.facts)),
     constraints: input.constraints,
     readScope: input.authorizedScope.readScope,
-    writeScope: input.authorizedScope.writeScope
+    writeScope: input.authorizedScope.writeScope,
+    signal: input.signal
   });
   const planning = replanning.planning;
   const traceEvent: OrchestrationTraceEvent = {

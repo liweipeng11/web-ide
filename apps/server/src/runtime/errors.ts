@@ -10,7 +10,10 @@ export type RuntimeErrorCode =
   | "UNKNOWN_TOOL"
   | "PERMISSION_DENIED"
   | "SCOPE_VIOLATION"
-  | "AGENT_LOOP_LIMIT_EXCEEDED";
+  | "AGENT_LOOP_LIMIT_EXCEEDED"
+  | "AGENT_TIMEOUT"
+  | "AGENT_CANCELLED"
+  | "AGENT_RETRY_EXHAUSTED";
 
 /** 对外暴露稳定错误码，避免上层依赖第三方库或内部异常文本。 */
 export class AgentRuntimeError extends Error {
