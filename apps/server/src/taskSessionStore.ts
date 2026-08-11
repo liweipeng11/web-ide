@@ -19,6 +19,7 @@ import type { Plan } from "./runtime/contracts.js";
 import { validatePlan } from "./runtime/stateManager.js";
 import type { PlannerResult } from "./agents/planner/contracts.js";
 import type { ExplorerArtifact, ExplorerResult } from "./agents/explorer/contracts.js";
+import type { DeveloperArtifact } from "./agents/developer/contracts.js";
 
 function taskSessionDirectory() {
   return projectRuntimeDirectory("task-sessions");
@@ -110,6 +111,47 @@ function mergeExplorerArtifacts(current: unknown, incoming: ExplorerArtifact[]) 
     uniqueArtifacts.set(key, artifact);
   }
   // 防止长期重规划无限扩大任务会话文件，同时保留最近的结构化探索记录。
+  return [...uniqueArtifacts.values()].sort((a, b) => a.createdAt - b.createdAt).slice(-100);
+}
+
+function normalizeDeveloperArtifacts(value: unknown): DeveloperArtifact[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const artifact = item as Record<string, unknown>;
+    if (typeof artifact.taskId !== "string" || !artifact.taskId.trim()) return [];
+    if (artifact.status !== "success" && artifact.status !== "failed" && artifact.status !== "blocked") return [];
+    if (typeof artifact.summary !== "string" || typeof artifact.createdAt !== "number") return [];
+    const scope = artifact.scopeChangeRequest;
+    const scopeChangeRequest = scope && typeof scope === "object" && !Array.isArray(scope)
+      && typeof (scope as Record<string, unknown>).reason === "string"
+      && Array.isArray((scope as Record<string, unknown>).requiredScope)
+      ? {
+          reason: String((scope as Record<string, unknown>).reason),
+          requiredScope: unique(((scope as Record<string, unknown>).requiredScope as unknown[])
+            .filter((entry): entry is string => typeof entry === "string"))
+        }
+      : undefined;
+    return [{
+      taskId: artifact.taskId.trim(),
+      status: artifact.status,
+      summary: artifact.summary.trim(),
+      changedFiles: unique(Array.isArray(artifact.changedFiles) ? artifact.changedFiles.filter((entry): entry is string => typeof entry === "string") : []),
+      evidence: unique(Array.isArray(artifact.evidence) ? artifact.evidence.filter((entry): entry is string => typeof entry === "string") : []),
+      blockers: unique(Array.isArray(artifact.blockers) ? artifact.blockers.filter((entry): entry is string => typeof entry === "string") : []),
+      checkpointIds: unique(Array.isArray(artifact.checkpointIds) ? artifact.checkpointIds.filter((entry): entry is string => typeof entry === "string") : []),
+      ...(scopeChangeRequest ? { scopeChangeRequest } : {}),
+      createdAt: artifact.createdAt
+    }];
+  });
+}
+
+function mergeDeveloperArtifacts(current: unknown, incoming: DeveloperArtifact[]) {
+  const merged = [...normalizeDeveloperArtifacts(current), ...normalizeDeveloperArtifacts(incoming)];
+  const uniqueArtifacts = new Map<string, DeveloperArtifact>();
+  for (const artifact of merged) {
+    uniqueArtifacts.set(`${artifact.taskId}:${artifact.createdAt}:${artifact.status}`, artifact);
+  }
   return [...uniqueArtifacts.values()].sort((a, b) => a.createdAt - b.createdAt).slice(-100);
 }
 
@@ -353,6 +395,7 @@ function isTaskSessionTerminalStatus(value: unknown): value is TaskSessionTermin
 
 function isTaskSessionFinalizationSource(value: unknown): value is TaskSessionFinalizationSource {
   return value === "agent_runtime"
+    || value === "developer_runtime"
     || value === "plan_runtime"
     || value === "auto_validation"
     || value === "legacy_chat"
@@ -891,6 +934,7 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     runtimePlan: normalizeRuntimePlan(session.runtimePlan),
     plannerOutcome: normalizePlannerOutcome(session.plannerOutcome),
     explorerArtifacts: normalizeExplorerArtifacts(session.explorerArtifacts),
+    developerArtifacts: normalizeDeveloperArtifacts(session.developerArtifacts),
     deliveryUnits,
     activeDeliveryUnitId,
     toolFailureDiagnostics: normalizeToolFailureDiagnostics(session.toolFailureDiagnostics),
@@ -1176,6 +1220,24 @@ export async function setTaskSessionRuntimePlanning(
     // 缺少上下文或规划失败时保持可恢复状态，不能继续伪装成已规划完成。
     status: result.status === "ready" ? session.status : "awaiting_user",
     updatedAt: now
+  }));
+}
+
+/** 原子保存 Developer 的 Plan 进度、真实变更与可回滚 checkpoint。 */
+export async function recordTaskSessionDeveloperExecution(
+  taskSessionId: string | null | undefined,
+  plan: Plan,
+  artifact: DeveloperArtifact
+) {
+  if (!taskSessionId) return null;
+  validatePlan(plan);
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    runtimePlan: plan,
+    developerArtifacts: mergeDeveloperArtifacts(session.developerArtifacts, [artifact]),
+    filesChanged: unique([...session.filesChanged, ...artifact.changedFiles]),
+    checkpointIds: unique([...session.checkpointIds, ...artifact.checkpointIds]),
+    updatedAt: Date.now()
   }));
 }
 

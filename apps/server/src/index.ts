@@ -42,6 +42,7 @@ import { initializeProviderSettings } from "./providerSettingsStore.js";
 import { createCommandExecutionRouter } from "./commandExecution/commandExecutionRoutes.js";
 import { commandExecutionService } from "./commandExecution/index.js";
 import { MainAgentRuntime } from "./agents/main/mainAgentRuntime.js";
+import { executeApprovedDeveloperTask } from "./developerExecutionService.js";
 
 const initialProviders = await initializeProviderSettings();
 configureProviderGateway(initialProviders.filter((provider) => provider.enabled));
@@ -1158,6 +1159,65 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       sendEvent("done", { messages });
       response.end();
       return;
+    }
+
+    if (approvedTaskSessionId && plannedTaskSession?.runtimePlan) {
+      const developerResult = await runWithTaskModel(
+        taskSession.id,
+        "act",
+        modelSelection,
+        () => executeApprovedDeveloperTask(plannedTaskSession)
+      );
+      if (developerResult.outcome === "executed") {
+        const { execution } = developerResult;
+        for (const checkpointId of execution.checkpointIds) {
+          pushAgentStep(createAgentStep({
+            type: "checkpoint",
+            checkpointId,
+            files: execution.result.changedFiles,
+            source: {
+              taskSessionId: taskSession.id,
+              toolName: "apply_patch",
+              reason: "developer_runtime_apply_patch"
+            }
+          }));
+        }
+        const scopeRequest = execution.result.scopeChangeRequest;
+        const answer = execution.result.status === "blocked" && scopeRequest
+          ? `${execution.result.summary}\n\n需要调整的范围：\n${scopeRequest.requiredScope.map((filePath) => `- ${filePath}`).join("\n")}`
+          : execution.result.summary;
+        if (execution.result.status === "success") {
+          await advanceTaskPlanProgress(taskSession.id, "patch_applied");
+        } else if (execution.result.status === "failed") {
+          await advanceTaskPlanProgress(taskSession.id, "task_failed");
+        }
+        sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
+        const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
+        const allCompleted = execution.state.plan?.tasks.every((item) => item.status === "completed") ?? false;
+        const runtimeStatus = execution.result.status === "success"
+          ? allCompleted ? "completed" as const : "incomplete" as const
+          : execution.result.status;
+        const completedTaskSession = await finalizeTaskSession({
+          taskSessionId: taskSession.id,
+          runtimeResult: {
+            status: runtimeStatus,
+            statusReason: execution.result.blockers.join("；") || undefined
+          },
+          source: "developer_runtime"
+        });
+
+        completed = true;
+        await Promise.all(taskStepWrites);
+        if (completedTaskSession) sendEvent("task_session", { session: completedTaskSession });
+        sendEvent("developer_result", {
+          taskSessionId: taskSession.id,
+          result: execution.result,
+          checkpointIds: execution.checkpointIds
+        });
+        sendEvent("done", { messages });
+        response.end();
+        return;
+      }
     }
 
     if (shouldGeneratePatchForIntent(classification.intent)) {

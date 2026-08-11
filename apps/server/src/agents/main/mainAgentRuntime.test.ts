@@ -517,3 +517,193 @@ test("ready Plan 中的 Explorer 失败时 Main 返回结构化失败而不伪�
   if (result.planning?.status !== "failed") return;
   assert.deepEqual(result.planning.blockers, ["模型不可用"]);
 });
+
+test("Main 显式调度 Plan 中依赖已完成的 implement Task", async () => {
+  const plan: Plan = {
+    version: 1,
+    goal: "修改认证超时",
+    assumptions: [],
+    tasks: [
+      {
+        id: "T1",
+        type: "explore",
+        goal: "定位认证配置",
+        dependencies: [],
+        requiredCapabilities: ["exploration"],
+        readScope: ["src/auth/**"],
+        writeScope: [],
+        acceptanceCriteria: ["定位配置"],
+        status: "completed"
+      },
+      {
+        id: "T2",
+        type: "implement",
+        goal: "修改认证超时",
+        dependencies: ["T1"],
+        requiredCapabilities: ["editing"],
+        readScope: ["src/auth/**"],
+        writeScope: ["src/auth/service.ts"],
+        acceptanceCriteria: ["超时为 30 秒"],
+        status: "pending"
+      }
+    ],
+    completionCriteria: ["修改完成"]
+  };
+  const calls: Array<{ taskId: string; constraints: string[] | undefined }> = [];
+  const runtime = new MainAgentRuntime({
+    developer: {
+      async executePlanTask(receivedPlan, taskId, options) {
+        calls.push({ taskId, constraints: options?.constraints });
+        const nextPlan: Plan = {
+          ...receivedPlan,
+          tasks: receivedPlan.tasks.map((task) => task.id === taskId ? { ...task, status: "completed" as const } : { ...task })
+        };
+        return {
+          result: {
+            taskId,
+            status: "success",
+            summary: "认证超时已修改",
+            facts: ["超时为 30 秒"],
+            changedFiles: ["src/auth/service.ts"],
+            evidence: ["src/auth/service.ts:1"],
+            blockers: []
+          },
+          implementation: {
+            summary: "认证超时已修改",
+            facts: ["超时为 30 秒"],
+            evidence: ["src/auth/service.ts:1"]
+          },
+          checkpointIds: [],
+          state: {
+            goal: receivedPlan.goal,
+            plan: nextPlan,
+            completedTasks: ["T1", "T2"],
+            failedTasks: [],
+            changedFiles: ["src/auth/service.ts"],
+            facts: ["超时为 30 秒"],
+            status: "completed"
+          }
+        };
+      }
+    }
+  });
+
+  const execution = await runtime.executeDeveloperTask(plan, "T2", { constraints: ["不能新增依赖"] });
+
+  assert.deepEqual(calls, [{ taskId: "T2", constraints: ["不能新增依赖"] }]);
+  assert.equal(execution.result.status, "success");
+  assert.deepEqual(execution.result.changedFiles, ["src/auth/service.ts"]);
+});
+
+test("Main 的计划初始化不会自动调用 Developer 写文件", async () => {
+  const routeModel = new RuntimeDecisionModel(
+    { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: ["planning", "editing"] },
+    []
+  );
+  const planner = new PlannerAgent(new RuntimePlannerModel({
+    status: "ready",
+    plan: {
+      assumptions: [],
+      tasks: [{ id: "T1", type: "implement", goal: "修改认证超时", dependencies: [], acceptanceCriteria: ["超时为 30 秒"] }],
+      completionCriteria: ["修改完成"]
+    }
+  }));
+  let developerCalls = 0;
+  const runtime = new MainAgentRuntime({
+    agent: new MainAgent(routeModel),
+    planner,
+    developer: {
+      async executePlanTask() {
+        developerCalls += 1;
+        throw new Error("计划阶段不应执行 Developer");
+      }
+    }
+  });
+
+  const result = await runtime.planWithExploration({
+    goal: "修改认证超时",
+    readScope: ["src/auth/**"],
+    writeScope: ["src/auth/**"]
+  });
+
+  assert.equal(result.planning?.status, "ready");
+  assert.equal(developerCalls, 0);
+});
+
+test("Main 在用户总授权内扩展小范围 Developer Task", () => {
+  const plan: Plan = {
+    version: 1,
+    goal: "增加登录限流",
+    assumptions: [],
+    tasks: [{
+      id: "T2",
+      type: "implement",
+      goal: "实现登录限流",
+      dependencies: [],
+      requiredCapabilities: ["editing"],
+      readScope: ["src/**"],
+      writeScope: ["src/auth/service.ts"],
+      acceptanceCriteria: ["第 6 次请求返回 429"],
+      status: "blocked"
+    }],
+    completionCriteria: ["登录限流生效"]
+  };
+  const decision = new MainAgentRuntime().resolveDeveloperScopeChange(plan, "T2", {
+    taskId: "T2",
+    status: "blocked",
+    summary: "需要共享中间件",
+    facts: [],
+    changedFiles: [],
+    evidence: [],
+    blockers: ["需要共享中间件"],
+    scopeChangeRequest: {
+      reason: "需要共享中间件",
+      requiredScope: ["src/middleware/rate-limit.ts"]
+    }
+  }, { readScope: ["src/**"], writeScope: ["src/**"] });
+
+  assert.equal(decision.action, "expand_task");
+  if (decision.action !== "expand_task") return;
+  assert.equal(decision.plan.version, 2);
+  assert.equal(decision.plan.tasks[0].status, "pending");
+  assert.deepEqual(decision.plan.tasks[0].readScope, ["src/**", "src/middleware/rate-limit.ts"]);
+  assert.deepEqual(decision.plan.tasks[0].writeScope, ["src/auth/service.ts", "src/middleware/rate-limit.ts"]);
+  assert.equal(plan.tasks[0].status, "blocked");
+});
+
+test("Main 不会自动扩展用户总授权之外的 Developer 范围", () => {
+  const plan: Plan = {
+    version: 1,
+    goal: "修改认证服务",
+    assumptions: [],
+    tasks: [{
+      id: "T2",
+      type: "implement",
+      goal: "修改认证服务",
+      dependencies: [],
+      requiredCapabilities: ["editing"],
+      readScope: ["src/**"],
+      writeScope: ["src/auth/**"],
+      acceptanceCriteria: ["认证修改完成"],
+      status: "blocked"
+    }],
+    completionCriteria: ["认证修改完成"]
+  };
+  const decision = new MainAgentRuntime().resolveDeveloperScopeChange(plan, "T2", {
+    taskId: "T2",
+    status: "blocked",
+    summary: "需要支付服务",
+    facts: [],
+    changedFiles: [],
+    evidence: [],
+    blockers: ["需要支付服务"],
+    scopeChangeRequest: {
+      reason: "需要支付服务",
+      requiredScope: ["src/payment/service.ts"]
+    }
+  }, { readScope: ["src/**"], writeScope: ["src/auth/**"] });
+
+  assert.equal(decision.action, "replan");
+  if (decision.action !== "replan") return;
+  assert.match(decision.reason, /超出用户授权范围/);
+});

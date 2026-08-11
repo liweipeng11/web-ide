@@ -1,4 +1,5 @@
 import type {
+  AgentResult,
   AgentTaskPacket,
   Plan,
   RouteDecision,
@@ -13,10 +14,13 @@ import { RuntimeKernel } from "../../runtime/runtimeKernel.js";
 import { createAgentState, StateManager, validatePlan } from "../../runtime/stateManager.js";
 import { ToolRegistry } from "../../runtime/toolRegistry.js";
 import { runtimeError } from "../../runtime/errors.js";
+import { isPathInScope } from "../../runtime/permissionManager.js";
 import type { PlannerResult } from "../planner/contracts.js";
 import { PlannerAgent } from "../planner/plannerAgent.js";
 import type { ExplorerExecution } from "../explorer/explorerAgentRuntime.js";
 import { ExplorerAgentRuntime } from "../explorer/explorerAgentRuntime.js";
+import type { DeveloperTaskOptions } from "../developer/developerAgentRuntime.js";
+import { DeveloperAgentRuntime } from "../developer/developerAgentRuntime.js";
 import { MainAgent } from "./mainAgent.js";
 
 export type MainAgentRequest = {
@@ -59,10 +63,23 @@ export type MainAgentReplanRequest = {
   writeScope?: string[];
 };
 
+export type DeveloperScopeChangeDecision =
+  | {
+      action: "expand_task";
+      plan: Plan;
+      addedScope: string[];
+    }
+  | {
+      action: "replan";
+      reason: string;
+      requiredScope: string[];
+    };
+
 export type MainAgentRuntimeOptions = {
   agent?: MainAgent;
   planner?: PlannerAgent;
   explorer?: Pick<ExplorerAgentRuntime, "executePlanTask">;
+  developer?: Pick<DeveloperAgentRuntime, "executePlanTask">;
   tools?: RuntimeTool[];
   allowedTools?: string[];
 };
@@ -118,6 +135,7 @@ export class MainAgentRuntime {
   private readonly agent: MainAgent;
   private readonly planner: PlannerAgent;
   private readonly explorer: Pick<ExplorerAgentRuntime, "executePlanTask">;
+  private readonly developer: Pick<DeveloperAgentRuntime, "executePlanTask">;
   private readonly tools: ToolRegistry;
   private readonly policyTools: string[];
 
@@ -125,6 +143,7 @@ export class MainAgentRuntime {
     this.agent = options.agent ?? new MainAgent();
     this.planner = options.planner ?? new PlannerAgent();
     this.explorer = options.explorer ?? new ExplorerAgentRuntime();
+    this.developer = options.developer ?? new DeveloperAgentRuntime();
     this.tools = new ToolRegistry(options.tools ?? []);
     this.policyTools = [...new Set(options.allowedTools ?? [])];
   }
@@ -183,6 +202,76 @@ export class MainAgentRuntime {
   /** Main 只调度 Plan 中明确声明的 explore Task，不在阶段 3 执行实现或测试任务。 */
   executeExploreTask(plan: Plan, taskId: string, context: unknown = {}) {
     return this.explorer.executePlanTask(plan, taskId, context);
+  }
+
+  /** Main 仅在显式执行阶段调度 implement Task；计划初始化不会自动进入该入口。 */
+  executeDeveloperTask(plan: Plan, taskId: string, options: DeveloperTaskOptions = {}) {
+    return this.developer.executePlanTask(plan, taskId, options);
+  }
+
+  /** Main 只在用户总授权内处理小范围扩展；更大或越权的变化交回重规划。 */
+  resolveDeveloperScopeChange(
+    plan: Plan,
+    taskId: string,
+    result: AgentResult,
+    authorizedScope: { readScope: string[]; writeScope: string[] }
+  ): DeveloperScopeChangeDecision {
+    validatePlan(plan);
+    if (result.status !== "blocked" || !result.scopeChangeRequest) {
+      throw runtimeError("INVALID_CONTRACT", "只有 Developer 的 blocked 范围申请可以进入范围决策。", { taskId });
+    }
+    const task = plan.tasks.find((item) => item.id === taskId);
+    if (!task) throw runtimeError("TASK_NOT_FOUND", `计划中不存在任务 ${taskId}。`, { taskId });
+    if (task.type !== "implement") {
+      throw runtimeError("INVALID_CONTRACT", `任务 ${taskId} 不是 implement Task。`, { taskId });
+    }
+
+    const requiredScope = [...new Set(result.scopeChangeRequest.requiredScope.map((item) => item.trim()).filter(Boolean))];
+    if (!requiredScope.length || requiredScope.some((filePath) => !isPathInScope(filePath, ["**"]))) {
+      throw runtimeError("SCOPE_VIOLATION", "Developer 范围申请包含无效路径。", { requiredScope });
+    }
+    const addedScope = requiredScope.filter((filePath) => !isPathInScope(filePath, task.writeScope));
+    const withinAuthorization = addedScope.every((filePath) =>
+      isPathInScope(filePath, authorizedScope.readScope)
+      && isPathInScope(filePath, authorizedScope.writeScope)
+    );
+    if (!addedScope.length || addedScope.length > 3 || !withinAuthorization) {
+      return {
+        action: "replan",
+        reason: withinAuthorization
+          ? "范围变化较大或没有形成有效的新写入范围，需要重新规划。"
+          : "所需写入路径超出用户授权范围，需要重新规划或请求用户确认。",
+        requiredScope
+      };
+    }
+
+    const nextPlan: Plan = {
+      ...plan,
+      version: plan.version + 1,
+      assumptions: [...plan.assumptions],
+      completionCriteria: [...plan.completionCriteria],
+      tasks: plan.tasks.map((item) => item.id === taskId
+        ? {
+            ...item,
+            dependencies: [...item.dependencies],
+            requiredCapabilities: [...item.requiredCapabilities],
+            // 修改已有文件前 Developer 必须读取目标，因此同步扩展读写边界。
+            readScope: [...new Set([...item.readScope, ...addedScope])],
+            writeScope: [...new Set([...item.writeScope, ...addedScope])],
+            acceptanceCriteria: [...item.acceptanceCriteria],
+            status: "pending" as const
+          }
+        : {
+            ...item,
+            dependencies: [...item.dependencies],
+            requiredCapabilities: [...item.requiredCapabilities],
+            readScope: [...item.readScope],
+            writeScope: [...item.writeScope],
+            acceptanceCriteria: [...item.acceptanceCriteria]
+          })
+    };
+    validatePlan(nextPlan);
+    return { action: "expand_task", plan: nextPlan, addedScope };
   }
 
   private async executeRunnableExploreTasks(

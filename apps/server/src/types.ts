@@ -594,6 +594,7 @@ export type TaskRuntimeEvidence = {
 
 export type TaskSessionFinalizationSource =
   | "agent_runtime"
+  | "developer_runtime"
   | "plan_runtime"
   | "auto_validation"
   | "legacy_chat"
@@ -652,6 +653,8 @@ export type TaskSession = {
   };
   // Explorer 只持久化结构化事实和证据，不保存读取过的文件全文或工具原始输出。
   explorerArtifacts?: import("./agents/explorer/contracts.js").ExplorerArtifact[];
+  // Developer 只持久化实现摘要、真实变更文件和 checkpoint，不保存模型观察到的源码正文。
+  developerArtifacts?: import("./agents/developer/contracts.js").DeveloperArtifact[];
   // 旧会话缺失阶段 1 字段时，读取层会补齐为空值，保持历史兼容。
   deliveryUnits?: DeliveryUnit[];
   activeDeliveryUnitId?: string;

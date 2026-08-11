@@ -779,6 +779,18 @@ export type ExplorerArtifact = {
   createdAt: number;
 };
 
+export type DeveloperArtifact = {
+  taskId: string;
+  status: "success" | "failed" | "blocked";
+  summary: string;
+  changedFiles: string[];
+  evidence: string[];
+  blockers: string[];
+  checkpointIds: string[];
+  scopeChangeRequest?: { reason: string; requiredScope: string[] };
+  createdAt: number;
+};
+
 export type TaskSession = {
   id: string;
   userGoal: string;
@@ -817,6 +829,7 @@ export type TaskSession = {
   recoveryHistory?: RecoveryDecision[];
   continuation?: TaskContinuation;
   explorerArtifacts?: ExplorerArtifact[];
+  developerArtifacts?: DeveloperArtifact[];
   checkpointIds: string[];
   // 任务历史真实变更视图，历史 diff 展示优先以 checkpoint 为准。
   diffView?: TaskSessionDiffView;
