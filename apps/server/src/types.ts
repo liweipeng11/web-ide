@@ -655,6 +655,8 @@ export type TaskSession = {
   explorerArtifacts?: import("./agents/explorer/contracts.js").ExplorerArtifact[];
   // Developer 只持久化实现摘要、真实变更文件和 checkpoint，不保存模型观察到的源码正文。
   developerArtifacts?: import("./agents/developer/contracts.js").DeveloperArtifact[];
+  // Tester 只保存结构化检查、验收映射和失败摘要，不保存完整命令输出。
+  testerArtifacts?: import("./agents/tester/contracts.js").TesterArtifact[];
   // 旧会话缺失阶段 1 字段时，读取层会补齐为空值，保持历史兼容。
   deliveryUnits?: DeliveryUnit[];
   activeDeliveryUnitId?: string;

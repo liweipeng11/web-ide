@@ -134,6 +134,8 @@ async function focusRelatedTests(
     const script = manifest?.scripts?.[command.name];
     const runner = typeof script === "string" ? detectFocusedTestRunner(script) : null;
     if (!runner) return command;
+    // Node 是系统运行时而非包内可执行依赖；npm exec 可能尝试解析同名包，保留安全的包级测试脚本。
+    if (runner === "node --test") return command;
 
     // focused 命令只使用经过白名单校验的相对测试路径，避免 shell 参数注入。
     const prefix = packageManager === "pnpm"

@@ -630,6 +630,88 @@ test("Main 的计划初始化不会自动调用 Developer 写文件", async () =
   assert.equal(developerCalls, 0);
 });
 
+test("Main 显式调度依赖已完成的 test Task 且透传验证范围", async () => {
+  const plan: Plan = {
+    version: 1,
+    goal: "修改并验证认证限流",
+    assumptions: [],
+    tasks: [
+      {
+        id: "T2",
+        type: "implement",
+        goal: "修改认证限流",
+        dependencies: [],
+        requiredCapabilities: ["editing"],
+        readScope: ["src/auth/**"],
+        writeScope: ["src/auth/service.ts"],
+        acceptanceCriteria: ["限流实现完成"],
+        status: "completed"
+      },
+      {
+        id: "T3",
+        type: "test",
+        goal: "验证认证限流",
+        dependencies: ["T2"],
+        requiredCapabilities: ["testing"],
+        readScope: ["src/auth/**", "tests/auth/**", "package.json"],
+        writeScope: [],
+        acceptanceCriteria: ["第 6 次请求返回 429"],
+        status: "pending"
+      }
+    ],
+    completionCriteria: ["认证限流通过测试"]
+  };
+  const calls: Array<{ taskId: string; changedFiles: string[]; testScope: string[] }> = [];
+  const runtime = new MainAgentRuntime({
+    tester: {
+      async executePlanTask(receivedPlan, taskId, options) {
+        calls.push({ taskId, changedFiles: options.changedFiles, testScope: options.testScope });
+        return {
+          result: {
+            taskId,
+            status: "success",
+            summary: "验证通过",
+            facts: ["相关测试：tests/auth/rate-limit.test.ts"],
+            changedFiles: [],
+            evidence: ["pnpm test：passed"],
+            blockers: []
+          },
+          validation: {
+            status: "passed",
+            checks: { test: [{ status: "passed", command: "pnpm test", exitCode: 0, issueCount: 0 }] },
+            failures: [],
+            acceptanceCriteria: [{ criterion: "第 6 次请求返回 429", status: "passed", evidence: ["pnpm test"] }],
+            evidence: ["pnpm test：passed"],
+            relatedTests: ["tests/auth/rate-limit.test.ts"]
+          },
+          state: {
+            goal: receivedPlan.goal,
+            plan: {
+              ...receivedPlan,
+              tasks: receivedPlan.tasks.map((task) => task.id === taskId ? { ...task, status: "completed" as const } : task)
+            },
+            completedTasks: ["T2", "T3"],
+            failedTasks: [],
+            changedFiles: [],
+            facts: [],
+            status: "completed"
+          }
+        };
+      }
+    }
+  });
+
+  const execution = await runtime.executeTestTask(plan, "T3", {
+    changedFiles: ["src/auth/service.ts"],
+    testScope: ["tests/auth/**"],
+    acceptanceEvidence: [{ criterion: "第 6 次请求返回 429", testFiles: ["tests/auth/rate-limit.test.ts"] }]
+  });
+
+  assert.deepEqual(calls, [{ taskId: "T3", changedFiles: ["src/auth/service.ts"], testScope: ["tests/auth/**"] }]);
+  assert.equal(execution.validation?.status, "passed");
+  assert.deepEqual(execution.result.changedFiles, []);
+});
+
 test("Main 在用户总授权内扩展小范围 Developer Task", () => {
   const plan: Plan = {
     version: 1,

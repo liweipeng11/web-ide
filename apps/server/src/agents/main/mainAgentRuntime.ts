@@ -21,6 +21,8 @@ import type { ExplorerExecution } from "../explorer/explorerAgentRuntime.js";
 import { ExplorerAgentRuntime } from "../explorer/explorerAgentRuntime.js";
 import type { DeveloperTaskOptions } from "../developer/developerAgentRuntime.js";
 import { DeveloperAgentRuntime } from "../developer/developerAgentRuntime.js";
+import type { TesterTaskOptions } from "../tester/testerAgentRuntime.js";
+import { TesterAgentRuntime } from "../tester/testerAgentRuntime.js";
 import { MainAgent } from "./mainAgent.js";
 
 export type MainAgentRequest = {
@@ -80,6 +82,7 @@ export type MainAgentRuntimeOptions = {
   planner?: PlannerAgent;
   explorer?: Pick<ExplorerAgentRuntime, "executePlanTask">;
   developer?: Pick<DeveloperAgentRuntime, "executePlanTask">;
+  tester?: Pick<TesterAgentRuntime, "executePlanTask">;
   tools?: RuntimeTool[];
   allowedTools?: string[];
 };
@@ -136,6 +139,7 @@ export class MainAgentRuntime {
   private readonly planner: PlannerAgent;
   private readonly explorer: Pick<ExplorerAgentRuntime, "executePlanTask">;
   private readonly developer: Pick<DeveloperAgentRuntime, "executePlanTask">;
+  private readonly tester: Pick<TesterAgentRuntime, "executePlanTask">;
   private readonly tools: ToolRegistry;
   private readonly policyTools: string[];
 
@@ -144,6 +148,7 @@ export class MainAgentRuntime {
     this.planner = options.planner ?? new PlannerAgent();
     this.explorer = options.explorer ?? new ExplorerAgentRuntime();
     this.developer = options.developer ?? new DeveloperAgentRuntime();
+    this.tester = options.tester ?? new TesterAgentRuntime();
     this.tools = new ToolRegistry(options.tools ?? []);
     this.policyTools = [...new Set(options.allowedTools ?? [])];
   }
@@ -207,6 +212,11 @@ export class MainAgentRuntime {
   /** Main 仅在显式执行阶段调度 implement Task；计划初始化不会自动进入该入口。 */
   executeDeveloperTask(plan: Plan, taskId: string, options: DeveloperTaskOptions = {}) {
     return this.developer.executePlanTask(plan, taskId, options);
+  }
+
+  /** Main 显式调度只读 test Task；阶段 5 不在 Developer 完成后自动触发测试。 */
+  executeTestTask(plan: Plan, taskId: string, options: TesterTaskOptions) {
+    return this.tester.executePlanTask(plan, taskId, options);
   }
 
   /** Main 只在用户总授权内处理小范围扩展；更大或越权的变化交回重规划。 */

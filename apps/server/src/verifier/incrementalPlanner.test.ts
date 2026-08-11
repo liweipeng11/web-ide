@@ -75,6 +75,24 @@ test("根据改动文件仅选择相关包命令并映射测试", async (context
   assert.equal(plan.buildRequired, false);
 });
 
+test("node --test 脚本保留包级命令而不生成 npm exec node", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "incremental-node-test-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "apps/server/src"), { recursive: true });
+  await fs.writeFile(path.join(root, "apps/server/src/userService.ts"), "export const user = 1;\n", "utf8");
+  await fs.writeFile(path.join(root, "apps/server/package.json"), JSON.stringify({ scripts: { test: "node --test src/**/*.test.js" } }), "utf8");
+
+  const plan = await planIncrementalVerification(
+    root,
+    analysis(),
+    [command("apps/server", "test", "test")],
+    { changedFiles: ["apps/server/src/userService.ts"] },
+    { analyzeImpact: async () => impact() }
+  );
+
+  assert.deepEqual(plan.commands.map((item) => item.command), ["pnpm --dir apps/server test"]);
+});
+
 test("配置变更和构建失败类别会升级到包级 build", async () => {
   const commands = [command("apps/web", "typecheck", "typecheck"), command("apps/web", "build", "build")];
   const configPlan = await planIncrementalVerification("C:/workspace", analysis(), commands, { changedFiles: ["apps/web/vite.config.ts"] });

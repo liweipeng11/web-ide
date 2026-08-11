@@ -52,7 +52,13 @@ function parsePackageCommand(command: string) {
     }
   }
 
-  if (tokens[0]?.toLowerCase() === "run") tokens.shift();
+  const subcommand = tokens[0]?.toLowerCase();
+  if (subcommand === "run") {
+    tokens.shift();
+  } else if (["exec", "x", "dlx"].includes(subcommand || "")) {
+    // exec/dlx 调用的是二进制而非 package.json script，不能进入脚本目录绑定逻辑。
+    return null;
+  }
   const script = tokens[0]?.match(/^[\w:.-]+$/)?.[0];
   return script ? { packageManager, script, directory } : null;
 }

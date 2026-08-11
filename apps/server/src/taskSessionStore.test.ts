@@ -186,13 +186,14 @@ test("旧会话缺失阶段 1 字段时保持可读", async () => {
   try {
     const filePath = path.join(projectRuntimeDirectory("task-sessions"), `${session.id}.json`);
     const legacy = JSON.parse(await fs.readFile(filePath, "utf8")) as Record<string, unknown>;
-    delete legacy.deliveryUnits; delete legacy.activeDeliveryUnitId; delete legacy.toolFailureDiagnostics; delete legacy.recoveryHistory; delete legacy.continuation; delete legacy.explorerArtifacts;
+    delete legacy.deliveryUnits; delete legacy.activeDeliveryUnitId; delete legacy.toolFailureDiagnostics; delete legacy.recoveryHistory; delete legacy.continuation; delete legacy.explorerArtifacts; delete legacy.testerArtifacts;
     await fs.writeFile(filePath, JSON.stringify(legacy), "utf8");
     const restored = await getTaskSession(session.id);
     assert.deepEqual(restored.deliveryUnits, []);
     assert.deepEqual(restored.toolFailureDiagnostics, []);
     assert.deepEqual(restored.recoveryHistory, []);
     assert.deepEqual(restored.explorerArtifacts, []);
+    assert.deepEqual(restored.testerArtifacts, []);
     assert.equal(restored.continuation, undefined);
   } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
 });

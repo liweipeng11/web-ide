@@ -69,3 +69,16 @@ test("拒绝工作区之外的 cwd", async (context) => {
     /must stay inside the workspace/i
   );
 });
+
+test("focused-test 的 exec 命令不会被误判为 package script", async (context) => {
+  const workspaceRoot = await createWorkspace(context);
+  await writePackage(workspaceRoot, ".", { test: "node --test" });
+
+  const npmResolution = await resolvePackageScriptExecution(workspaceRoot, "npm exec -- node --test tests/auth.test.js");
+  const pnpmResolution = await resolvePackageScriptExecution(workspaceRoot, "pnpm exec tsx --test tests/auth.test.ts");
+
+  assert.equal(npmResolution.cwd, workspaceRoot);
+  assert.equal(npmResolution.script, undefined);
+  assert.equal(pnpmResolution.cwd, workspaceRoot);
+  assert.equal(pnpmResolution.script, undefined);
+});

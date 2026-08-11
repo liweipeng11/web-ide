@@ -20,6 +20,7 @@ import { validatePlan } from "./runtime/stateManager.js";
 import type { PlannerResult } from "./agents/planner/contracts.js";
 import type { ExplorerArtifact, ExplorerResult } from "./agents/explorer/contracts.js";
 import type { DeveloperArtifact } from "./agents/developer/contracts.js";
+import type { TesterArtifact, ValidationReport } from "./agents/tester/contracts.js";
 
 function taskSessionDirectory() {
   return projectRuntimeDirectory("task-sessions");
@@ -153,6 +154,92 @@ function mergeDeveloperArtifacts(current: unknown, incoming: DeveloperArtifact[]
     uniqueArtifacts.set(`${artifact.taskId}:${artifact.createdAt}:${artifact.status}`, artifact);
   }
   return [...uniqueArtifacts.values()].sort((a, b) => a.createdAt - b.createdAt).slice(-100);
+}
+
+function normalizeValidationReport(value: unknown): ValidationReport | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const report = value as Record<string, unknown>;
+  if (report.status !== "passed" && report.status !== "failed") return undefined;
+  if (!report.checks || typeof report.checks !== "object" || Array.isArray(report.checks)) return undefined;
+  const checkStatuses = new Set(["passed", "failed", "blocked", "not_run"]);
+  const stages = new Set(["format_syntax", "typecheck", "lint", "test", "build"]);
+  const checks: ValidationReport["checks"] = {};
+  for (const [stage, entries] of Object.entries(report.checks as Record<string, unknown>)) {
+    if (!stages.has(stage) || !Array.isArray(entries)) continue;
+    const normalized = entries.flatMap((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const check = entry as Record<string, unknown>;
+      if (!checkStatuses.has(String(check.status)) || typeof check.command !== "string" || typeof check.issueCount !== "number") return [];
+      return [{
+        status: check.status as "passed" | "failed" | "blocked" | "not_run",
+        command: check.command,
+        ...(typeof check.exitCode === "number" || check.exitCode === null ? { exitCode: check.exitCode } : {}),
+        issueCount: check.issueCount
+      }];
+    });
+    if (normalized.length) checks[stage as keyof ValidationReport["checks"]] = normalized;
+  }
+  const failures = Array.isArray(report.failures) ? report.failures.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const failure = entry as Record<string, unknown>;
+    if (typeof failure.category !== "string" || typeof failure.message !== "string") return [];
+    return [{
+      category: failure.category as ValidationReport["failures"][number]["category"],
+      message: failure.message,
+      ...(typeof failure.command === "string" ? { command: failure.command } : {}),
+      ...(typeof failure.file === "string" ? { file: failure.file } : {}),
+      ...(typeof failure.line === "number" ? { line: failure.line } : {}),
+      ...(typeof failure.column === "number" ? { column: failure.column } : {}),
+      ...(typeof failure.code === "string" ? { code: failure.code } : {})
+    }];
+  }) : [];
+  const acceptanceCriteria = Array.isArray(report.acceptanceCriteria) ? report.acceptanceCriteria.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const criterion = entry as Record<string, unknown>;
+    if (typeof criterion.criterion !== "string"
+      || !["passed", "failed", "not_verified"].includes(String(criterion.status))
+      || !Array.isArray(criterion.evidence)) return [];
+    return [{
+      criterion: criterion.criterion,
+      status: criterion.status as "passed" | "failed" | "not_verified",
+      evidence: unique(criterion.evidence.filter((item): item is string => typeof item === "string"))
+    }];
+  }) : [];
+  return {
+    status: report.status,
+    checks,
+    failures,
+    acceptanceCriteria,
+    evidence: unique(Array.isArray(report.evidence) ? report.evidence.filter((item): item is string => typeof item === "string") : []),
+    relatedTests: unique(Array.isArray(report.relatedTests) ? report.relatedTests.filter((item): item is string => typeof item === "string") : [])
+  };
+}
+
+function normalizeTesterArtifacts(value: unknown): TesterArtifact[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const artifact = entry as Record<string, unknown>;
+    const validation = normalizeValidationReport(artifact.validation);
+    if (typeof artifact.taskId !== "string" || !artifact.taskId.trim() || !validation) return [];
+    if (!["success", "failed", "blocked"].includes(String(artifact.status))) return [];
+    if (typeof artifact.summary !== "string" || typeof artifact.createdAt !== "number" || !Number.isFinite(artifact.createdAt)) return [];
+    return [{
+      taskId: artifact.taskId.trim(),
+      status: artifact.status as TesterArtifact["status"],
+      summary: artifact.summary.trim(),
+      validation,
+      blockers: unique(Array.isArray(artifact.blockers) ? artifact.blockers.filter((item): item is string => typeof item === "string") : []),
+      createdAt: artifact.createdAt
+    }];
+  });
+}
+
+function mergeTesterArtifacts(current: unknown, incoming: TesterArtifact[]) {
+  const merged = [...normalizeTesterArtifacts(current), ...normalizeTesterArtifacts(incoming)];
+  const artifacts = new Map<string, TesterArtifact>();
+  for (const artifact of merged) artifacts.set(`${artifact.taskId}:${artifact.createdAt}:${artifact.status}`, artifact);
+  return [...artifacts.values()].sort((left, right) => left.createdAt - right.createdAt).slice(-100);
 }
 
 function normalizeTaskRuntimeEvidence(value: unknown): TaskRuntimeEvidence | undefined {
@@ -935,6 +1022,7 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     plannerOutcome: normalizePlannerOutcome(session.plannerOutcome),
     explorerArtifacts: normalizeExplorerArtifacts(session.explorerArtifacts),
     developerArtifacts: normalizeDeveloperArtifacts(session.developerArtifacts),
+    testerArtifacts: normalizeTesterArtifacts(session.testerArtifacts),
     deliveryUnits,
     activeDeliveryUnitId,
     toolFailureDiagnostics: normalizeToolFailureDiagnostics(session.toolFailureDiagnostics),
@@ -1237,6 +1325,33 @@ export async function recordTaskSessionDeveloperExecution(
     developerArtifacts: mergeDeveloperArtifacts(session.developerArtifacts, [artifact]),
     filesChanged: unique([...session.filesChanged, ...artifact.changedFiles]),
     checkpointIds: unique([...session.checkpointIds, ...artifact.checkpointIds]),
+    updatedAt: Date.now()
+  }));
+}
+
+/** 原子保存 Tester 的 Plan 进度和结构化验证证据，不保存完整命令输出。 */
+export async function recordTaskSessionTesterExecution(
+  taskSessionId: string | null | undefined,
+  plan: Plan,
+  artifact: TesterArtifact
+) {
+  if (!taskSessionId) return null;
+  validatePlan(plan);
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    runtimePlan: plan,
+    testerArtifacts: mergeTesterArtifacts(session.testerArtifacts, [artifact]),
+    commandsRun: unique([
+      ...session.commandsRun,
+      ...Object.values(artifact.validation.checks).flatMap((checks) => checks?.map((check) => check.command) ?? [])
+    ]),
+    runtimeEvidence: session.runtimeEvidence
+      ? {
+          ...session.runtimeEvidence,
+          lastValidationAt: artifact.createdAt,
+          lastValidationStatus: artifact.status === "success" ? "success" : "failed"
+        }
+      : session.runtimeEvidence,
     updatedAt: Date.now()
   }));
 }

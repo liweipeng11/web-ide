@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "pretest": "pnpm test:providers && pnpm test:context-budget && pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow && pnpm test:external-context && pnpm test:language-service && pnpm test:inline-edit && pnpm test:runtime-kernel && pnpm test:stage5",
+    "pretest": "pnpm test:providers && pnpm test:context-budget && pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow && pnpm test:external-context && pnpm test:language-service && pnpm test:inline-edit && pnpm test:runtime-kernel && pnpm test:tester-agent && pnpm test:stage5",
     "test:providers": "tsx --test src/providers/providerGateway.test.ts src/providers/openAiCompatibleProvider.test.ts src/modelGatewayClient.test.ts src/modelSelectionStore.test.ts src/modelRoutes.test.ts",
     "test:context-budget": "tsx --test src/contextBudget/contextBudgetManager.test.ts src/contextBudget/contextBudgetIntegration.test.ts",
     "test:symbol-graph": "tsx --test src/symbolGraph/symbolGraph.test.ts",
@@ -25,6 +25,8 @@
     "verify:runtime-phase3": "pnpm typecheck && pnpm test:runtime-kernel && pnpm test:main-agent && pnpm test:planner-agent && pnpm test:explorer-agent && pnpm test:runtime-planning-integration",
     "test:developer-agent": "tsx --test src/agents/developer/*.test.ts src/developerExecutionService.test.ts",
     "verify:runtime-phase4": "pnpm typecheck && pnpm test:runtime-kernel && pnpm test:main-agent && pnpm test:planner-agent && pnpm test:explorer-agent && pnpm test:developer-agent && pnpm test:runtime-planning-integration",
+    "test:tester-agent": "tsx --test src/agents/tester/*.test.ts src/testerExecutionService.test.ts",
+    "verify:runtime-phase5": "pnpm typecheck && pnpm test:runtime-kernel && pnpm test:main-agent && pnpm test:planner-agent && pnpm test:explorer-agent && pnpm test:developer-agent && pnpm test:tester-agent && pnpm test:runtime-planning-integration",
     "test:stage5": "tsx --test src/acceptance/stage5Acceptance.test.ts",
     "test:command-execution": "tsx --test src/commandExecution/*.test.ts",
     "test:project-memory": "tsx --test src/projectMemory/projectMemoryMigration.test.ts src/projectMemory/projectMemoryStore.test.ts src/projectMemory/projectMemoryService.test.ts src/projectMemory/projectMemoryPrompt.test.ts src/projectMemory/projectMemoryIntegration.test.ts src/projectMemory/memoryCandidateService.test.ts src/projectMemory/memoryExtractionService.test.ts src/projectMemory/memorySanitizer.test.ts src/projectMemory/projectMemoryRoutes.test.ts src/projectMemory/memoryRetrievalService.test.ts src/projectMemory/memoryScoring.test.ts src/projectMemory/memoryPromptBudget.test.ts src/projectMemory/memoryValidationService.test.ts src/projectMemory/memoryLifecycleService.test.ts src/projectMemory/memoryConflictService.test.ts src/projectMemory/memoryPromotionService.test.ts src/contracts/projectMemoryContract.test.ts src/projectRules.test.ts",
