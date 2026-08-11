@@ -650,6 +650,8 @@ export type TaskSession = {
     blockers?: string[];
     updatedAt: number;
   };
+  // Explorer 只持久化结构化事实和证据，不保存读取过的文件全文或工具原始输出。
+  explorerArtifacts?: import("./agents/explorer/contracts.js").ExplorerArtifact[];
   // 旧会话缺失阶段 1 字段时，读取层会补齐为空值，保持历史兼容。
   deliveryUnits?: DeliveryUnit[];
   activeDeliveryUnitId?: string;

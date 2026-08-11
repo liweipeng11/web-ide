@@ -5,6 +5,7 @@ import { MainAgent } from "./mainAgent.js";
 import type { MainAgentDecisionModel } from "./mainAgentModel.js";
 import { PlannerAgent } from "../planner/plannerAgent.js";
 import type { PlannerAgentDecisionModel } from "../planner/plannerAgentModel.js";
+import type { ExplorerExecution } from "../explorer/explorerAgentRuntime.js";
 import { MainAgentRuntime, type MainAgentRuntimeResult } from "./mainAgentRuntime.js";
 
 class RuntimeDecisionModel implements MainAgentDecisionModel {
@@ -38,6 +39,51 @@ class RuntimePlannerModel implements PlannerAgentDecisionModel {
   async replan() {
     return this.replanValue;
   }
+}
+
+class SequencedPlannerModel implements PlannerAgentDecisionModel {
+  readonly inputs: string[] = [];
+
+  constructor(private readonly createValues: unknown[]) {}
+
+  async createPlan(input: string) {
+    this.inputs.push(input);
+    if (!this.createValues.length) throw new Error("测试计划结果已耗尽");
+    return this.createValues.shift();
+  }
+
+  async replan() {
+    throw new Error("本测试不执行 replan");
+  }
+}
+
+function successfulExploration(): ExplorerExecution {
+  const exploration = {
+    summary: "当前认证使用 Redis Session",
+    relevantFiles: ["src/session/redis.ts"],
+    facts: [{ statement: "登录成功后写入 Redis Session", evidence: ["src/session/redis.ts:18"] }],
+    unknowns: []
+  };
+  return {
+    result: {
+      taskId: "EXPLORE-CONTEXT-1",
+      status: "success",
+      summary: exploration.summary,
+      facts: exploration.facts.map((fact) => fact.statement),
+      changedFiles: [],
+      evidence: exploration.facts.flatMap((fact) => fact.evidence),
+      blockers: []
+    },
+    exploration,
+    state: {
+      goal: "重构认证系统",
+      completedTasks: ["EXPLORE-CONTEXT-1"],
+      failedTasks: [],
+      changedFiles: [],
+      facts: exploration.facts.map((fact) => fact.statement),
+      status: "completed"
+    }
+  };
 }
 
 function assertExecuted(result: MainAgentRuntimeResult): asserts result is Extract<MainAgentRuntimeResult, { outcome: "executed" }> {
@@ -268,4 +314,206 @@ test("Main 的 replan 入口保留已完成进度并接收新版 Plan", async ()
   if (result.status !== "ready") return;
   assert.equal(result.plan.version, 2);
   assert.equal(result.plan.tasks.find((task) => task.id === "T1")?.status, "completed");
+});
+
+test("Main 执行 Planner 指定的 explore Task 并只接收结构化探索结果", async () => {
+  const plan: Plan = {
+    version: 1,
+    goal: "理解认证系统",
+    assumptions: [],
+    tasks: [{
+      id: "T1",
+      type: "explore",
+      goal: "定位认证流程",
+      dependencies: [],
+      requiredCapabilities: ["exploration"],
+      readScope: ["src/**"],
+      writeScope: [],
+      acceptanceCriteria: ["给出认证事实"],
+      status: "pending"
+    }],
+    completionCriteria: ["认证流程已确认"]
+  };
+  let delegatedTaskId = "";
+  const runtime = new MainAgentRuntime({
+    explorer: {
+      async executePlanTask(_plan, taskId) {
+        delegatedTaskId = taskId;
+        const execution = successfulExploration();
+        return { ...execution, result: { ...execution.result, taskId } };
+      }
+    }
+  });
+
+  const result = await runtime.executeExploreTask(plan, "T1");
+  assert.equal(delegatedTaskId, "T1");
+  assert.deepEqual(result.exploration?.relevantFiles, ["src/session/redis.ts"]);
+  assert.doesNotMatch(JSON.stringify(result.exploration), /完整文件正文/);
+});
+
+test("Planner missing_context 时 Main 调用 Explorer 补充事实后再次规划", async () => {
+  const routeModel = new RuntimeDecisionModel(
+    { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: [] },
+    []
+  );
+  const plannerModel = new SequencedPlannerModel([
+    { status: "missing_context", required: ["需要确认当前 Session 实现"] },
+    {
+      status: "ready",
+      plan: {
+        assumptions: [],
+        tasks: [{ id: "T1", type: "implement", goal: "迁移认证", dependencies: [], acceptanceCriteria: ["迁移完成"] }],
+        completionCriteria: ["认证迁移完成"]
+      }
+    }
+  ]);
+  let exploreCalls = 0;
+  const runtime = new MainAgentRuntime({
+    agent: new MainAgent(routeModel),
+    planner: new PlannerAgent(plannerModel),
+    explorer: {
+      async executePlanTask() {
+        exploreCalls += 1;
+        return successfulExploration();
+      }
+    }
+  });
+  const result = await runtime.planWithExploration({
+    goal: "重构认证系统",
+    readScope: ["src/**"],
+    writeScope: ["src/auth/**"]
+  });
+
+  assert.equal(exploreCalls, 1);
+  assert.equal(result.planning?.status, "ready");
+  assert.equal(result.explorations.length, 1);
+  assert.match(plannerModel.inputs[1], /Redis Session/);
+  assert.match(plannerModel.inputs[1], /src\/session\/redis\.ts:18/);
+});
+
+test("Planner missing_context 但没有 readScope 时 Main 不自动扩大 Explorer 权限", async () => {
+  const routeModel = new RuntimeDecisionModel(
+    { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: [] },
+    []
+  );
+  let exploreCalls = 0;
+  const runtime = new MainAgentRuntime({
+    agent: new MainAgent(routeModel),
+    planner: new PlannerAgent(new RuntimePlannerModel({ status: "missing_context", required: ["需要仓库结构"] })),
+    explorer: {
+      async executePlanTask() {
+        exploreCalls += 1;
+        return successfulExploration();
+      }
+    }
+  });
+  const result = await runtime.planWithExploration({ goal: "重构认证系统" });
+
+  assert.equal(exploreCalls, 0);
+  assert.equal(result.planning?.status, "missing_context");
+});
+
+test("Planner ready 后 Main 自动执行可运行的 explore Task 并停在 implement 边界", async () => {
+  const routeModel = new RuntimeDecisionModel(
+    { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: [] },
+    []
+  );
+  const planner = new PlannerAgent(new RuntimePlannerModel({
+    status: "ready",
+    plan: {
+      assumptions: [],
+      tasks: [
+        { id: "T1", type: "explore", goal: "确认认证入口", dependencies: [], acceptanceCriteria: ["给出入口证据"] },
+        { id: "T2", type: "explore", goal: "确认影响范围", dependencies: ["T1"], acceptanceCriteria: ["给出影响证据"] },
+        { id: "T3", type: "implement", goal: "迁移认证", dependencies: ["T2"], acceptanceCriteria: ["完成迁移"] }
+      ],
+      completionCriteria: ["认证迁移完成"]
+    }
+  }));
+  const executedTaskIds: string[] = [];
+  const runtime = new MainAgentRuntime({
+    agent: new MainAgent(routeModel),
+    planner,
+    explorer: {
+      async executePlanTask(plan, taskId) {
+        executedTaskIds.push(taskId);
+        const nextPlan: Plan = {
+          ...plan,
+          tasks: plan.tasks.map((task) => task.id === taskId ? { ...task, status: "completed" as const } : { ...task })
+        };
+        const artifact = successfulExploration();
+        return {
+          ...artifact,
+          result: { ...artifact.result, taskId },
+          state: {
+            ...artifact.state,
+            plan: nextPlan,
+            completedTasks: nextPlan.tasks.filter((task) => task.status === "completed").map((task) => task.id),
+            status: "running"
+          }
+        };
+      }
+    }
+  });
+
+  const result = await runtime.planWithExploration({
+    goal: "重构认证系统",
+    readScope: ["src/**"],
+    writeScope: ["src/auth/**"]
+  });
+
+  assert.deepEqual(executedTaskIds, ["T1", "T2"]);
+  assert.equal(result.planning?.status, "ready");
+  if (result.planning?.status !== "ready") return;
+  assert.equal(result.planning.plan.tasks.find((task) => task.id === "T1")?.status, "completed");
+  assert.equal(result.planning.plan.tasks.find((task) => task.id === "T2")?.status, "completed");
+  assert.equal(result.planning.plan.tasks.find((task) => task.id === "T3")?.status, "pending");
+  assert.equal(result.explorations.length, 2);
+});
+
+test("ready Plan 中的 Explorer 失败时 Main 返回结构化失败而不伪装为 ready", async () => {
+  const routeModel = new RuntimeDecisionModel(
+    { intent: "analysis", complexity: "complex", route: "planned", requiredCapabilities: [] },
+    []
+  );
+  const planner = new PlannerAgent(new RuntimePlannerModel({
+    status: "ready",
+    plan: {
+      assumptions: [],
+      tasks: [{ id: "T1", type: "explore", goal: "确认认证入口", dependencies: [], acceptanceCriteria: ["给出证据"] }],
+      completionCriteria: ["认证入口已确认"]
+    }
+  }));
+  const runtime = new MainAgentRuntime({
+    agent: new MainAgent(routeModel),
+    planner,
+    explorer: {
+      async executePlanTask() {
+        return {
+          result: {
+            taskId: "T1",
+            status: "failed",
+            summary: "Explorer 执行失败",
+            facts: [],
+            changedFiles: [],
+            evidence: [],
+            blockers: ["模型不可用"]
+          },
+          state: {
+            goal: "确认认证入口",
+            completedTasks: [],
+            failedTasks: ["T1"],
+            changedFiles: [],
+            facts: [],
+            status: "failed"
+          }
+        };
+      }
+    }
+  });
+
+  const result = await runtime.planWithExploration({ goal: "分析认证系统", readScope: ["src/**"] });
+  assert.equal(result.planning?.status, "failed");
+  if (result.planning?.status !== "failed") return;
+  assert.deepEqual(result.planning.blockers, ["模型不可用"]);
 });

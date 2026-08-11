@@ -768,6 +768,17 @@ export type SubagentSummary = {
   lastUpdatedAt: number;
 };
 
+export type ExplorerArtifact = {
+  taskId: string;
+  result: {
+    summary: string;
+    relevantFiles: string[];
+    facts: Array<{ statement: string; evidence: string[] }>;
+    unknowns: string[];
+  };
+  createdAt: number;
+};
+
 export type TaskSession = {
   id: string;
   userGoal: string;
@@ -805,6 +816,7 @@ export type TaskSession = {
   toolFailureDiagnostics?: ToolFailureDiagnostic[];
   recoveryHistory?: RecoveryDecision[];
   continuation?: TaskContinuation;
+  explorerArtifacts?: ExplorerArtifact[];
   checkpointIds: string[];
   // 任务历史真实变更视图，历史 diff 展示优先以 checkpoint 为准。
   diffView?: TaskSessionDiffView;

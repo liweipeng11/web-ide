@@ -8,7 +8,11 @@ import { createTaskWorkflow, getTaskWorkflowSteps, type TaskWorkflowSnapshot, ty
 import type { AgentIntent, AgentRequestClassification } from "./aiClient.js";
 import type { DeliveryUnit, TaskPlanItem, TaskPlanItemStatus, TaskSession } from "./types.js";
 import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
-import { MainAgentRuntime } from "./agents/main/mainAgentRuntime.js";
+import {
+  MainAgentRuntime,
+  type MainAgentExplorationPlanningResult,
+  type MainAgentPlanningResult
+} from "./agents/main/mainAgentRuntime.js";
 
 type GeneratedPlanItem = {
   id?: string;
@@ -294,7 +298,9 @@ export async function generateTaskPlan(userGoal: string, classification?: AgentR
   return fallback;
 }
 
-export async function initializeTaskPlan(session: TaskSession, classification?: AgentRequestClassification, options: { force?: boolean; forceApproval?: boolean; selectedPath?: string | null; contextFileCount?: number; runtimePlanning?: boolean; runtimePlanner?: Pick<MainAgentRuntime, "plan"> } = {}) {
+type RuntimePlanningFacade = Pick<MainAgentRuntime, "plan"> & Partial<Pick<MainAgentRuntime, "planWithExploration">>;
+
+export async function initializeTaskPlan(session: TaskSession, classification?: AgentRequestClassification, options: { force?: boolean; forceApproval?: boolean; selectedPath?: string | null; contextFileCount?: number; runtimePlanning?: boolean; runtimePlanner?: RuntimePlanningFacade } = {}) {
   // 纯命令请求不属于四类代码任务工作流，保持原有命令执行链路。
   if (classification?.intent === "command") {
     return session;
@@ -308,16 +314,28 @@ export async function initializeTaskPlan(session: TaskSession, classification?: 
   }
 
   if (options.runtimePlanning) {
-    const planningResult = await (options.runtimePlanner ?? new MainAgentRuntime()).plan({
+    const runtimePlanner = options.runtimePlanner ?? new MainAgentRuntime();
+    const request = {
       goal: classification?.normalizedGoal || session.userGoal,
       knownFacts: workflowSession.filesRead.map((filePath) => `已读取文件：${filePath}`),
       constraints: classification?.reason ? [classification.reason] : [],
       // Planner 只声明后续任务边界，不直接获得这些路径对应的工具权限。
       readScope: ["**"],
       writeScope: classification?.intent === "inspect" ? [] : options.selectedPath ? [options.selectedPath] : ["**"]
-    });
+    };
+    // 阶段 3：生产入口优先允许 Main 用 Explorer 补齐缺失事实；测试或旧适配器仍可只实现 plan。
+    const planningResult: MainAgentPlanningResult | MainAgentExplorationPlanningResult = runtimePlanner.planWithExploration
+      ? await runtimePlanner.planWithExploration(request)
+      : await runtimePlanner.plan(request);
     if (planningResult.planning) {
-      workflowSession = (await setTaskSessionRuntimePlanning(session.id, planningResult.planning)) || workflowSession;
+      const createdAt = Date.now();
+      const explorations = (planningResult as Partial<MainAgentExplorationPlanningResult>).explorations ?? [];
+      const explorerArtifacts = explorations.flatMap((execution) =>
+        execution.exploration
+          ? [{ taskId: execution.result.taskId, result: execution.exploration, createdAt }]
+          : []
+      );
+      workflowSession = (await setTaskSessionRuntimePlanning(session.id, planningResult.planning, explorerArtifacts)) || workflowSession;
       if (planningResult.planning.status !== "ready") return workflowSession;
     }
   }

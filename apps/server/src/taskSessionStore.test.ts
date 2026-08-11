@@ -186,12 +186,13 @@ test("旧会话缺失阶段 1 字段时保持可读", async () => {
   try {
     const filePath = path.join(projectRuntimeDirectory("task-sessions"), `${session.id}.json`);
     const legacy = JSON.parse(await fs.readFile(filePath, "utf8")) as Record<string, unknown>;
-    delete legacy.deliveryUnits; delete legacy.activeDeliveryUnitId; delete legacy.toolFailureDiagnostics; delete legacy.recoveryHistory; delete legacy.continuation;
+    delete legacy.deliveryUnits; delete legacy.activeDeliveryUnitId; delete legacy.toolFailureDiagnostics; delete legacy.recoveryHistory; delete legacy.continuation; delete legacy.explorerArtifacts;
     await fs.writeFile(filePath, JSON.stringify(legacy), "utf8");
     const restored = await getTaskSession(session.id);
     assert.deepEqual(restored.deliveryUnits, []);
     assert.deepEqual(restored.toolFailureDiagnostics, []);
     assert.deepEqual(restored.recoveryHistory, []);
+    assert.deepEqual(restored.explorerArtifacts, []);
     assert.equal(restored.continuation, undefined);
   } finally { await fs.rm(workspaceRoot, { recursive: true, force: true }); }
 });
@@ -1510,6 +1511,83 @@ test("阶段 2 初始化和重写计划会同步交付单元并保留已完成�
     assert.equal(preservedUnit?.status, "validated");
     assert.equal(rewritten?.planRevisions?.[0]?.reason, "将第 2 步提前");
     assert.equal(rewritten?.activeDeliveryUnitId, rewritten?.deliveryUnits?.find((unit) => unit.status === "active")?.id);
+  } finally {
+    config.aiApiKey = previousAiApiKey;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("生产计划入口优先使用带 Explorer 的规划协调能力", async () => {
+  const { workspaceRoot, session } = await createIsolatedTaskSession("探索后规划认证系统");
+  let explorationPlanningCalls = 0;
+  const previousAiApiKey = config.aiApiKey;
+  config.aiApiKey = "";
+  try {
+    const planned = await initializeTaskPlan(session, {
+      intent: "edit",
+      confidence: 1,
+      normalizedGoal: session.userGoal,
+      reason: "需要仓库事实"
+    }, {
+      runtimePlanning: true,
+      runtimePlanner: {
+        async plan() {
+          throw new Error("存在 planWithExploration 时不应调用普通 plan");
+        },
+        async planWithExploration() {
+          explorationPlanningCalls += 1;
+          return {
+            decision: { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: ["planning"] } as const,
+            explorations: [{
+              result: {
+                taskId: "T1",
+                status: "success" as const,
+                summary: "认证入口已确认",
+                facts: ["登录路由调用认证服务"],
+                changedFiles: [],
+                evidence: ["src/routes/auth.ts:12"],
+                blockers: []
+              },
+              exploration: {
+                summary: "认证入口已确认",
+                relevantFiles: ["src/routes/auth.ts"],
+                facts: [{ statement: "登录路由调用认证服务", evidence: ["src/routes/auth.ts:12"] }],
+                unknowns: []
+              },
+              state: {
+                goal: session.userGoal,
+                completedTasks: ["T1"],
+                failedTasks: [],
+                changedFiles: [],
+                facts: ["登录路由调用认证服务"],
+                status: "completed" as const
+              }
+            }],
+            planning: {
+              status: "ready" as const,
+              plan: {
+                version: 1,
+                goal: session.userGoal,
+                assumptions: [],
+                completionCriteria: ["认证事实已确认并形成计划"],
+                tasks: [{
+                  id: "T1", type: "explore" as const, goal: "确认认证事实", dependencies: [], requiredCapabilities: ["exploration"],
+                  readScope: ["**"], writeScope: [], acceptanceCriteria: ["提供文件证据"], status: "pending" as const
+                }]
+              }
+            }
+          };
+        }
+      }
+    });
+
+    assert.equal(explorationPlanningCalls, 1);
+    assert.equal(planned?.plannerOutcome?.status, "ready");
+    assert.equal(planned?.runtimePlan?.tasks[0]?.type, "explore");
+    const restored = await getTaskSession(session.id);
+    assert.equal(restored?.explorerArtifacts?.[0]?.taskId, "T1");
+    assert.deepEqual(restored?.explorerArtifacts?.[0]?.result.relevantFiles, ["src/routes/auth.ts"]);
+    assert.doesNotMatch(JSON.stringify(restored?.explorerArtifacts), /完整文件正文/);
   } finally {
     config.aiApiKey = previousAiApiKey;
     await fs.rm(workspaceRoot, { recursive: true, force: true });

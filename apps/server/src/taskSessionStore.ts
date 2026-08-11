@@ -18,6 +18,7 @@ import { normalizeStructuredModificationPlan, type StructuredModificationPlan } 
 import type { Plan } from "./runtime/contracts.js";
 import { validatePlan } from "./runtime/stateManager.js";
 import type { PlannerResult } from "./agents/planner/contracts.js";
+import type { ExplorerArtifact, ExplorerResult } from "./agents/explorer/contracts.js";
 
 function taskSessionDirectory() {
   return projectRuntimeDirectory("task-sessions");
@@ -64,6 +65,52 @@ function normalizePlannerOutcome(value: unknown): TaskSession["plannerOutcome"] 
     blockers: Array.isArray(record.blockers) ? unique(record.blockers.filter((item): item is string => typeof item === "string")) : undefined,
     updatedAt: record.updatedAt
   };
+}
+
+function normalizeExplorerResult(value: unknown): ExplorerResult | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.summary !== "string" || !record.summary.trim()) return undefined;
+  if (!Array.isArray(record.relevantFiles) || !Array.isArray(record.facts) || !Array.isArray(record.unknowns)) return undefined;
+
+  const facts = record.facts.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const fact = value as Record<string, unknown>;
+    if (typeof fact.statement !== "string" || !fact.statement.trim() || !Array.isArray(fact.evidence)) return [];
+    const evidence = unique(fact.evidence.filter((item): item is string => typeof item === "string"));
+    return evidence.length ? [{ statement: fact.statement.trim(), evidence }] : [];
+  });
+  if (facts.length !== record.facts.length) return undefined;
+
+  return {
+    summary: record.summary.trim(),
+    relevantFiles: unique(record.relevantFiles.filter((item): item is string => typeof item === "string")),
+    facts,
+    unknowns: unique(record.unknowns.filter((item): item is string => typeof item === "string"))
+  };
+}
+
+function normalizeExplorerArtifacts(value: unknown): ExplorerArtifact[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const artifact = item as Record<string, unknown>;
+    const result = normalizeExplorerResult(artifact.result);
+    if (typeof artifact.taskId !== "string" || !artifact.taskId.trim() || !result) return [];
+    if (typeof artifact.createdAt !== "number" || !Number.isFinite(artifact.createdAt)) return [];
+    return [{ taskId: artifact.taskId.trim(), result, createdAt: artifact.createdAt }];
+  });
+}
+
+function mergeExplorerArtifacts(current: unknown, incoming: ExplorerArtifact[]) {
+  const merged = [...normalizeExplorerArtifacts(current), ...normalizeExplorerArtifacts(incoming)];
+  const uniqueArtifacts = new Map<string, ExplorerArtifact>();
+  for (const artifact of merged) {
+    const key = `${artifact.taskId}:${JSON.stringify(artifact.result)}`;
+    uniqueArtifacts.set(key, artifact);
+  }
+  // 防止长期重规划无限扩大任务会话文件，同时保留最近的结构化探索记录。
+  return [...uniqueArtifacts.values()].sort((a, b) => a.createdAt - b.createdAt).slice(-100);
 }
 
 function normalizeTaskRuntimeEvidence(value: unknown): TaskRuntimeEvidence | undefined {
@@ -843,6 +890,7 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     planRevisions: normalizeTaskPlanRevisions(session.planRevisions),
     runtimePlan: normalizeRuntimePlan(session.runtimePlan),
     plannerOutcome: normalizePlannerOutcome(session.plannerOutcome),
+    explorerArtifacts: normalizeExplorerArtifacts(session.explorerArtifacts),
     deliveryUnits,
     activeDeliveryUnitId,
     toolFailureDiagnostics: normalizeToolFailureDiagnostics(session.toolFailureDiagnostics),
@@ -1108,7 +1156,11 @@ export async function setTaskPlanItems(taskSessionId: string | null | undefined,
 }
 
 /** 持久化新 Runtime 的完整 DAG；旧 planItems 继续作为兼容 UI 投影独立维护。 */
-export async function setTaskSessionRuntimePlanning(taskSessionId: string | null | undefined, result: PlannerResult) {
+export async function setTaskSessionRuntimePlanning(
+  taskSessionId: string | null | undefined,
+  result: PlannerResult,
+  explorerArtifacts: ExplorerArtifact[] = []
+) {
   if (!taskSessionId) return null;
   const now = Date.now();
   return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
@@ -1120,6 +1172,7 @@ export async function setTaskSessionRuntimePlanning(taskSessionId: string | null
       ...(result.status === "failed" ? { blockers: result.blockers } : {}),
       updatedAt: now
     },
+    explorerArtifacts: mergeExplorerArtifacts(session.explorerArtifacts, explorerArtifacts),
     // 缺少上下文或规划失败时保持可恢复状态，不能继续伪装成已规划完成。
     status: result.status === "ready" ? session.status : "awaiting_user",
     updatedAt: now

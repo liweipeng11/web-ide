@@ -4,6 +4,7 @@ import type {
   RouteDecision,
   RuntimeExecutionResult,
   RuntimeTool,
+  Task,
   TaskType
 } from "../../runtime/contracts.js";
 import { AgentRegistry } from "../../runtime/agentRegistry.js";
@@ -14,6 +15,8 @@ import { ToolRegistry } from "../../runtime/toolRegistry.js";
 import { runtimeError } from "../../runtime/errors.js";
 import type { PlannerResult } from "../planner/contracts.js";
 import { PlannerAgent } from "../planner/plannerAgent.js";
+import type { ExplorerExecution } from "../explorer/explorerAgentRuntime.js";
+import { ExplorerAgentRuntime } from "../explorer/explorerAgentRuntime.js";
 import { MainAgent } from "./mainAgent.js";
 
 export type MainAgentRequest = {
@@ -43,6 +46,10 @@ export type MainAgentPlanningResult = {
   planning: PlannerResult | null;
 };
 
+export type MainAgentExplorationPlanningResult = MainAgentPlanningResult & {
+  explorations: ExplorerExecution[];
+};
+
 export type MainAgentReplanRequest = {
   oldPlan: Plan;
   completedTasks: string[];
@@ -55,6 +62,7 @@ export type MainAgentReplanRequest = {
 export type MainAgentRuntimeOptions = {
   agent?: MainAgent;
   planner?: PlannerAgent;
+  explorer?: Pick<ExplorerAgentRuntime, "executePlanTask">;
   tools?: RuntimeTool[];
   allowedTools?: string[];
 };
@@ -109,12 +117,14 @@ function createPlan(task: AgentTaskPacket, decision: RouteDecision): Plan {
 export class MainAgentRuntime {
   private readonly agent: MainAgent;
   private readonly planner: PlannerAgent;
+  private readonly explorer: Pick<ExplorerAgentRuntime, "executePlanTask">;
   private readonly tools: ToolRegistry;
   private readonly policyTools: string[];
 
   constructor(options: MainAgentRuntimeOptions = {}) {
     this.agent = options.agent ?? new MainAgent();
     this.planner = options.planner ?? new PlannerAgent();
+    this.explorer = options.explorer ?? new ExplorerAgentRuntime();
     this.tools = new ToolRegistry(options.tools ?? []);
     this.policyTools = [...new Set(options.allowedTools ?? [])];
   }
@@ -168,6 +178,115 @@ export class MainAgentRuntime {
       writeScope: decision.intent === "code_change" ? request.writeScope ?? [] : []
     });
     return { decision, planning };
+  }
+
+  /** Main 只调度 Plan 中明确声明的 explore Task，不在阶段 3 执行实现或测试任务。 */
+  executeExploreTask(plan: Plan, taskId: string, context: unknown = {}) {
+    return this.explorer.executePlanTask(plan, taskId, context);
+  }
+
+  private async executeRunnableExploreTasks(
+    planning: Extract<PlannerResult, { status: "ready" }>,
+    previousExplorations: ExplorerExecution[] = []
+  ) {
+    let plan = planning.plan;
+    const explorations = [...previousExplorations];
+
+    while (true) {
+      const completedTaskIds = new Set(plan.tasks.filter((task) => task.status === "completed").map((task) => task.id));
+      const task = plan.tasks.find((candidate) =>
+        candidate.type === "explore"
+        && (candidate.status === "pending" || candidate.status === "blocked")
+        && candidate.dependencies.every((dependency) => completedTaskIds.has(dependency))
+      );
+      if (!task) break;
+
+      const execution = await this.executeExploreTask(plan, task.id, { source: "planner_ready_task" });
+      explorations.push(execution);
+      if (execution.result.status !== "success") {
+        return {
+          planning: {
+            status: "failed",
+            reason: "model_error",
+            blockers: execution.result.blockers.length
+              ? execution.result.blockers
+              : [`Explorer 任务 ${task.id} 未能完成。`]
+          } as const,
+          explorations
+        };
+      }
+      // Runtime 持有真实 Task 状态；Main 只接收更新后的 Plan 和结构化探索制品。
+      if (!execution.state.plan) {
+        throw runtimeError("INVALID_CONTRACT", `Explorer 执行后没有返回 Plan 状态：${task.id}`, { taskId: task.id });
+      }
+      plan = execution.state.plan;
+    }
+
+    return {
+      planning: { status: "ready", plan } as const,
+      explorations
+    };
+  }
+
+  /** Planner 缺少仓库事实时执行一次受限探索，再把压缩事实交回 Planner。 */
+  async planWithExploration(request: MainAgentRequest): Promise<MainAgentExplorationPlanningResult> {
+    const initial = await this.plan(request);
+    if (initial.planning?.status === "ready") {
+      const executed = await this.executeRunnableExploreTasks(initial.planning);
+      return { decision: initial.decision, ...executed };
+    }
+    if (initial.planning?.status !== "missing_context") {
+      return { ...initial, explorations: [] };
+    }
+
+    const readScope = [...new Set(request.readScope?.map((item) => item.trim()).filter(Boolean) ?? [])];
+    if (!readScope.length) {
+      // 没有显式读取范围时不得自动把 Explorer 升级为全仓库访问。
+      return { ...initial, explorations: [] };
+    }
+
+    const required = initial.planning.required;
+    const explorationTask: Task = {
+      id: "EXPLORE-CONTEXT-1",
+      type: "explore",
+      goal: `补充 Planner 所需仓库事实：${required.join("；")}`,
+      dependencies: [],
+      requiredCapabilities: ["exploration"],
+      readScope,
+      writeScope: [],
+      acceptanceCriteria: required.map((item) => `确认并提供证据：${item}`),
+      status: "pending"
+    };
+    const explorationPlan: Plan = {
+      version: 1,
+      goal: request.goal.trim(),
+      assumptions: [],
+      tasks: [explorationTask],
+      completionCriteria: [...explorationTask.acceptanceCriteria]
+    };
+    const exploration = await this.executeExploreTask(explorationPlan, explorationTask.id, {
+      source: "planner_missing_context",
+      required
+    });
+    if (exploration.result.status !== "success" || !exploration.exploration) {
+      return { ...initial, explorations: [exploration] };
+    }
+
+    const facts = exploration.exploration.facts.map((fact) => `${fact.statement}（证据：${fact.evidence.join("、")}）`);
+    const relevantFiles = exploration.exploration.relevantFiles.map((filePath) => `相关文件：${filePath}`);
+    const planning = await this.planner.createPlan({
+      goal: request.goal.trim(),
+      knownFacts: [...new Set([...(request.knownFacts ?? []), ...facts, ...relevantFiles])],
+      constraints: request.constraints ?? [],
+      state: createAgentState(request.goal.trim()),
+      readScope,
+      writeScope: initial.decision.intent === "code_change" ? request.writeScope ?? [] : []
+    });
+    if (planning.status === "ready") {
+      const executed = await this.executeRunnableExploreTasks(planning, [exploration]);
+      return { decision: initial.decision, ...executed };
+    }
+    return { decision: initial.decision, planning, explorations: [exploration] };
   }
 
   /** Main 持有重规划入口；Planner 只返回新计划，不直接修改真实 AgentState。 */

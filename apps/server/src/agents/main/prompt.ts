@@ -26,7 +26,7 @@ Allowed actions:
 - {"type":"finish"}
 
 Use only tools listed in availableTools. Never invent permissions.
-The first implementation has no Planner or worker agents, so prefer respond, tool, or finish.`;
+Explorer delegation for planned tasks is controlled by MainAgentRuntime. Do not invent worker identities or delegate tasks outside the current plan.`;
 
 export type MainActionPromptInput = {
   goal: string;
