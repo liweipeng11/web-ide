@@ -795,9 +795,10 @@ export type OrchestrationTrace = {
   calledAgents: Array<"main" | "planner" | "explorer" | "developer" | "tester">;
   events: Array<{
     agent: "main" | "planner" | "explorer" | "developer" | "tester";
-    action: "route" | "plan" | "execute" | "finish" | "stop";
+    action: "route" | "plan" | "replan" | "execute" | "finish" | "stop";
     taskId?: string;
     status?: "success" | "failed" | "blocked" | "ready" | "missing_context";
+    reason?: string;
   }>;
 };
 

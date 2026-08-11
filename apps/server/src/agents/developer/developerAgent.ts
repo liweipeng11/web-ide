@@ -5,6 +5,7 @@ import type {
   RuntimeToolDescriptor
 } from "../../runtime/contracts.js";
 import { runtimeError } from "../../runtime/errors.js";
+import { recoverableToolObservation } from "../toolRecovery.js";
 import { isPathInScope } from "../../runtime/permissionManager.js";
 import type {
   DeveloperAction,
@@ -188,7 +189,16 @@ export class DeveloperAgent implements Agent {
           throw runtimeError("INVALID_CONTRACT", `Developer 修改已有文件前必须先读取该文件：${filePath}`);
         }
       }
-      const result = await context.callTool(action.tool, action.args);
+      let result: unknown;
+      try {
+        result = await context.callTool(action.tool, action.args);
+      } catch (error) {
+        const recovery = recoverableToolObservation(error);
+        if (!recovery) throw error;
+        // 读取目标不存在时允许模型重新定位文件，但写入和权限错误仍立即失败。
+        observations.push({ tool: action.tool, result: recovery });
+        continue;
+      }
       if (action.tool === "read_file") {
         filesRead.add(normalizedFilePath(requiredString(action.args.filePath, "read_file.filePath")));
       }

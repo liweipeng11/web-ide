@@ -227,6 +227,67 @@ test("复杂任务跨审批请求恢复 Planner 和前置 Explorer 轨迹", asyn
   });
 });
 
+test("重规划后立即持久化新版 Plan 和 Replan 轨迹", async () => {
+  await withWorkspace(async () => {
+    const created = await createTaskSession("根据认证事实重新规划", { agentMode: "act" });
+    await setTaskSessionRuntimePlanning(created.id, { status: "ready", plan: plan() });
+    const approved = await approveTaskSessionPlan(created.id);
+    assert.ok(approved);
+
+    const result = await executeApprovedAgentPipeline(approved, {
+      orchestrator: {
+        async executePlan(decision, initialPlan, options): Promise<MainOrchestrationResult> {
+          const revisedPlan = { ...initialPlan, version: 2 };
+          await options?.onPlanUpdate?.(revisedPlan, "replan");
+          await options?.onReplanExplorations?.(revisedPlan, [{
+            result: {
+              taskId: "EXPLORE-REPLAN-CONTEXT-2",
+              status: "success",
+              summary: "补充了 Session 存储事实",
+              facts: ["Session 存储在 Redis"],
+              changedFiles: [],
+              evidence: ["src/session.ts:1"],
+              blockers: []
+            },
+            exploration: {
+              summary: "补充了 Session 存储事实",
+              relevantFiles: ["src/session.ts"],
+              facts: [{ statement: "Session 存储在 Redis", evidence: ["src/session.ts:1"] }],
+              unknowns: []
+            },
+            state: state(revisedPlan, [])
+          }]);
+          return {
+            status: "blocked",
+            decision,
+            plan: revisedPlan,
+            summary: "新版计划已保存，等待继续执行",
+            changedFiles: [],
+            results: [],
+            executions: [],
+            trace: {
+              calledAgents: ["main", "planner"],
+              events: [{
+                agent: "planner",
+                action: "replan",
+                status: "ready",
+                reason: "认证实现事实推翻了 JWT 假设"
+              }]
+            }
+          };
+        }
+      }
+    });
+
+    assert.equal(result.outcome, "executed");
+    const restored = await getTaskSession(created.id);
+    assert.equal(restored.runtimePlan?.version, 2);
+    assert.equal(restored.orchestrationTrace?.events[0]?.action, "replan");
+    assert.match(restored.orchestrationTrace?.events[0]?.reason ?? "", /JWT/);
+    assert.equal(restored.explorerArtifacts?.some((artifact) => artifact.taskId === "EXPLORE-REPLAN-CONTEXT-2"), true);
+  });
+});
+
 test("simple 请求通过生产服务入口执行 Main 并持久化轨迹", async () => {
   await withWorkspace(async () => {
     const created = await createTaskSession("解释登录函数", { agentMode: "act" });

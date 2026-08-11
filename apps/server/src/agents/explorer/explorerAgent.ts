@@ -5,6 +5,7 @@ import type {
   RuntimeToolDescriptor
 } from "../../runtime/contracts.js";
 import { runtimeError } from "../../runtime/errors.js";
+import { recoverableToolObservation } from "../toolRecovery.js";
 import type { ExplorerAction, ExplorerAgentResult, ExplorerFact, ExplorerResult } from "./contracts.js";
 import type { ExplorerAgentDecisionModel } from "./explorerAgentModel.js";
 import { ProviderExplorerAgentDecisionModel } from "./explorerAgentModel.js";
@@ -129,8 +130,15 @@ export class ExplorerAgent implements Agent {
           });
         }
       }
-      const result = await context.callTool(action.tool, action.args);
-      observations.push({ tool: action.tool, result: compactObservation(result) });
+      try {
+        const result = await context.callTool(action.tool, action.args);
+        observations.push({ tool: action.tool, result: compactObservation(result) });
+      } catch (error) {
+        const recovery = recoverableToolObservation(error);
+        if (!recovery) throw error;
+        // 将局部查找失败作为观察返回模型，使 Explorer 可以改用 search_files 或 grep。
+        observations.push({ tool: action.tool, result: recovery });
+      }
     }
 
     throw runtimeError("AGENT_LOOP_LIMIT_EXCEEDED", `Explorer 超过最大执行步数 ${this.maxSteps}。`, {

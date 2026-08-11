@@ -15,6 +15,13 @@ import { runtimeError } from "../../runtime/errors.js";
 import type { MainAgentDecisionModel } from "./mainAgentModel.js";
 import { ProviderMainAgentDecisionModel } from "./mainAgentModel.js";
 import { buildMainActionPrompt } from "./prompt.js";
+import {
+  buildReplanSemanticInput,
+  evaluateReplanRules,
+  type MainReplanDecision,
+  type ReplanPolicyInput
+} from "./replanPolicy.js";
+import { recoverableToolObservation } from "../toolRecovery.js";
 
 export const MAX_MAIN_AGENT_STEPS = 30;
 
@@ -188,6 +195,27 @@ export class MainAgent implements Agent {
     }
   }
 
+  /** 规则具有最高优先级，模型仅辅助判断自然语言假设与事实是否冲突。 */
+  async shouldReplan(input: ReplanPolicyInput): Promise<MainReplanDecision> {
+    const rule = evaluateReplanRules(input);
+    if (rule.shouldReplan !== null) return rule;
+    if (!this.model.shouldReplan) {
+      return { shouldReplan: false, reason: "当前模型未提供重规划语义判断能力。", source: "fallback" };
+    }
+
+    try {
+      const value = await this.model.shouldReplan(buildReplanSemanticInput(input));
+      if (!isRecord(value) || typeof value.shouldReplan !== "boolean") {
+        throw runtimeError("INVALID_CONTRACT", "Main Agent 返回了无效的 Replan 判断。");
+      }
+      const reason = nonEmptyString(value.reason) ?? "语义判断未提供具体原因。";
+      return { shouldReplan: value.shouldReplan, reason, source: "semantic" };
+    } catch {
+      // 辅助模型不可用时保持原计划，不能因为不确定性擅自改写执行边界。
+      return { shouldReplan: false, reason: "重规划语义判断失败，保持当前安全控制流。", source: "fallback" };
+    }
+  }
+
   async nextAction(state: Readonly<AgentState>, context: MainNextActionContext) {
     const rawAction = await this.model.nextAction(buildMainActionPrompt({
       goal: context.task.goal,
@@ -281,8 +309,14 @@ export class MainAgent implements Agent {
         throw runtimeError("PERMISSION_DENIED", "direct 路由不能调用工具。", { toolName: action.tool });
       }
 
-      const result = await context.callTool(action.tool, action.args as Record<string, unknown>);
-      observations.push({ tool: action.tool, result: serializeObservation(result) });
+      try {
+        const result = await context.callTool(action.tool, action.args as Record<string, unknown>);
+        observations.push({ tool: action.tool, result: serializeObservation(result) });
+      } catch (error) {
+        const recovery = recoverableToolObservation(error);
+        if (!recovery) throw error;
+        observations.push({ tool: action.tool, result: recovery });
+      }
       evidence.push(`tool:${action.tool}`);
     }
 

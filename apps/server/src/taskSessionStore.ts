@@ -989,7 +989,7 @@ function normalizeOrchestrationTrace(value: unknown): TaskSession["orchestration
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   const allowedAgents = new Set(["main", "planner", "explorer", "developer", "tester"]);
-  const allowedActions = new Set(["route", "plan", "execute", "finish", "stop"]);
+  const allowedActions = new Set(["route", "plan", "replan", "execute", "finish", "stop"]);
   const calledAgents = Array.isArray(record.calledAgents)
     ? [...new Set(record.calledAgents.filter((agent): agent is "main" | "planner" | "explorer" | "developer" | "tester" =>
         typeof agent === "string" && allowedAgents.has(agent)
@@ -1006,9 +1006,10 @@ function normalizeOrchestrationTrace(value: unknown): TaskSession["orchestration
           || item.status === "ready" || item.status === "missing_context" ? item.status : undefined;
         return [{
           agent: item.agent as "main" | "planner" | "explorer" | "developer" | "tester",
-          action: item.action as "route" | "plan" | "execute" | "finish" | "stop",
+          action: item.action as "route" | "plan" | "replan" | "execute" | "finish" | "stop",
           ...(typeof item.taskId === "string" && item.taskId.trim() ? { taskId: item.taskId } : {}),
-          ...(status ? { status } : {})
+          ...(status ? { status } : {}),
+          ...(typeof item.reason === "string" && item.reason.trim() ? { reason: item.reason.trim() } : {})
         }];
       }).slice(-200)
     : [];

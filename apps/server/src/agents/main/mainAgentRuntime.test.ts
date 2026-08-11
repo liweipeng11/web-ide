@@ -43,6 +43,12 @@ class RuntimePlannerModel implements PlannerAgentDecisionModel {
   }
 }
 
+class ReplanRouteModel extends RuntimeDecisionModel {
+  async shouldReplan() {
+    return { shouldReplan: true, reason: "Redis Session 事实推翻 JWT 假设" };
+  }
+}
+
 class SequencedPlannerModel implements PlannerAgentDecisionModel {
   readonly inputs: string[] = [];
 
@@ -56,6 +62,22 @@ class SequencedPlannerModel implements PlannerAgentDecisionModel {
 
   async replan() {
     throw new Error("本测试不执行 replan");
+  }
+}
+
+class SequencedReplanPlannerModel implements PlannerAgentDecisionModel {
+  readonly inputs: string[] = [];
+
+  constructor(private readonly values: unknown[]) {}
+
+  async createPlan() {
+    throw new Error("本测试不创建初始计划");
+  }
+
+  async replan(input: string) {
+    this.inputs.push(input);
+    if (!this.values.length) throw new Error("重规划测试结果已耗尽");
+    return this.values.shift();
   }
 }
 
@@ -489,24 +511,34 @@ test("Planner ready 后 Main 自动执行可运行的 explore Task 并停在 imp
   assert.equal(result.explorations.length, 2);
 });
 
-test("ready Plan 中的 Explorer 失败时 Main 返回结构化失败而不伪装为 ready", async () => {
+test("ready Plan 中的 Explorer 连续失败后重规划，非法新版计划不会伪装为 ready", async () => {
   const routeModel = new RuntimeDecisionModel(
     { intent: "analysis", complexity: "complex", route: "planned", requiredCapabilities: [] },
     []
   );
-  const planner = new PlannerAgent(new RuntimePlannerModel({
+  const readyValue = {
     status: "ready",
     plan: {
       assumptions: [],
       tasks: [{ id: "T1", type: "explore", goal: "确认认证入口", dependencies: [], acceptanceCriteria: ["给出证据"] }],
       completionCriteria: ["认证入口已确认"]
     }
+  };
+  const planner = new PlannerAgent(new RuntimePlannerModel(readyValue, {
+    status: "ready",
+    plan: { assumptions: [], tasks: [], completionCriteria: ["认证入口已确认"] }
   }));
+  let attempts = 0;
   const runtime = new MainAgentRuntime({
     agent: new MainAgent(routeModel),
     planner,
     explorer: {
-      async executePlanTask() {
+      async executePlanTask(plan) {
+        attempts += 1;
+        const failedPlan: Plan = {
+          ...plan,
+          tasks: plan.tasks.map((task) => task.id === "T1" ? { ...task, status: "failed" as const } : task)
+        };
         return {
           result: {
             taskId: "T1",
@@ -519,6 +551,7 @@ test("ready Plan 中的 Explorer 失败时 Main 返回结构化失败而不伪�
           },
           state: {
             goal: "确认认证入口",
+            plan: failedPlan,
             completedTasks: [],
             failedTasks: ["T1"],
             changedFiles: [],
@@ -533,7 +566,8 @@ test("ready Plan 中的 Explorer 失败时 Main 返回结构化失败而不伪�
   const result = await runtime.planWithExploration({ goal: "分析认证系统", readScope: ["src/**"] });
   assert.equal(result.planning?.status, "failed");
   if (result.planning?.status !== "failed") return;
-  assert.deepEqual(result.planning.blockers, ["模型不可用"]);
+  assert.equal(attempts, 3);
+  assert.match(result.planning.blockers.join("；"), /至少需要一个任务/);
 });
 
 test("Main 显式调度 Plan 中依赖已完成的 implement Task", async () => {
@@ -806,4 +840,131 @@ test("Main 不会自动扩展用户总授权之外的 Developer 范围", () => {
   assert.equal(decision.action, "replan");
   if (decision.action !== "replan") return;
   assert.match(decision.reason, /超出用户授权范围/);
+});
+
+test("计划准备阶段的 Explorer 推翻关键假设后立即重规划", async () => {
+  const routeModel = new ReplanRouteModel(
+    { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: [] },
+    []
+  );
+  const plannerModel = new RuntimePlannerModel(
+    {
+      status: "ready",
+      plan: {
+        assumptions: ["认证使用 JWT"],
+        tasks: [
+          { id: "T1", type: "explore", goal: "确认认证机制", dependencies: [], acceptanceCriteria: ["确认认证机制"] },
+          { id: "T2", type: "implement", goal: "迁移认证", dependencies: ["T1"], acceptanceCriteria: ["迁移完成"] }
+        ],
+        completionCriteria: ["认证迁移完成"]
+      }
+    },
+    {
+      status: "ready",
+      plan: {
+        assumptions: [],
+        tasks: [
+          { id: "T1", type: "explore", goal: "确认认证机制", dependencies: [], acceptanceCriteria: ["确认认证机制"] },
+          { id: "T3", type: "implement", goal: "基于 Redis Session 调整认证", dependencies: ["T1"], acceptanceCriteria: ["迁移完成"] }
+        ],
+        completionCriteria: ["认证迁移完成"]
+      }
+    }
+  );
+  const runtime = new MainAgentRuntime({
+    agent: new MainAgent(routeModel),
+    planner: new PlannerAgent(plannerModel),
+    explorer: {
+      async executePlanTask(plan, taskId) {
+        const exploration = successfulExploration();
+        const nextPlan: Plan = {
+          ...plan,
+          tasks: plan.tasks.map((task) => task.id === taskId ? { ...task, status: "completed" as const } : task)
+        };
+        return {
+          ...exploration,
+          result: { ...exploration.result, taskId },
+          state: {
+            ...exploration.state,
+            goal: plan.goal,
+            plan: nextPlan,
+            completedTasks: [taskId],
+            status: "running" as const
+          }
+        };
+      }
+    }
+  });
+
+  const planning = await runtime.planWithExploration({
+    goal: "迁移认证系统",
+    readScope: ["src/**"],
+    writeScope: ["src/auth/**"]
+  });
+
+  assert.equal(planning.planning?.status, "ready");
+  if (planning.planning?.status !== "ready") return;
+  assert.equal(planning.planning.plan.version, 2);
+  assert.equal(planning.planning.plan.tasks.find((task) => task.id === "T1")?.status, "completed");
+  assert.equal(planning.replans?.[0]?.status, "ready");
+});
+
+test("Replan 缺少上下文时调用 Explorer，并保留约束再次规划", async () => {
+  const oldPlan: Plan = {
+    version: 1,
+    goal: "迁移认证系统",
+    assumptions: ["认证使用 JWT"],
+    tasks: [{
+      id: "T1",
+      type: "explore",
+      goal: "确认认证机制",
+      dependencies: [],
+      requiredCapabilities: ["exploration"],
+      readScope: ["src/**"],
+      writeScope: [],
+      acceptanceCriteria: ["确认认证机制"],
+      status: "completed"
+    }],
+    completionCriteria: ["迁移方案符合真实认证机制"]
+  };
+  const plannerModel = new SequencedReplanPlannerModel([
+    { status: "missing_context", required: ["确认 Session 存储位置"] },
+    {
+      status: "ready",
+      plan: {
+        assumptions: [],
+        tasks: [
+          { id: "T1", type: "explore", goal: "确认认证机制", dependencies: [], acceptanceCriteria: ["确认认证机制"] },
+          { id: "T2", type: "implement", goal: "迁移 Session", dependencies: ["T1"], acceptanceCriteria: ["迁移完成"] }
+        ],
+        completionCriteria: ["迁移方案符合真实认证机制"]
+      }
+    }
+  ]);
+  let explorerCalls = 0;
+  const runtime = new MainAgentRuntime({
+    planner: new PlannerAgent(plannerModel),
+    explorer: {
+      async executePlanTask(_plan, taskId) {
+        explorerCalls += 1;
+        const exploration = successfulExploration();
+        return { ...exploration, result: { ...exploration.result, taskId } };
+      }
+    }
+  });
+
+  const result = await runtime.replanWithExploration({
+    oldPlan,
+    completedTasks: ["T1"],
+    newFacts: [],
+    constraints: ["不新增第三方依赖"],
+    readScope: ["src/**"],
+    writeScope: ["src/auth/**"]
+  });
+
+  assert.equal(result.planning.status, "ready");
+  assert.equal(explorerCalls, 1);
+  assert.equal(result.explorations.length, 1);
+  assert.match(plannerModel.inputs[1], /不新增第三方依赖/);
+  assert.match(plannerModel.inputs[1], /Redis Session/);
 });

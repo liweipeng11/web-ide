@@ -6,6 +6,7 @@ import type { ExplorerExecution } from "../explorer/explorerAgentRuntime.js";
 import type { DeveloperExecution } from "../developer/developerAgentRuntime.js";
 import type { TesterExecution } from "../tester/testerAgentRuntime.js";
 import { MainAgentOrchestrator, type MainOrchestrationRuntimeFacade } from "./mainAgentOrchestrator.js";
+import { evaluateReplanRules, type ReplanPolicyInput } from "./replanPolicy.js";
 
 function decision(route: RouteDecision["route"]): RouteDecision {
   return {
@@ -86,10 +87,15 @@ function complexPlan(): Plan {
 
 class FakeRuntime implements MainOrchestrationRuntimeFacade {
   readonly calls: string[] = [];
+  private developerAttempts = 0;
 
   constructor(
     private readonly route: RouteDecision["route"],
-    private readonly developerStatus: AgentResult["status"] = "success"
+    private readonly developerStatus: AgentResult["status"] = "success",
+    private readonly replannedPlan?: Plan,
+    private readonly invalidateAssumption = false,
+    private readonly scopeMode: "none" | "small" | "large" | "unauthorized" = "none",
+    private readonly failedChangedFiles = false
   ) {}
 
   async executeDecision() {
@@ -117,6 +123,7 @@ class FakeRuntime implements MainOrchestrationRuntimeFacade {
   async executeExploreTask(plan: Plan, taskId: string): Promise<ExplorerExecution> {
     this.calls.push("explorer");
     const explorerResult = result(taskId, "success");
+    if (this.invalidateAssumption) explorerResult.facts = ["认证实际使用 Redis Session"];
     return {
       result: explorerResult,
       exploration: {
@@ -131,13 +138,26 @@ class FakeRuntime implements MainOrchestrationRuntimeFacade {
 
   async executeDeveloperTask(plan: Plan, taskId: string): Promise<DeveloperExecution> {
     this.calls.push("developer");
-    const developerResult = result(taskId, this.developerStatus, this.developerStatus === "success" ? ["src/auth.ts"] : []);
+    this.developerAttempts += 1;
+    const requestsScope = this.scopeMode !== "none" && this.developerAttempts === 1;
+    const status = requestsScope ? "blocked" : this.developerStatus;
+    const developerResult = result(
+      taskId,
+      status,
+      status === "success" || (status === "failed" && this.failedChangedFiles) ? ["src/auth.ts"] : []
+    );
+    if (requestsScope) {
+      developerResult.scopeChangeRequest = {
+        reason: "实现需要调整共享认证模块",
+        requiredScope: ["src/shared-auth.ts"]
+      };
+    }
     return {
       result: developerResult,
-      implementation: this.developerStatus === "success"
+      implementation: status === "success"
         ? { summary: "已实现", facts: [], evidence: ["src/auth.ts"] }
         : undefined,
-      checkpointIds: this.developerStatus === "success" ? ["checkpoint-1"] : [],
+      checkpointIds: status === "success" ? ["checkpoint-1"] : [],
       state: apply(plan, taskId, developerResult)
     };
   }
@@ -162,6 +182,56 @@ class FakeRuntime implements MainOrchestrationRuntimeFacade {
   async summarize(input: { results: AgentResult[] }) {
     this.calls.push("main:summarize");
     return input.results.map((item) => item.summary).join("\n") || "计划已完成。";
+  }
+
+  async shouldReplan(input: ReplanPolicyInput) {
+    const rule = evaluateReplanRules(input);
+    if (rule.shouldReplan !== null) return rule;
+    const invalidated = input.plan.assumptions.length > 0 && input.result.facts.length > 0;
+    return {
+      shouldReplan: invalidated,
+      reason: invalidated ? "认证实现事实推翻了 JWT 假设。" : "没有结构性变化。",
+      source: "semantic" as const
+    };
+  }
+
+  async replanWithExploration() {
+    this.calls.push("planner:replan");
+    if (!this.replannedPlan) {
+      return {
+        planning: { status: "failed" as const, reason: "invalid_plan" as const, blockers: ["测试未配置新版计划"] },
+        explorations: []
+      };
+    }
+    return { planning: { status: "ready" as const, plan: this.replannedPlan }, explorations: [] };
+  }
+
+  resolveDeveloperScopeChange(plan: Plan, taskId: string) {
+    if (this.scopeMode === "none") throw new Error("当前测试未配置 Developer 范围变化。");
+    if (this.scopeMode === "small") {
+      return {
+        action: "expand_task" as const,
+        addedScope: ["src/shared-auth.ts"],
+        plan: {
+          ...plan,
+          version: plan.version + 1,
+          tasks: plan.tasks.map((task) => task.id === taskId
+            ? {
+                ...task,
+                readScope: [...task.readScope, "src/shared-auth.ts"],
+                writeScope: [...task.writeScope, "src/shared-auth.ts"],
+                status: "pending" as const
+              }
+            : task)
+        }
+      };
+    }
+    return {
+      action: "replan" as const,
+      reason: this.scopeMode === "unauthorized" ? "所需路径超出用户授权范围。" : "范围变化较大，需要重新规划。",
+      requiredScope: ["src/shared-auth.ts"],
+      requiresAuthorization: this.scopeMode === "unauthorized"
+    };
   }
 }
 
@@ -203,13 +273,25 @@ test("complex 请求按 DAG 串联五个 Agent", async () => {
   assert.deepEqual(runtime.calls, ["main:route", "explorer", "developer", "tester", "main:summarize"]);
 });
 
-test("Developer 失败后安全停止且不会调用 Tester", async () => {
+test("Developer 连续失败三次后请求重规划，Planner 失败时安全停止", async () => {
   const runtime = new FakeRuntime("planned", "failed");
   const orchestration = await new MainAgentOrchestrator(runtime).run({ goal: "为登录接口增加限流并增加测试" });
 
-  assert.equal(orchestration.status, "failed");
+  assert.equal(orchestration.status, "blocked");
   assert.deepEqual(orchestration.trace.calledAgents, ["main", "planner", "explorer", "developer"]);
+  assert.equal(runtime.calls.filter((call) => call === "developer").length, 3);
+  assert.equal(runtime.calls.includes("planner:replan"), true);
   assert.equal(runtime.calls.includes("tester"), false);
+});
+
+test("Developer 失败前已有真实写入时不自动重试", async () => {
+  const runtime = new FakeRuntime("planned", "failed", undefined, false, "none", true);
+  const orchestration = await new MainAgentOrchestrator(runtime).run({ goal: "为登录接口增加限流并增加测试" });
+
+  assert.equal(orchestration.status, "failed");
+  assert.equal(runtime.calls.filter((call) => call === "developer").length, 1);
+  assert.equal(runtime.calls.includes("planner:replan"), false);
+  assert.deepEqual(orchestration.changedFiles, ["src/auth.ts"]);
 });
 
 test("依赖不满足或没有可运行任务时返回 blocked", async () => {
@@ -220,4 +302,98 @@ test("依赖不满足或没有可运行任务时返回 blocked", async () => {
 
   assert.equal(orchestration.status, "blocked");
   assert.deepEqual(orchestration.trace.calledAgents, ["main"]);
+});
+
+test("关键假设被 Explorer 事实推翻后自动重规划并继续执行", async () => {
+  const initialPlan = complexPlan();
+  initialPlan.assumptions = ["认证使用 JWT"];
+  const nextPlan = complexPlan();
+  nextPlan.version = 2;
+  nextPlan.assumptions = [];
+  nextPlan.tasks[0].status = "completed";
+  const runtime = new FakeRuntime("planned", "success", nextPlan, true);
+
+  const orchestration = await new MainAgentOrchestrator(runtime).executePlan(decision("planned"), initialPlan, {
+    acceptanceEvidence: [{ criterion: "超过限制时返回 429", testFiles: ["tests/auth.test.ts"] }]
+  });
+
+  assert.equal(orchestration.status, "completed");
+  assert.equal(orchestration.plan?.version, 2);
+  assert.equal(orchestration.trace.events.some((event) => event.action === "replan"), true);
+  assert.deepEqual(runtime.calls, ["explorer", "planner:replan", "developer", "tester", "main:summarize"]);
+});
+
+test("Developer 的小范围授权内变化只扩展当前任务而不调用 Planner", async () => {
+  const runtime = new FakeRuntime("main_loop", "success", undefined, false, "small");
+  const orchestration = await new MainAgentOrchestrator(runtime).run({
+    goal: "修改登录函数并跑测试",
+    readScope: ["src/**", "tests/**"],
+    writeScope: ["src/**"],
+    testScope: ["tests/auth.test.ts"],
+    acceptanceCriteria: ["超过限制时返回 429"]
+  });
+
+  assert.equal(orchestration.status, "completed");
+  assert.equal(runtime.calls.filter((call) => call === "developer").length, 2);
+  assert.equal(runtime.calls.includes("planner:replan"), false);
+});
+
+test("Developer 请求越过用户授权时停止且不调用 Planner", async () => {
+  const runtime = new FakeRuntime("main_loop", "success", undefined, false, "unauthorized");
+  const orchestration = await new MainAgentOrchestrator(runtime).run({
+    goal: "修改登录函数并跑测试",
+    readScope: ["src/auth.ts"],
+    writeScope: ["src/auth.ts"],
+    acceptanceCriteria: ["超过限制时返回 429"]
+  });
+
+  assert.equal(orchestration.status, "blocked");
+  assert.match(orchestration.summary, /超出用户授权范围/);
+  assert.equal(runtime.calls.includes("planner:replan"), false);
+});
+
+test("Developer 的大范围授权内变化调用 Planner 后继续新版计划", async () => {
+  const nextPlan = complexPlan();
+  nextPlan.version = 2;
+  nextPlan.tasks = nextPlan.tasks.slice(1);
+  nextPlan.tasks[0] = {
+    ...nextPlan.tasks[0],
+    id: "IMPLEMENT-1",
+    dependencies: [],
+    readScope: ["src/**"],
+    writeScope: ["src/**"],
+    status: "pending"
+  };
+  nextPlan.tasks[1] = {
+    ...nextPlan.tasks[1],
+    id: "TEST-1",
+    dependencies: ["IMPLEMENT-1"],
+    status: "pending"
+  };
+  const runtime = new FakeRuntime("main_loop", "success", nextPlan, false, "large");
+  const orchestration = await new MainAgentOrchestrator(runtime).run({
+    goal: "修改登录函数并跑测试",
+    readScope: ["src/**", "tests/**"],
+    writeScope: ["src/**"],
+    testScope: ["tests/auth.test.ts"],
+    acceptanceCriteria: ["超过限制时返回 429"]
+  });
+
+  assert.equal(orchestration.status, "completed");
+  assert.equal(runtime.calls.includes("planner:replan"), true);
+  assert.equal(runtime.calls.filter((call) => call === "developer").length, 2);
+});
+
+test("连续重规划达到上限后安全停止", async () => {
+  const loopPlan = complexPlan();
+  loopPlan.assumptions = ["认证使用 JWT"];
+  loopPlan.tasks = [loopPlan.tasks[0]];
+  loopPlan.completionCriteria = ["确认认证机制"];
+  const runtime = new FakeRuntime("planned", "success", loopPlan, true);
+  const orchestration = await new MainAgentOrchestrator(runtime, 30, 2)
+    .executePlan(decision("planned"), loopPlan);
+
+  assert.equal(orchestration.status, "blocked");
+  assert.match(orchestration.summary, /重规划次数已达到上限 2/);
+  assert.equal(runtime.calls.filter((call) => call === "planner:replan").length, 2);
 });

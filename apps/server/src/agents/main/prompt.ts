@@ -33,6 +33,15 @@ Summarize only the supplied structured Agent results. Do not invent file changes
 Mention changed files and validation outcome when present.
 Return one JSON object only: {"content":"..."}`;
 
+export const MAIN_REPLAN_SYSTEM_PROMPT = `You decide whether new repository facts invalidate a critical planning assumption.
+Return one JSON object only: {"shouldReplan":true|false,"reason":"..."}.
+
+Rules:
+- Return true only when the new facts make the current plan structurally incorrect or unsafe.
+- A different implementation detail is not enough unless planned tasks or dependencies must change.
+- Local search misses, file-not-found errors, lint errors, and formatting issues must return false.
+- Never propose a new plan and never expand authorization scope.`;
+
 export type MainActionPromptInput = {
   goal: string;
   routeDecision: RouteDecision;

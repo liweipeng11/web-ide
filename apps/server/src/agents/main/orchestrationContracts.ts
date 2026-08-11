@@ -9,9 +9,10 @@ export type OrchestrationAgentId = "main" | "planner" | "explorer" | "developer"
 
 export interface OrchestrationTraceEvent {
   agent: OrchestrationAgentId;
-  action: "route" | "plan" | "execute" | "finish" | "stop";
+  action: "route" | "plan" | "replan" | "execute" | "finish" | "stop";
   taskId?: string;
   status?: AgentResult["status"] | "ready" | "missing_context";
+  reason?: string;
 }
 
 export interface OrchestrationTrace {
@@ -50,13 +51,17 @@ export interface ExecuteOrchestrationPlanOptions {
   testScope?: string[];
   acceptanceEvidence?: AcceptanceEvidenceInput[];
   initialChangedFiles?: string[];
+  initialFailureCounts?: Record<string, number>;
   context?: unknown;
   trace?: OrchestrationTrace;
+  authorizedScope?: { readScope: string[]; writeScope: string[] };
   resolveTestContext?: (
     task: Task,
     changedFiles: string[]
   ) => Promise<{ testScope: string[]; acceptanceEvidence: AcceptanceEvidenceInput[] }>;
   onExecution?: (execution: OrchestrationExecution) => Promise<void> | void;
+  onPlanUpdate?: (plan: Plan, reason: "scope_expansion" | "retry" | "replan") => Promise<void> | void;
+  onReplanExplorations?: (plan: Plan, explorations: ExplorerExecution[]) => Promise<void> | void;
 }
 
 export type OrchestrationExecution =

@@ -4,8 +4,16 @@ import type { TesterTaskOptions } from "../tester/testerAgentRuntime.js";
 import type { AgentResult, Plan, RouteDecision } from "../../runtime/contracts.js";
 import { runtimeError } from "../../runtime/errors.js";
 import { validatePlan } from "../../runtime/stateManager.js";
-import type { MainAgentExplorationPlanningResult, MainAgentRuntimeResult } from "./mainAgentRuntime.js";
+import type {
+  MainAgentExplorationPlanningResult,
+  MainAgentReplanExecution,
+  MainAgentReplanRequest,
+  MainAgentRuntimeResult
+} from "./mainAgentRuntime.js";
 import type { MainSummaryInput } from "./mainAgent.js";
+import type { MainReplanDecision, ReplanPolicyInput } from "./replanPolicy.js";
+import { DEFAULT_MAX_REPLANS } from "./replanPolicy.js";
+import { handleOrchestrationReplan } from "./orchestrationReplan.js";
 import { MainAgentRuntime } from "./mainAgentRuntime.js";
 import type {
   ExecuteOrchestrationPlanOptions,
@@ -35,6 +43,14 @@ export interface MainOrchestrationRuntimeFacade {
   executeDeveloperTask(plan: Plan, taskId: string, options?: DeveloperTaskOptions): ReturnType<MainAgentRuntime["executeDeveloperTask"]>;
   executeTestTask(plan: Plan, taskId: string, options: TesterTaskOptions): ReturnType<MainAgentRuntime["executeTestTask"]>;
   summarize(input: MainSummaryInput): Promise<string>;
+  shouldReplan(input: ReplanPolicyInput): Promise<MainReplanDecision>;
+  replanWithExploration(request: MainAgentReplanRequest): Promise<MainAgentReplanExecution>;
+  resolveDeveloperScopeChange(
+    plan: Plan,
+    taskId: string,
+    result: AgentResult,
+    authorizedScope: { readScope: string[]; writeScope: string[] }
+  ): ReturnType<MainAgentRuntime["resolveDeveloperScopeChange"]>;
 }
 
 function createTrace(): OrchestrationTrace {
@@ -56,10 +72,14 @@ function cloneTrace(trace?: OrchestrationTrace): OrchestrationTrace {
 export class MainAgentOrchestrator {
   constructor(
     private readonly runtime: MainOrchestrationRuntimeFacade = new MainAgentRuntime(),
-    private readonly maxSteps = DEFAULT_MAX_ORCHESTRATION_STEPS
+    private readonly maxSteps = DEFAULT_MAX_ORCHESTRATION_STEPS,
+    private readonly maxReplans = DEFAULT_MAX_REPLANS
   ) {
     if (!Number.isInteger(maxSteps) || maxSteps < 1) {
       throw runtimeError("INVALID_CONTRACT", "编排最大步数必须是正整数。", { maxSteps });
+    }
+    if (!Number.isInteger(maxReplans) || maxReplans < 1) {
+      throw runtimeError("INVALID_CONTRACT", "最大重规划次数必须是正整数。", { maxReplans });
     }
   }
 
@@ -89,6 +109,15 @@ export class MainAgentOrchestrator {
         action: "execute",
         taskId: exploration.result.taskId,
         status: exploration.result.status
+      });
+    }
+    for (const replan of planning.replans ?? []) {
+      recordTrace(trace, {
+        agent: "planner",
+        action: "replan",
+        taskId: replan.taskId,
+        status: replan.status === "ready" ? "ready" : replan.status === "missing_context" ? "missing_context" : "failed",
+        reason: replan.reason
       });
     }
     if (planning.planning?.status !== "ready") {
@@ -143,6 +172,10 @@ export class MainAgentOrchestrator {
       constraints: request.constraints,
       testScope: request.testScope,
       acceptanceEvidence: request.acceptanceEvidence,
+      authorizedScope: {
+        readScope: uniqueStrings(request.readScope ?? []),
+        writeScope: uniqueStrings(request.writeScope ?? [])
+      },
       trace: prepared.trace
     });
   }
@@ -159,6 +192,15 @@ export class MainAgentOrchestrator {
     const results: AgentResult[] = [];
     const executions: OrchestrationExecution[] = [];
     const changedFiles = uniqueStrings(options.initialChangedFiles ?? []);
+    const failureCounts = new Map(
+      Object.entries(options.initialFailureCounts ?? {})
+        .filter(([, count]) => Number.isInteger(count) && count > 0)
+    );
+    let replanCount = 0;
+    const authorizedScope = options.authorizedScope ?? {
+      readScope: uniqueStrings(initialPlan.tasks.flatMap((task) => task.readScope)),
+      writeScope: uniqueStrings(initialPlan.tasks.flatMap((task) => task.writeScope))
+    };
 
     for (let step = 0; step < this.maxSteps; step += 1) {
       if (plan.tasks.every((task) => task.status === "completed")) {
@@ -247,9 +289,15 @@ export class MainAgentOrchestrator {
         continue;
       }
 
+      const rawResult = execution.execution.result;
+      const result: AgentResult = {
+        ...rawResult,
+        // Runtime 工具可能在 Agent 最终失败前已经完成受控写入，重试决策必须消费可信 State 进度。
+        changedFiles: uniqueStrings([...rawResult.changedFiles, ...execution.execution.state.changedFiles])
+      };
+      execution.execution.result = result;
       executions.push(execution);
       await options.onExecution?.(execution);
-      const result = execution.execution.result;
       results.push(result);
       changedFiles.splice(0, changedFiles.length, ...uniqueStrings([...changedFiles, ...result.changedFiles]));
       const nextPlan = execution.execution.state.plan;
@@ -261,19 +309,57 @@ export class MainAgentOrchestrator {
         taskId: result.taskId,
         status: result.status
       });
-      if (result.status !== "success") {
-        recordTrace(trace, { agent: "main", action: "stop", taskId: result.taskId, status: result.status });
+
+      const transition = await handleOrchestrationReplan({
+        runtime: this.runtime,
+        agent: execution.agent,
+        plan,
+        result,
+        results,
+        failureCounts,
+        authorizedScope,
+        constraints: options.constraints,
+        replanCount,
+        maxReplans: this.maxReplans
+      });
+      if (result.status === "success") failureCounts.delete(result.taskId);
+      replanCount = transition.replanCount;
+      plan = transition.plan;
+      for (const exploration of transition.explorations ?? []) {
+        const auxiliary: OrchestrationExecution = { agent: "explorer", execution: exploration };
+        executions.push(auxiliary);
+        results.push(exploration.result);
+        recordTrace(trace, {
+          agent: "explorer",
+          action: "execute",
+          taskId: exploration.result.taskId,
+          status: exploration.result.status
+        });
+      }
+      if (transition.traceEvent) recordTrace(trace, transition.traceEvent);
+      if (transition.planUpdate) {
+        validatePlan(plan);
+        await options.onPlanUpdate?.(plan, transition.planUpdate);
+      }
+      if (transition.explorations?.length) {
+        await options.onReplanExplorations?.(plan, transition.explorations);
+      }
+      if (transition.action === "stop") {
+        const status = transition.status ?? "blocked";
+        const summary = transition.summary ?? result.summary;
+        recordTrace(trace, { agent: "main", action: "stop", taskId: result.taskId, status, reason: summary });
         return {
-          status: result.status,
+          status,
           decision,
           plan,
-          summary: result.summary,
+          summary,
           changedFiles,
           results,
           executions,
           trace
         };
       }
+      if (transition.planUpdate) continue;
     }
 
     throw runtimeError("AGENT_LOOP_LIMIT_EXCEEDED", `编排循环超过最大步数 ${this.maxSteps}。`, {

@@ -120,3 +120,28 @@ test("Explorer 最终结果不包含工具读取的原始文件全文", async ()
   assert.doesNotMatch(JSON.stringify(result), /TOP_SECRET_FULL_FILE_CONTENT/);
 });
 
+test("Explorer 遇到文件不存在时把错误作为观察并切换搜索策略", async () => {
+  const model = new SequenceModel([
+    { type: "tool", tool: "read_file", args: { filePath: "src/missing.ts" } },
+    { type: "tool", tool: "search_files", args: { query: "auth", path: "src" } },
+    {
+      type: "finish",
+      result: {
+        summary: "通过文件搜索定位认证入口",
+        relevantFiles: ["src/auth.ts"],
+        facts: [{ statement: "认证入口位于 src/auth.ts", evidence: ["src/auth.ts:1"] }],
+        unknowns: []
+      }
+    }
+  ]);
+  const calls: string[] = [];
+  const result = await new ExplorerAgent(model).run(createTask(), createContext(async (tool) => {
+    calls.push(tool);
+    if (tool === "read_file") throw Object.assign(new Error("file not found"), { code: "ENOENT" });
+    return ["src/auth.ts"];
+  }));
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(calls, ["read_file", "search_files"]);
+  assert.match(model.prompts[1], /recoverable/);
+});

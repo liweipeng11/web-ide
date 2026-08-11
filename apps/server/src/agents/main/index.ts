@@ -4,4 +4,6 @@ export * from "./mainAgentRuntime.js";
 export * from "./mainAgentOrchestrator.js";
 export * from "./orchestrationContracts.js";
 export * from "./orchestrationPlan.js";
+export * from "./orchestrationReplan.js";
 export * from "./prompt.js";
+export * from "./replanPolicy.js";

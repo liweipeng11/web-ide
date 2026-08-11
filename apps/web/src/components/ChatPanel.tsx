@@ -611,6 +611,7 @@ export default function ChatPanel({
     const actionLabels = {
       route: "路由",
       plan: "规划",
+      replan: "重新规划",
       execute: "执行",
       finish: "完成",
       stop: "停止"
@@ -628,6 +629,7 @@ export default function ChatPanel({
                 {agentLabels[event.agent]} · {actionLabels[event.action]}
                 {event.taskId ? ` · ${event.taskId}` : ""}
                 {event.status ? ` · ${event.status}` : ""}
+                {event.reason ? ` · ${event.reason}` : ""}
               </li>
             ))}
           </ul>

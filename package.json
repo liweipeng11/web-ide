@@ -6,6 +6,7 @@
     "dev": "pnpm --parallel --filter @mini-ai-web-editor/server --filter @mini-ai-web-editor/web dev",
     "test": "pnpm --dir apps/server test",
     "verify:stage5": "pnpm --filter @mini-ai-web-editor/server test && pnpm --filter @mini-ai-web-editor/server typecheck && pnpm --filter @mini-ai-web-editor/web typecheck && pnpm --filter @mini-ai-web-editor/web build && pnpm --filter @mini-ai-web-editor/server acceptance:stage5",
+    "verify:runtime-phase7": "pnpm --dir apps/server verify:runtime-phase7 && pnpm --dir apps/web typecheck && pnpm --dir apps/web build",
     "verify:command-execution": "powershell -ExecutionPolicy Bypass -File scripts/check-command-execution-refactor.ps1",
     "verify:agent-new-file-stage0": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage0.ps1",
     "verify:agent-new-file-stage1": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage1.ps1",

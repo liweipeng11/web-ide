@@ -1,5 +1,6 @@
 import type { DeveloperArtifact } from "./agents/developer/contracts.js";
 import type { ExplorerArtifact } from "./agents/explorer/contracts.js";
+import type { ExplorerExecution } from "./agents/explorer/explorerAgentRuntime.js";
 import {
   MainAgentOrchestrator,
   type ExecuteOrchestrationPlanOptions,
@@ -89,6 +90,15 @@ function orchestrationTraceForSession(session: TaskSession, decision: RouteDecis
   return trace;
 }
 
+function failureCountsForSession(session: TaskSession) {
+  const counts: Record<string, number> = {};
+  for (const artifact of [...(session.developerArtifacts ?? []), ...(session.testerArtifacts ?? [])]) {
+    if (artifact.status === "failed") counts[artifact.taskId] = (counts[artifact.taskId] ?? 0) + 1;
+    if (artifact.status === "success") delete counts[artifact.taskId];
+  }
+  return counts;
+}
+
 function developerArtifact(execution: Extract<OrchestrationExecution, { agent: "developer" }>["execution"]): DeveloperArtifact {
   return {
     taskId: execution.result.taskId,
@@ -175,6 +185,13 @@ async function persistExecution(taskSessionId: string, execution: OrchestrationE
   }
 }
 
+async function persistReplanExplorations(taskSessionId: string, plan: import("./runtime/contracts.js").Plan, executions: ExplorerExecution[]) {
+  const artifacts: ExplorerArtifact[] = executions.flatMap((execution) => execution.exploration
+    ? [{ taskId: execution.result.taskId, result: execution.exploration, createdAt: Date.now() }]
+    : []);
+  await setTaskSessionRuntimePlanning(taskSessionId, { status: "ready", plan }, artifacts);
+}
+
 /** 在用户批准后连续推进 Runtime DAG，并在每个 Agent 返回后立即持久化可信进度。 */
 export async function executeApprovedAgentPipeline(
   session: TaskSession,
@@ -202,11 +219,21 @@ export async function executeApprovedAgentPipeline(
     initialChangedFiles: session.runtimeEvidence?.appliedFilePaths.length
       ? session.runtimeEvidence.appliedFilePaths
       : session.filesChanged,
+    initialFailureCounts: failureCountsForSession(session),
+    authorizedScope: {
+      readScope: [...new Set(session.runtimePlan.tasks.flatMap((task) => task.readScope))],
+      writeScope: [...new Set(session.runtimePlan.tasks.flatMap((task) => task.writeScope))]
+    },
     testScope: options.testScope,
     acceptanceEvidence: options.acceptanceEvidence,
     trace: orchestrationTraceForSession(session, decision),
     resolveTestContext,
-    onExecution: (execution) => persistExecution(session.id, execution)
+    onExecution: (execution) => persistExecution(session.id, execution),
+    // Planner 返回新版 DAG 或 Main 扩展当前任务后立即落盘，避免进程中断恢复到 blocked 旧计划。
+    onPlanUpdate: async (plan) => {
+      await setTaskSessionRuntimePlanning(session.id, { status: "ready", plan });
+    },
+    onReplanExplorations: (plan, explorations) => persistReplanExplorations(session.id, plan, explorations)
   };
   const orchestration = await orchestrator.executePlan(
     decision,

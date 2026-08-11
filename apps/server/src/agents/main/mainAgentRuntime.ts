@@ -25,6 +25,8 @@ import type { TesterTaskOptions } from "../tester/testerAgentRuntime.js";
 import { TesterAgentRuntime } from "../tester/testerAgentRuntime.js";
 import { MainAgent } from "./mainAgent.js";
 import type { MainSummaryInput } from "./mainAgent.js";
+import type { ReplanPolicyInput } from "./replanPolicy.js";
+import { DEFAULT_MAX_REPLANS, SAME_TASK_FAILURE_REPLAN_THRESHOLD } from "./replanPolicy.js";
 
 export type MainAgentRequest = {
   goal: string;
@@ -55,6 +57,11 @@ export type MainAgentPlanningResult = {
 
 export type MainAgentExplorationPlanningResult = MainAgentPlanningResult & {
   explorations: ExplorerExecution[];
+  replans?: Array<{
+    taskId: string;
+    reason: string;
+    status: PlannerResult["status"];
+  }>;
 };
 
 export type MainAgentReplanRequest = {
@@ -64,6 +71,11 @@ export type MainAgentReplanRequest = {
   constraints?: string[];
   readScope?: string[];
   writeScope?: string[];
+};
+
+export type MainAgentReplanExecution = {
+  planning: PlannerResult;
+  explorations: ExplorerExecution[];
 };
 
 export type DeveloperScopeChangeDecision =
@@ -76,6 +88,7 @@ export type DeveloperScopeChangeDecision =
       action: "replan";
       reason: string;
       requiredScope: string[];
+      requiresAuthorization: boolean;
     };
 
 export type MainAgentRuntimeOptions = {
@@ -238,6 +251,10 @@ export class MainAgentRuntime {
     return this.agent.summarize(input);
   }
 
+  shouldReplan(input: ReplanPolicyInput) {
+    return this.agent.shouldReplan(input);
+  }
+
   /** Main 只在用户总授权内处理小范围扩展；更大或越权的变化交回重规划。 */
   resolveDeveloperScopeChange(
     plan: Plan,
@@ -270,7 +287,8 @@ export class MainAgentRuntime {
         reason: withinAuthorization
           ? "范围变化较大或没有形成有效的新写入范围，需要重新规划。"
           : "所需写入路径超出用户授权范围，需要重新规划或请求用户确认。",
-        requiredScope
+        requiredScope,
+        requiresAuthorization: !withinAuthorization
       };
     }
 
@@ -305,10 +323,13 @@ export class MainAgentRuntime {
 
   private async executeRunnableExploreTasks(
     planning: Extract<PlannerResult, { status: "ready" }>,
-    previousExplorations: ExplorerExecution[] = []
+    previousExplorations: ExplorerExecution[] = [],
+    replanContext: Pick<MainAgentRequest, "constraints" | "readScope" | "writeScope"> = {}
   ) {
     let plan = planning.plan;
     const explorations = [...previousExplorations];
+    const replans: NonNullable<MainAgentExplorationPlanningResult["replans"]> = [];
+    const failureCounts = new Map<string, number>();
 
     while (true) {
       const completedTaskIds = new Set(plan.tasks.filter((task) => task.status === "completed").map((task) => task.id));
@@ -321,7 +342,30 @@ export class MainAgentRuntime {
 
       const execution = await this.executeExploreTask(plan, task.id, { source: "planner_ready_task" });
       explorations.push(execution);
-      if (execution.result.status !== "success") {
+      // Runtime 持有真实 Task 状态；Main 只接收更新后的 Plan 和结构化探索制品。
+      if (!execution.state.plan) {
+        throw runtimeError("INVALID_CONTRACT", `Explorer 执行后没有返回 Plan 状态：${task.id}`, { taskId: task.id });
+      }
+      plan = execution.state.plan;
+
+      if (execution.result.status === "failed") {
+        const failures = (failureCounts.get(task.id) ?? 0) + 1;
+        failureCounts.set(task.id, failures);
+        if (failures < SAME_TASK_FAILURE_REPLAN_THRESHOLD) {
+          plan = {
+            ...plan,
+            tasks: plan.tasks.map((item) => item.id === task.id ? { ...item, status: "pending" as const } : item)
+          };
+          continue;
+        }
+      }
+
+      const replanDecision = await this.agent.shouldReplan({
+        plan,
+        result: execution.result,
+        sameTaskFailures: failureCounts.get(task.id) ?? 0
+      });
+      if (execution.result.status !== "success" && !replanDecision.shouldReplan) {
         return {
           planning: {
             status: "failed",
@@ -330,19 +374,44 @@ export class MainAgentRuntime {
               ? execution.result.blockers
               : [`Explorer 任务 ${task.id} 未能完成。`]
           } as const,
-          explorations
+          explorations,
+          replans
         };
       }
-      // Runtime 持有真实 Task 状态；Main 只接收更新后的 Plan 和结构化探索制品。
-      if (!execution.state.plan) {
-        throw runtimeError("INVALID_CONTRACT", `Explorer 执行后没有返回 Plan 状态：${task.id}`, { taskId: task.id });
+      if (replanDecision.shouldReplan) {
+        if (replans.length >= DEFAULT_MAX_REPLANS) {
+          const limitFailure: PlannerResult = {
+            status: "failed",
+            reason: "invalid_plan",
+            blockers: [`重规划次数已达到上限 ${DEFAULT_MAX_REPLANS}。`]
+          };
+          return {
+            planning: limitFailure,
+            explorations,
+            replans
+          };
+        }
+        const replanning = await this.replanWithExploration({
+          oldPlan: plan,
+          completedTasks: plan.tasks.filter((item) => item.status === "completed").map((item) => item.id),
+          newFacts: [...new Set(explorations.flatMap((item) => item.result.facts))],
+          constraints: replanContext.constraints,
+          readScope: replanContext.readScope,
+          writeScope: replanContext.writeScope
+        });
+        explorations.push(...replanning.explorations);
+        replans.push({ taskId: task.id, reason: replanDecision.reason, status: replanning.planning.status });
+        if (replanning.planning.status !== "ready") {
+          return { planning: replanning.planning, explorations, replans };
+        }
+        plan = replanning.planning.plan;
       }
-      plan = execution.state.plan;
     }
 
     return {
       planning: { status: "ready", plan } as const,
-      explorations
+      explorations,
+      replans
     };
   }
 
@@ -350,7 +419,7 @@ export class MainAgentRuntime {
   async planWithExploration(request: MainAgentRequest): Promise<MainAgentExplorationPlanningResult> {
     const initial = await this.plan(request);
     if (initial.planning?.status === "ready") {
-      const executed = await this.executeRunnableExploreTasks(initial.planning);
+      const executed = await this.executeRunnableExploreTasks(initial.planning, [], request);
       return { decision: initial.decision, ...executed };
     }
     if (initial.planning?.status !== "missing_context") {
@@ -401,7 +470,7 @@ export class MainAgentRuntime {
       writeScope: initial.decision.intent === "code_change" ? request.writeScope ?? [] : []
     });
     if (planning.status === "ready") {
-      const executed = await this.executeRunnableExploreTasks(planning, [exploration]);
+      const executed = await this.executeRunnableExploreTasks(planning, [exploration], request);
       return { decision: initial.decision, ...executed };
     }
     return { decision: initial.decision, planning, explorations: [exploration] };
@@ -424,5 +493,56 @@ export class MainAgentRuntime {
       writeScope: request.writeScope ?? [...new Set(request.oldPlan.tasks.flatMap((task) => task.writeScope))],
       state
     });
+  }
+
+  /** Replan 缺少仓库事实时执行一次只读探索，再携带压缩事实重试 Planner。 */
+  async replanWithExploration(request: MainAgentReplanRequest): Promise<MainAgentReplanExecution> {
+    const initial = await this.replan(request);
+    if (initial.status !== "missing_context") return { planning: initial, explorations: [] };
+
+    const readScope = request.readScope
+      ?? [...new Set(request.oldPlan.tasks.flatMap((task) => task.readScope))];
+    if (!readScope.length) return { planning: initial, explorations: [] };
+    const task: Task = {
+      id: `EXPLORE-REPLAN-CONTEXT-${request.oldPlan.version + 1}`,
+      type: "explore",
+      goal: `补充重规划所需仓库事实：${initial.required.join("；")}`,
+      dependencies: [],
+      requiredCapabilities: ["exploration"],
+      readScope,
+      writeScope: [],
+      acceptanceCriteria: initial.required.map((item) => `确认并提供证据：${item}`),
+      status: "pending"
+    };
+    const explorationPlan: Plan = {
+      version: 1,
+      goal: request.oldPlan.goal,
+      assumptions: [...request.oldPlan.assumptions],
+      tasks: [task],
+      completionCriteria: [...task.acceptanceCriteria]
+    };
+    const exploration = await this.executeExploreTask(explorationPlan, task.id, {
+      source: "planner_replan_missing_context",
+      required: initial.required
+    });
+    if (exploration.result.status !== "success") {
+      return {
+        planning: {
+          status: "failed",
+          reason: "model_error",
+          blockers: exploration.result.blockers.length
+            ? exploration.result.blockers
+            : ["Explorer 未能补充重规划所需上下文。"]
+        },
+        explorations: [exploration]
+      };
+    }
+    return {
+      planning: await this.replan({
+        ...request,
+        newFacts: [...new Set([...(request.newFacts ?? []), ...exploration.result.facts])]
+      }),
+      explorations: [exploration]
+    };
   }
 }
