@@ -657,6 +657,9 @@ export type TaskSession = {
   developerArtifacts?: import("./agents/developer/contracts.js").DeveloperArtifact[];
   // Tester 只保存结构化检查、验收映射和失败摘要，不保存完整命令输出。
   testerArtifacts?: import("./agents/tester/contracts.js").TesterArtifact[];
+  // 阶段 6：保存 Agent 首次调用顺序和完整事件，支持历史恢复与前端审计。
+  orchestrationTrace?: import("./agents/main/orchestrationContracts.js").OrchestrationTrace;
+  orchestrationSummary?: string;
   // 旧会话缺失阶段 1 字段时，读取层会补齐为空值，保持历史兼容。
   deliveryUnits?: DeliveryUnit[];
   activeDeliveryUnitId?: string;

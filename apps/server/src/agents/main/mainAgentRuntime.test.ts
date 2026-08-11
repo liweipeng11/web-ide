@@ -10,6 +10,7 @@ import { MainAgentRuntime, type MainAgentRuntimeResult } from "./mainAgentRuntim
 
 class RuntimeDecisionModel implements MainAgentDecisionModel {
   routeCalls = 0;
+  readonly actionInputs: string[] = [];
 
   constructor(
     private readonly routeValue: unknown,
@@ -21,7 +22,8 @@ class RuntimeDecisionModel implements MainAgentDecisionModel {
     return this.routeValue;
   }
 
-  async nextAction() {
+  async nextAction(input: string) {
+    this.actionInputs.push(input);
     return this.actions.shift();
   }
 }
@@ -103,6 +105,22 @@ test("正式入口只执行一次路由并完成 direct 请求", async () => {
   assert.equal(result.decision.route, "direct");
   assert.equal(result.execution.result.status, "success");
   assert.equal(result.execution.result.summary, "直接回答");
+});
+
+test("direct 请求把入口已读代码作为事实交给 Main", async () => {
+  const model = new RuntimeDecisionModel(
+    { intent: "question", complexity: "simple", route: "direct", requiredCapabilities: [] },
+    [{ type: "respond", content: "login 返回布尔值" }, { type: "finish" }]
+  );
+  const runtime = new MainAgentRuntime({ agent: new MainAgent(model) });
+  const result = await runtime.execute({
+    goal: "解释 login 函数",
+    knownFacts: ["文件 src/auth.ts：export const login = () => true;"]
+  });
+
+  assertExecuted(result);
+  assert.match(model.actionInputs[0], /src\/auth\.ts/);
+  assert.match(model.actionInputs[0], /login = \(\) => true/);
 });
 
 test("正式入口从写工具结果同步 changedFiles 到 Result 和 State", async () => {

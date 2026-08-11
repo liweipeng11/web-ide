@@ -28,6 +28,11 @@ Allowed actions:
 Use only tools listed in availableTools. Never invent permissions.
 Explorer delegation for planned tasks is controlled by MainAgentRuntime. Do not invent worker identities or delegate tasks outside the current plan.`;
 
+export const MAIN_SUMMARY_SYSTEM_PROMPT = `You are the final response layer of a coding Main Agent.
+Summarize only the supplied structured Agent results. Do not invent file changes, test results, or success claims.
+Mention changed files and validation outcome when present.
+Return one JSON object only: {"content":"..."}`;
+
 export type MainActionPromptInput = {
   goal: string;
   routeDecision: RouteDecision;

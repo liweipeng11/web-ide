@@ -985,6 +985,36 @@ function normalizePendingToolCall(value: unknown): PendingAgentToolCall | null {
   };
 }
 
+function normalizeOrchestrationTrace(value: unknown): TaskSession["orchestrationTrace"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const allowedAgents = new Set(["main", "planner", "explorer", "developer", "tester"]);
+  const allowedActions = new Set(["route", "plan", "execute", "finish", "stop"]);
+  const calledAgents = Array.isArray(record.calledAgents)
+    ? [...new Set(record.calledAgents.filter((agent): agent is "main" | "planner" | "explorer" | "developer" | "tester" =>
+        typeof agent === "string" && allowedAgents.has(agent)
+      ))]
+    : [];
+  const events = Array.isArray(record.events)
+    ? record.events.flatMap((event) => {
+        if (!event || typeof event !== "object" || Array.isArray(event)) return [];
+        const item = event as Record<string, unknown>;
+        if (typeof item.agent !== "string" || !allowedAgents.has(item.agent)
+          || typeof item.action !== "string" || !allowedActions.has(item.action)) return [];
+        const status: "success" | "failed" | "blocked" | "ready" | "missing_context" | undefined =
+          item.status === "success" || item.status === "failed" || item.status === "blocked"
+          || item.status === "ready" || item.status === "missing_context" ? item.status : undefined;
+        return [{
+          agent: item.agent as "main" | "planner" | "explorer" | "developer" | "tester",
+          action: item.action as "route" | "plan" | "execute" | "finish" | "stop",
+          ...(typeof item.taskId === "string" && item.taskId.trim() ? { taskId: item.taskId } : {}),
+          ...(status ? { status } : {})
+        }];
+      }).slice(-200)
+    : [];
+  return { calledAgents, events };
+}
+
 function normalizeTaskSession(session: TaskSession): TaskSession {
   const deliveryUnits = normalizeDeliveryUnits(session.deliveryUnits);
   const activeDeliveryUnitId = typeof session.activeDeliveryUnitId === "string" && deliveryUnits.some((unit) => unit.id === session.activeDeliveryUnitId)
@@ -1023,6 +1053,8 @@ function normalizeTaskSession(session: TaskSession): TaskSession {
     explorerArtifacts: normalizeExplorerArtifacts(session.explorerArtifacts),
     developerArtifacts: normalizeDeveloperArtifacts(session.developerArtifacts),
     testerArtifacts: normalizeTesterArtifacts(session.testerArtifacts),
+    orchestrationTrace: normalizeOrchestrationTrace(session.orchestrationTrace),
+    orchestrationSummary: typeof session.orchestrationSummary === "string" ? session.orchestrationSummary : undefined,
     deliveryUnits,
     activeDeliveryUnitId,
     toolFailureDiagnostics: normalizeToolFailureDiagnostics(session.toolFailureDiagnostics),
@@ -1352,6 +1384,21 @@ export async function recordTaskSessionTesterExecution(
           lastValidationStatus: artifact.status === "success" ? "success" : "failed"
         }
       : session.runtimeEvidence,
+    updatedAt: Date.now()
+  }));
+}
+
+/** 原子保存阶段 6 编排轨迹与 Main 最终摘要，供 SSE 和历史任务共同读取。 */
+export async function recordTaskSessionOrchestrationResult(
+  taskSessionId: string | null | undefined,
+  trace: NonNullable<TaskSession["orchestrationTrace"]>,
+  summary: string
+) {
+  if (!taskSessionId) return null;
+  return enqueueTaskSessionUpdate(taskSessionId, (session) => ({
+    ...session,
+    orchestrationTrace: normalizeOrchestrationTrace(trace),
+    orchestrationSummary: summary.trim() || undefined,
     updatedAt: Date.now()
   }));
 }

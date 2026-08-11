@@ -42,7 +42,7 @@ import { initializeProviderSettings } from "./providerSettingsStore.js";
 import { createCommandExecutionRouter } from "./commandExecution/commandExecutionRoutes.js";
 import { commandExecutionService } from "./commandExecution/index.js";
 import { MainAgentRuntime } from "./agents/main/mainAgentRuntime.js";
-import { executeApprovedDeveloperTask } from "./developerExecutionService.js";
+import { executeApprovedAgentPipeline, executeDirectMainRequest } from "./agentOrchestrationService.js";
 
 const initialProviders = await initializeProviderSettings();
 configureProviderGateway(initialProviders.filter((provider) => provider.enabled));
@@ -980,6 +980,28 @@ app.post(
         response.status(202).json({ messages, taskSessionId: taskSession.id, planPending: true });
         return;
       }
+      const directMain = await runWithTaskModel(taskSession.id, initialModelMode, modelSelection, () =>
+        executeDirectMainRequest(plannedTaskSession || taskSession, {
+          goal: userRequest.trim(),
+          knownFacts: contextFiles.map((file) => `文件 ${file.path}：\n${file.content}`)
+        })
+      );
+      if (directMain.outcome === "executed") {
+        const messages = await appendFileChatTurn(chatKey, userRequest.trim(), directMain.summary);
+        const directStatus = directMain.execution.outcome === "executed"
+          ? directMain.execution.execution.result.status
+          : "blocked";
+        await finalizeTaskSession({
+          taskSessionId: taskSession.id,
+          runtimeResult: {
+            status: directStatus === "success" ? "completed" : directStatus === "failed" ? "failed" : "blocked",
+            statusReason: directStatus === "success" ? undefined : directMain.summary
+          },
+          source: "agent_runtime"
+        });
+        response.json({ messages, taskSessionId: taskSession.id });
+        return;
+      }
       const taskStepWrites: Promise<unknown>[] = [];
       const answer = await runWithTaskModel(taskSession.id, initialModelMode, modelSelection, () => generateFileChatReply(contextFiles, history, userRequest.trim(), chatKey, (step) => {
         taskStepWrites.push(appendTaskSessionStep(taskSession.id, step));
@@ -1162,57 +1184,61 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     }
 
     if (approvedTaskSessionId && plannedTaskSession?.runtimePlan) {
-      const developerResult = await runWithTaskModel(
+      const pipelineResult = await runWithTaskModel(
         taskSession.id,
         "act",
         modelSelection,
-        () => executeApprovedDeveloperTask(plannedTaskSession)
+        () => executeApprovedAgentPipeline(plannedTaskSession)
       );
-      if (developerResult.outcome === "executed") {
-        const { execution } = developerResult;
-        for (const checkpointId of execution.checkpointIds) {
-          pushAgentStep(createAgentStep({
-            type: "checkpoint",
-            checkpointId,
-            files: execution.result.changedFiles,
-            source: {
-              taskSessionId: taskSession.id,
-              toolName: "apply_patch",
-              reason: "developer_runtime_apply_patch"
-            }
-          }));
+      if (pipelineResult.outcome === "executed") {
+        const { orchestration } = pipelineResult;
+        for (const item of orchestration.executions) {
+          if (item.agent !== "developer") continue;
+          for (const checkpointId of item.execution.checkpointIds) {
+            pushAgentStep(createAgentStep({
+              type: "checkpoint",
+              checkpointId,
+              files: item.execution.result.changedFiles,
+              source: {
+                taskSessionId: taskSession.id,
+                toolName: "apply_patch",
+                reason: "developer_runtime_apply_patch"
+              }
+            }));
+          }
         }
-        const scopeRequest = execution.result.scopeChangeRequest;
-        const answer = execution.result.status === "blocked" && scopeRequest
-          ? `${execution.result.summary}\n\n需要调整的范围：\n${scopeRequest.requiredScope.map((filePath) => `- ${filePath}`).join("\n")}`
-          : execution.result.summary;
-        if (execution.result.status === "success") {
+        const developerExecution = orchestration.executions.find((item) => item.agent === "developer");
+        const testerExecution = orchestration.executions.find((item) => item.agent === "tester");
+        if (developerExecution?.execution.result.status === "success") {
           await advanceTaskPlanProgress(taskSession.id, "patch_applied");
-        } else if (execution.result.status === "failed") {
+        } else if (developerExecution?.execution.result.status === "failed") {
           await advanceTaskPlanProgress(taskSession.id, "task_failed");
         }
+        if (testerExecution?.execution.result.status === "success") {
+          await advanceTaskPlanProgress(taskSession.id, "validation_success");
+        } else if (testerExecution?.execution.result.status === "failed") {
+          await advanceTaskPlanProgress(taskSession.id, "validation_failed");
+        }
+        const answer = orchestration.summary;
         sendEvent("delta", { id: turn.assistantMessage.id, delta: answer });
         const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, answer);
-        const allCompleted = execution.state.plan?.tasks.every((item) => item.status === "completed") ?? false;
-        const runtimeStatus = execution.result.status === "success"
-          ? allCompleted ? "completed" as const : "incomplete" as const
-          : execution.result.status;
         const completedTaskSession = await finalizeTaskSession({
           taskSessionId: taskSession.id,
           runtimeResult: {
-            status: runtimeStatus,
-            statusReason: execution.result.blockers.join("；") || undefined
+            status: orchestration.status,
+            statusReason: orchestration.status === "completed" ? undefined : orchestration.summary
           },
-          source: "developer_runtime"
+          source: "agent_runtime"
         });
 
         completed = true;
         await Promise.all(taskStepWrites);
         if (completedTaskSession) sendEvent("task_session", { session: completedTaskSession });
-        sendEvent("developer_result", {
+        sendEvent("orchestration_result", {
           taskSessionId: taskSession.id,
-          result: execution.result,
-          checkpointIds: execution.checkpointIds
+          status: orchestration.status,
+          trace: orchestration.trace,
+          results: orchestration.results
         });
         sendEvent("done", { messages });
         response.end();
@@ -1309,6 +1335,44 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
       response.end();
       return;
 
+    }
+
+    const directMain = await runWithTaskModel(taskSession.id, "chat", modelSelection, () =>
+      executeDirectMainRequest(plannedTaskSession || taskSession, {
+        goal: userRequest.trim(),
+        knownFacts: contextFiles.map((file) => `文件 ${file.path}：\n${file.content}`)
+      })
+    );
+    if (directMain.outcome === "executed") {
+      sendEvent("delta", { id: turn.assistantMessage.id, delta: directMain.summary });
+      const messages = await finishFileChatTurn(chatKey, turn.assistantMessage.id, directMain.summary);
+      const directStatus = directMain.execution.outcome === "executed"
+        ? directMain.execution.execution.result.status
+        : "blocked";
+      const completedTaskSession = await finalizeTaskSession({
+        taskSessionId: taskSession.id,
+        runtimeResult: {
+          status: directStatus === "success" ? "completed" : directStatus === "failed" ? "failed" : "blocked",
+          statusReason: directStatus === "success" ? undefined : directMain.summary
+        },
+        source: "agent_runtime"
+      });
+
+      completed = true;
+      await Promise.all(taskStepWrites);
+      if (completedTaskSession) sendEvent("task_session", { session: completedTaskSession });
+      const trace = completedTaskSession?.orchestrationTrace;
+      if (trace) {
+        sendEvent("orchestration_result", {
+          taskSessionId: taskSession.id,
+          status: directStatus === "success" ? "completed" : directStatus === "failed" ? "failed" : "blocked",
+          trace,
+          results: directMain.execution.outcome === "executed" ? [directMain.execution.execution.result] : []
+        });
+      }
+      sendEvent("done", { messages });
+      response.end();
+      return;
     }
 
     const answer = await runWithTaskModel(taskSession.id, "chat", modelSelection, () => streamFileChatReply(

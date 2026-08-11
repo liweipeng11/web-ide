@@ -598,6 +598,44 @@ export default function ChatPanel({
     );
   }
 
+  function renderOrchestrationTrace(session: TaskSession) {
+    const trace = session.orchestrationTrace;
+    if (!trace) return null;
+    const agentLabels = {
+      main: "Main",
+      planner: "Planner",
+      explorer: "Explorer",
+      developer: "Developer",
+      tester: "Tester"
+    } as const;
+    const actionLabels = {
+      route: "路由",
+      plan: "规划",
+      execute: "执行",
+      finish: "完成",
+      stop: "停止"
+    } as const;
+
+    return (
+      <section>
+        <h3>Agent 编排轨迹</h3>
+        <p>参与 Agent：{trace.calledAgents.map((agent) => agentLabels[agent]).join(" → ")}</p>
+        {session.orchestrationSummary ? <p>{session.orchestrationSummary}</p> : null}
+        {trace.events.length ? (
+          <ul>
+            {trace.events.map((event, index) => (
+              <li key={`${event.agent}:${event.action}:${event.taskId || index}`}>
+                {agentLabels[event.agent]} · {actionLabels[event.action]}
+                {event.taskId ? ` · ${event.taskId}` : ""}
+                {event.status ? ` · ${event.status}` : ""}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
+    );
+  }
+
   function renderTaskDiffView(session: TaskSession) {
     const diffView = session.diffView;
 
@@ -888,6 +926,7 @@ export default function ChatPanel({
               </section>
               {renderPatchDiagnostics(selectedTaskSession.patchDiagnostics || [])}
               {renderPatchLifecycleEvents(selectedTaskSession.patchEvents || [])}
+              {renderOrchestrationTrace(selectedTaskSession)}
               {renderSubagentTree(selectedTaskSession)}
               {selectedTaskSession.subagentSummary && renderSubagentSummary(selectedTaskSession.subagentSummary)}
               <section>

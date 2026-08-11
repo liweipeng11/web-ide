@@ -1,0 +1,8 @@
+{
+  "name": "phase6-auth-project",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/auth.test.js"
+  }
+}

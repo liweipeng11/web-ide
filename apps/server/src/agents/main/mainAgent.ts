@@ -156,6 +156,13 @@ export type MainNextActionContext = {
   observations: Array<{ tool: string; result: unknown }>;
 };
 
+export type MainSummaryInput = {
+  goal: string;
+  routeDecision: RouteDecision;
+  results: AgentResult[];
+  changedFiles: string[];
+};
+
 /** Main Agent 只持有目标和控制流；所有真实工具调用仍由 Runtime 权限层执行。 */
 export class MainAgent implements Agent {
   readonly id = "main";
@@ -190,6 +197,32 @@ export class MainAgent implements Agent {
       observations: context.observations
     }));
     return parseNextAction(rawAction, context.availableTools);
+  }
+
+  /** Main 只基于结构化结果生成最终说明；模型不可用时回退为可审计的确定性摘要。 */
+  async summarize(input: MainSummaryInput) {
+    const fallback = input.results.map((result) => result.summary).filter(Boolean).join("\n") || "计划已完成。";
+    if (!this.model.summarize) return fallback;
+    try {
+      const value = await this.model.summarize(JSON.stringify({
+        goal: input.goal,
+        routeDecision: input.routeDecision,
+        changedFiles: input.changedFiles,
+        results: input.results.map((result) => ({
+          taskId: result.taskId,
+          status: result.status,
+          summary: result.summary,
+          facts: result.facts,
+          changedFiles: result.changedFiles,
+          evidence: result.evidence,
+          blockers: result.blockers
+        }))
+      }));
+      if (!isRecord(value)) return fallback;
+      return nonEmptyString(value.content) ?? fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   async run(task: AgentTaskPacket, context: AgentContext): Promise<AgentResult> {

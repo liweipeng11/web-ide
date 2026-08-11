@@ -24,6 +24,7 @@ import { DeveloperAgentRuntime } from "../developer/developerAgentRuntime.js";
 import type { TesterTaskOptions } from "../tester/testerAgentRuntime.js";
 import { TesterAgentRuntime } from "../tester/testerAgentRuntime.js";
 import { MainAgent } from "./mainAgent.js";
+import type { MainSummaryInput } from "./mainAgent.js";
 
 export type MainAgentRequest = {
   goal: string;
@@ -164,6 +165,17 @@ export class MainAgentRuntime {
       return { outcome: "planning", decision, planning };
     }
 
+    return this.executeDecision(request, decision);
+  }
+
+  /** 执行 Main 已确认的 direct/main_loop 决策，供上层编排器避免重复模型路由。 */
+  async executeDecision(request: MainAgentRequest, decision: RouteDecision): Promise<MainAgentRuntimeResult> {
+    const goal = request.goal.trim();
+    if (!goal) throw runtimeError("INVALID_CONTRACT", "用户目标不能为空。");
+    if (decision.route === "planned") {
+      throw runtimeError("INVALID_CONTRACT", "planned 决策必须进入 Planner，不能直接执行。");
+    }
+
     const requestedTools = request.allowedTools ?? this.policyTools;
     const policyToolSet = new Set(this.policyTools);
     const available = this.tools.describeAvailable(requestedTools)
@@ -171,7 +183,10 @@ export class MainAgentRuntime {
       .filter((tool) => decision.intent === "code_change" || tool.effect !== "write");
     const allowedTools = available.map((tool) => tool.name);
     const task = createTask(goal, decision, request, decision.route === "direct" ? [] : allowedTools);
-    const state = new StateManager(createAgentState(goal, createPlan(task, decision)));
+    const initialState = createAgentState(goal, createPlan(task, decision));
+    // Direct 不调用 Explorer；由入口显式提供的已读上下文必须进入事实区，避免脱离代码内容作答。
+    initialState.facts = [...new Set(request.knownFacts?.map((item) => item.trim()).filter(Boolean) ?? [])];
+    const state = new StateManager(initialState);
     const kernel = new RuntimeKernel({
       agents: new AgentRegistry([this.agent]),
       tools: this.tools,
@@ -217,6 +232,10 @@ export class MainAgentRuntime {
   /** Main 显式调度只读 test Task；阶段 5 不在 Developer 完成后自动触发测试。 */
   executeTestTask(plan: Plan, taskId: string, options: TesterTaskOptions) {
     return this.tester.executePlanTask(plan, taskId, options);
+  }
+
+  summarize(input: MainSummaryInput) {
+    return this.agent.summarize(input);
   }
 
   /** Main 只在用户总授权内处理小范围扩展；更大或越权的变化交回重规划。 */

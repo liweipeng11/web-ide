@@ -243,6 +243,18 @@ export function useChatSession({ state, setState, refreshTaskSessions }: UseChat
             }));
           }
 
+          if (streamEvent.event === "orchestration_result") {
+            setState((current) => ({
+              ...current,
+              taskSessions: current.taskSessions.map((session) => session.id === streamEvent.data.taskSessionId
+                ? { ...session, orchestrationTrace: streamEvent.data.trace }
+                : session),
+              selectedTaskSession: current.selectedTaskSession?.id === streamEvent.data.taskSessionId
+                ? { ...current.selectedTaskSession, orchestrationTrace: streamEvent.data.trace }
+                : current.selectedTaskSession
+            }));
+          }
+
           if (streamEvent.event === "patch") {
             streamTaskSessionId = streamEvent.data.patch.taskSessionId || streamTaskSessionId;
             setState((current) => ({

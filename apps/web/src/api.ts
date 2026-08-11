@@ -791,6 +791,16 @@ export type DeveloperArtifact = {
   createdAt: number;
 };
 
+export type OrchestrationTrace = {
+  calledAgents: Array<"main" | "planner" | "explorer" | "developer" | "tester">;
+  events: Array<{
+    agent: "main" | "planner" | "explorer" | "developer" | "tester";
+    action: "route" | "plan" | "execute" | "finish" | "stop";
+    taskId?: string;
+    status?: "success" | "failed" | "blocked" | "ready" | "missing_context";
+  }>;
+};
+
 export type TaskSession = {
   id: string;
   userGoal: string;
@@ -830,6 +840,8 @@ export type TaskSession = {
   continuation?: TaskContinuation;
   explorerArtifacts?: ExplorerArtifact[];
   developerArtifacts?: DeveloperArtifact[];
+  orchestrationTrace?: OrchestrationTrace;
+  orchestrationSummary?: string;
   checkpointIds: string[];
   // 任务历史真实变更视图，历史 diff 展示优先以 checkpoint 为准。
   diffView?: TaskSessionDiffView;
@@ -1153,6 +1165,7 @@ export type FileChatStreamEvent =
   | { event: "task_session"; data: { session: TaskSession } }
   | { event: "context_budget"; data: { taskSessionId: string; snapshot: ContextBudgetSnapshot; summary: StructuredContextSummary | null } }
   | { event: "agent_step"; data: { step: AgentStep } }
+  | { event: "orchestration_result"; data: { taskSessionId: string; status: AgentRuntimeStatus; trace: OrchestrationTrace; results: unknown[] } }
   | { event: "patch"; data: { patch: GenerateEditResponse } }
   | { event: "delta"; data: { id: string; delta: string } }
   | { event: "done"; data: { messages: FileChatMessage[] } }

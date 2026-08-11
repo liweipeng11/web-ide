@@ -13,6 +13,7 @@ import {
   type MainAgentExplorationPlanningResult,
   type MainAgentPlanningResult
 } from "./agents/main/mainAgentRuntime.js";
+import { createMainLoopPlan } from "./agents/main/orchestrationPlan.js";
 
 type GeneratedPlanItem = {
   id?: string;
@@ -319,9 +320,11 @@ export async function initializeTaskPlan(session: TaskSession, classification?: 
       goal: classification?.normalizedGoal || session.userGoal,
       knownFacts: workflowSession.filesRead.map((filePath) => `已读取文件：${filePath}`),
       constraints: classification?.reason ? [classification.reason] : [],
+      acceptanceCriteria: [`完成并验证用户目标：${classification?.normalizedGoal || session.userGoal}`],
       // Planner 只声明后续任务边界，不直接获得这些路径对应的工具权限。
       readScope: ["**"],
-      writeScope: classification?.intent === "inspect" ? [] : options.selectedPath ? [options.selectedPath] : ["**"]
+      writeScope: classification?.intent === "inspect" ? [] : options.selectedPath ? [options.selectedPath] : ["**"],
+      testScope: ["**/*.test.*", "**/*.spec.*", "**/tests/**", "**/__tests__/**"]
     };
     // 阶段 3：生产入口优先允许 Main 用 Explorer 补齐缺失事实；测试或旧适配器仍可只实现 plan。
     const planningResult: MainAgentPlanningResult | MainAgentExplorationPlanningResult = runtimePlanner.planWithExploration
@@ -337,6 +340,10 @@ export async function initializeTaskPlan(session: TaskSession, classification?: 
       );
       workflowSession = (await setTaskSessionRuntimePlanning(session.id, planningResult.planning, explorerArtifacts)) || workflowSession;
       if (planningResult.planning.status !== "ready") return workflowSession;
+    } else if (planningResult.decision.route === "main_loop" && planningResult.decision.intent === "code_change") {
+      // 中等修改跳过 Planner，但仍建立受 Runtime 校验的 implement → test DAG。
+      const plan = createMainLoopPlan(request);
+      workflowSession = (await setTaskSessionRuntimePlanning(session.id, { status: "ready", plan })) || workflowSession;
     }
   }
 
