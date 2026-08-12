@@ -192,6 +192,45 @@ test("批准后的流水线连续持久化 Developer 和 Tester 产物", async (
   });
 });
 
+test("批准后的流水线将角色生命周期桥接给统一会话事件流", async () => {
+  await withWorkspace(async () => {
+    const created = await createTaskSession("修改并验证认证限流", { agentMode: "act" });
+    await setTaskSessionRuntimePlanning(created.id, { status: "ready", plan: plan() });
+    const approved = await approveTaskSessionPlan(created.id);
+    assert.ok(approved);
+    const events: Array<{ agent: string; phase: string; taskId?: string; status?: string }> = [];
+
+    await executeApprovedAgentPipeline(approved, {
+      onLifecycleEvent(event) {
+        events.push(event);
+      },
+      orchestrator: {
+        async executePlan(decision, initialPlan, options): Promise<MainOrchestrationResult> {
+          await options?.onLifecycleEvent?.({ agent: "developer", phase: "started", taskId: "T1" });
+          const completedPlan = completeTask(initialPlan, "T1");
+          const execution: OrchestrationExecution = {
+            agent: "developer",
+            execution: {
+              result: { taskId: "T1", status: "success", summary: "限流实现完成", facts: [], changedFiles: ["src/auth.ts"], evidence: [], blockers: [] },
+              implementation: { summary: "限流实现完成", facts: [], evidence: [] },
+              checkpointIds: [],
+              state: state(completedPlan, ["src/auth.ts"])
+            }
+          };
+          await options?.onExecution?.(execution);
+          await options?.onLifecycleEvent?.({ agent: "developer", phase: "completed", taskId: "T1", status: "success", summary: "限流实现完成" });
+          return { status: "completed", decision, plan: completedPlan, summary: "完成", changedFiles: ["src/auth.ts"], results: [execution.execution.result], executions: [execution], trace: { calledAgents: ["main", "developer"], events: [] } };
+        }
+      }
+    });
+
+    assert.deepEqual(events, [
+      { agent: "developer", phase: "started", taskId: "T1" },
+      { agent: "developer", phase: "completed", taskId: "T1", status: "success", summary: "限流实现完成" }
+    ]);
+  });
+});
+
 test("复杂任务跨审批请求恢复 Planner 和前置 Explorer 轨迹", async () => {
   await withWorkspace(async () => {
     const runtimePlan = plan();

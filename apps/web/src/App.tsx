@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createProvider, decideApprovalRequest, fetchModelCatalog, updateModelDefaults, updateProviderSettings, type AgentMode, type AgentStep, type CreateProviderInput, type FileTreeNode, type ModelSelectionDefaults, type PatchFileChange, type ProviderSettings, type ProviderSettingsInput, type UnifiedDiagnostic } from "./api";
+import { createProvider, decideApprovalRequest, fetchModelCatalog, updateModelDefaults, updateProviderSettings, type AgentStep, type CreateProviderInput, type FileTreeNode, type ModelSelectionDefaults, type PatchFileChange, type ProviderSettings, type ProviderSettingsInput, type UnifiedDiagnostic } from "./api";
 import { writeAgentPreferences } from "./agentPreferences";
 import { initialState, type AppState } from "./appState";
 import AppLayout from "./components/AppLayout";
@@ -81,15 +81,16 @@ export default function App() {
     return result.settings;
   }
 
-  async function handleSaveAgentDefaults(defaultMode: AgentMode, defaults: ModelSelectionDefaults) {
+  async function handleSaveAgentDefaults(defaults: ModelSelectionDefaults) {
     setSavingDefaults(true);
     try {
       const result = await updateModelDefaults(defaults);
-      writeAgentPreferences({ defaultMode });
+      // 统一 Agent 始终从受控执行链路进入，首选项只保留模型配置。
+      writeAgentPreferences({ defaultMode: "act" });
       setState((current) => ({
         ...current,
-        defaultAgentMode: defaultMode,
-        agentMode: current.currentTaskSessionId ? current.agentMode : defaultMode,
+        defaultAgentMode: "act",
+        agentMode: current.currentTaskSessionId ? current.agentMode : "act",
         modelDefaults: result.defaults,
         modelCatalog: current.modelCatalog ? { ...current.modelCatalog, defaults: result.defaults } : current.modelCatalog
       }));
@@ -248,7 +249,6 @@ export default function App() {
     return (
       <SettingsPage
         section={section}
-        defaultAgentMode={state.defaultAgentMode}
         modelDefaults={state.modelDefaults}
         providerSettings={state.providerSettings}
         catalog={state.modelCatalog}
@@ -308,7 +308,6 @@ export default function App() {
       onRewritePlan={taskSessions.handleRewritePlan}
       onApprovePlan={handleApprovePlan}
       onInterruptTaskForReplan={handleInterruptTaskForReplan}
-      onUpdateAgentMode={taskSessions.handleUpdateAgentMode}
       onOpenSettings={() => navigateTo("/settings/general")}
       onNewChat={chatSession.handleNewChat}
       onDeleteChatHistory={chatSession.handleDeleteChatHistory}

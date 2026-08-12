@@ -27,7 +27,8 @@ function createFailedResult(taskId: string, error: unknown): AgentResult {
   return {
     taskId,
     status: "failed",
-    summary: "Agent 执行失败。",
+    // 将安全的失败原因写入摘要，供任务历史和对话直接定位问题。
+    summary: `Agent 执行失败：${reason}`,
     facts: [],
     changedFiles: [],
     evidence: [],

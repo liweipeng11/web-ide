@@ -279,6 +279,12 @@ export class MainAgent implements Agent {
 
       if (action.type === "respond") {
         responseContent = action.content;
+        // 简单对话无需工具观察或额外完成确认，首次有效回答即结束，避免模型重复返回 respond 导致循环超限。
+        if (routeDecision.route === "direct") {
+          return createResult(task.taskId, "success", responseContent, {
+            facts: [`路由结果：${routeDecision.intent}/${routeDecision.complexity}/${routeDecision.route}`]
+          });
+        }
         continue;
       }
       if (action.type === "finish") {

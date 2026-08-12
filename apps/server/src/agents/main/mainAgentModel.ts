@@ -2,6 +2,7 @@ import type { ModelSelection } from "../../contracts/model.js";
 import { config } from "../../config.js";
 import { getModelExecutionContext } from "../../modelExecutionContext.js";
 import { requestModelCompletionWithMetrics } from "../../modelGatewayClient.js";
+import { parseJsonModelResponse } from "../modelJsonResponse.js";
 import {
   MAIN_ACTION_SYSTEM_PROMPT,
   MAIN_REPLAN_SYSTEM_PROMPT,
@@ -14,12 +15,6 @@ export interface MainAgentDecisionModel {
   nextAction(input: string, signal?: AbortSignal): Promise<unknown>;
   summarize?(input: string, signal?: AbortSignal): Promise<unknown>;
   shouldReplan?(input: string, signal?: AbortSignal): Promise<unknown>;
-}
-
-function parseJsonResponse(content: string | null | undefined) {
-  if (!content?.trim()) throw new Error("Main Agent 模型没有返回内容。");
-  const normalized = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  return JSON.parse(normalized) as unknown;
 }
 
 /** 复用项目现有 Provider Gateway，Main Agent 不依赖任何供应商私有协议。 */
@@ -37,7 +32,7 @@ export class ProviderMainAgentDecisionModel implements MainAgentDecisionModel {
       temperature: 0,
       responseFormat: "json_object"
     }, signal);
-    return parseJsonResponse(response.message.content);
+    return parseJsonModelResponse({ agentName: "Main", content: response.message.content, reasoningContent: response.message.reasoningContent }).value;
   }
 
   route(userRequest: string, signal?: AbortSignal) {

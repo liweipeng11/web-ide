@@ -278,10 +278,13 @@ export class MainAgentOrchestrator {
       const explorerBatch = runnableExplorers.slice(0, Math.min(executionConcurrency, availableSlots));
       if (explorerBatch.length > 1) {
         const concurrencyGroup = `explore-${plan.version}-${step + 1}`;
-        const batchExecutions = await Promise.all(explorerBatch.map(async (batchTask): Promise<OrchestrationExecution> => ({
-          agent: "explorer",
-          execution: await this.runtime.executeExploreTask(plan, batchTask.id, options.context ?? {}, { signal: options.signal })
-        })));
+        const batchExecutions = await Promise.all(explorerBatch.map(async (batchTask): Promise<OrchestrationExecution> => {
+          await options.onLifecycleEvent?.({ agent: "explorer", phase: "started", taskId: batchTask.id });
+          return {
+            agent: "explorer",
+            execution: await this.runtime.executeExploreTask(plan, batchTask.id, options.context ?? {}, { signal: options.signal })
+          };
+        }));
         step += batchExecutions.length - 1;
 
         // 各 Explorer 基于同一 Plan 快照运行，结果必须合并回唯一 Plan，不能采用最后返回者覆盖前者。
@@ -303,6 +306,13 @@ export class MainAgentOrchestrator {
           results.push(batchResult);
           changedFiles.splice(0, changedFiles.length, ...uniqueStrings([...changedFiles, ...batchResult.changedFiles]));
           await options.onExecution?.(batchExecution);
+          await options.onLifecycleEvent?.({
+            agent: "explorer",
+            phase: "completed",
+            taskId: batchResult.taskId,
+            status: batchResult.status,
+            summary: batchResult.summary
+          });
           const diagnostics = batchExecution.execution.diagnostics;
           recordTrace(trace, {
             agent: "explorer",
@@ -369,9 +379,11 @@ export class MainAgentOrchestrator {
 
       let execution: OrchestrationExecution | null = null;
       if (task.type === "explore") {
+        await options.onLifecycleEvent?.({ agent: "explorer", phase: "started", taskId: task.id });
         const explored = await this.runtime.executeExploreTask(plan, task.id, options.context ?? {}, { signal: options.signal });
         execution = { agent: "explorer", execution: explored };
       } else if (task.type === "implement") {
+        await options.onLifecycleEvent?.({ agent: "developer", phase: "started", taskId: task.id });
         const developed = await this.runtime.executeDeveloperTask(plan, task.id, {
           context: options.context,
           constraints: options.constraints,
@@ -393,6 +405,7 @@ export class MainAgentOrchestrator {
             trace
           };
         }
+        await options.onLifecycleEvent?.({ agent: "tester", phase: "started", taskId: task.id });
         // 生产入口可在 Developer 真实落盘后，基于 changedFiles 动态解析相关测试与验收映射。
         const resolvedTestContext = await options.resolveTestContext?.(task, [...changedFiles]);
         const testScope = uniqueStrings(resolvedTestContext?.testScope.length
@@ -413,9 +426,17 @@ export class MainAgentOrchestrator {
         });
         execution = { agent: "tester", execution: tested };
       } else {
+        await options.onLifecycleEvent?.({ agent: "main", phase: "started", taskId: task.id });
         const responded = applyMainRespondTask(plan, task);
         plan = responded.plan;
         results.push(responded.result);
+        await options.onLifecycleEvent?.({
+          agent: "main",
+          phase: "completed",
+          taskId: task.id,
+          status: responded.result.status,
+          summary: responded.result.summary
+        });
         recordTrace(trace, { agent: "main", action: "execute", taskId: task.id, status: "success" });
         continue;
       }
@@ -430,6 +451,13 @@ export class MainAgentOrchestrator {
       executions.push(execution);
       await options.onExecution?.(execution);
       results.push(result);
+      await options.onLifecycleEvent?.({
+        agent: execution.agent,
+        phase: "completed",
+        taskId: result.taskId,
+        status: result.status,
+        summary: result.summary
+      });
       changedFiles.splice(0, changedFiles.length, ...uniqueStrings([...changedFiles, ...result.changedFiles]));
       const nextPlan = execution.execution.state.plan;
       if (!nextPlan) throw runtimeError("INVALID_CONTRACT", `${execution.agent} 执行后缺少 Runtime Plan。`);

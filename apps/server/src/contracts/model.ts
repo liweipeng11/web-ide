@@ -56,6 +56,8 @@ export type ModelMessage = {
   createdAt?: number;
   role: "system" | "user" | "assistant" | "tool";
   content?: string | null;
+  // 部分 OpenAI 兼容 Provider 会将结构化输出写入 reasoning_content，保留该字段供 JSON Agent 兼容解析。
+  reasoningContent?: string | null;
   toolCallId?: string;
   toolCalls?: ModelToolCall[];
 };

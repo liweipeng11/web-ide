@@ -244,6 +244,27 @@ test("simple 请求绕过 Planner 和所有专业 Agent", async () => {
   assert.deepEqual(runtime.calls, ["main:route", "main:execute"]);
 });
 
+test("编排器为实施与验证任务发布统一生命周期事件", async () => {
+  const runtime = new FakeRuntime("planned");
+  const events: Array<{ agent: string; phase: string; taskId?: string; status?: string }> = [];
+
+  const orchestration = await new MainAgentOrchestrator(runtime).executePlan(decision("planned"), complexPlan(), {
+    onLifecycleEvent(event) {
+      events.push(event);
+    }
+  });
+
+  assert.equal(orchestration.status, "completed");
+  assert.deepEqual(events, [
+    { agent: "explorer", phase: "started", taskId: "T1" },
+    { agent: "explorer", phase: "completed", taskId: "T1", status: "success", summary: "T1:success" },
+    { agent: "developer", phase: "started", taskId: "T2" },
+    { agent: "developer", phase: "completed", taskId: "T2", status: "success", summary: "T2:success" },
+    { agent: "tester", phase: "started", taskId: "T3" },
+    { agent: "tester", phase: "completed", taskId: "T3", status: "success", summary: "T3:success" }
+  ]);
+});
+
 test("同一依赖层的 Explorer 受限并发且结果合并到唯一 Plan", async () => {
   const plan: Plan = {
     version: 1,

@@ -344,6 +344,15 @@ export type AgentStep = {
       details: Record<string, unknown>;
     }
   | {
+      // 编排层的角色生命周期也写入统一步骤流，供 SSE、任务恢复和审计复用。
+      type: "orchestration";
+      agent: import("./agents/main/orchestrationContracts.js").OrchestrationAgentId;
+      phase: "started" | "completed";
+      taskId?: string;
+      status?: import("./runtime/contracts.js").AgentResult["status"];
+      summary?: string;
+    }
+  | {
       type: "subagent_created";
       delegationId: string;
       subagentId: string;

@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import type { AgentMode, CreateProviderInput, ModelCatalogResponse, ModelSelectionDefaults, ProjectRulesResponse, ProviderSettings, ProviderSettingsInput } from "../../api";
+import type { CreateProviderInput, ModelCatalogResponse, ModelSelectionDefaults, ProjectRulesResponse, ProviderSettings, ProviderSettingsInput } from "../../api";
 import ProviderSettingsPage from "../models/ProviderSettingsPage";
 import AgentDefaultsSettings from "./AgentDefaultsSettings";
 import AgentRulesSettings from "./AgentRulesSettings";
@@ -10,7 +10,6 @@ export type SettingsSection = "general" | "providers" | "rules" | "memory";
 
 type Props = {
   section: SettingsSection;
-  defaultAgentMode: AgentMode;
   modelDefaults: ModelSelectionDefaults | null;
   providerSettings: ProviderSettings[];
   catalog: ModelCatalogResponse | null;
@@ -20,7 +19,7 @@ type Props = {
   savingDefaults: boolean;
   onNavigate: (section: SettingsSection) => void;
   onBack: () => void;
-  onSaveDefaults: (mode: AgentMode, defaults: ModelSelectionDefaults) => Promise<void>;
+  onSaveDefaults: (defaults: ModelSelectionDefaults) => Promise<void>;
   onSaveProvider: (input: ProviderSettingsInput) => Promise<void>;
   onCreateProvider: (input: CreateProviderInput) => Promise<ProviderSettings>;
   onRefreshProjectRules: () => Promise<void>;
@@ -58,7 +57,7 @@ export default function SettingsPage(props: Props) {
 
       <section className="settings-content">
         {props.section === "general" ? (
-          <AgentDefaultsSettings defaultMode={props.defaultAgentMode} defaults={props.modelDefaults} catalog={props.catalog} saving={props.savingDefaults} onSave={props.onSaveDefaults} />
+          <AgentDefaultsSettings defaults={props.modelDefaults} catalog={props.catalog} saving={props.savingDefaults} onSave={props.onSaveDefaults} />
         ) : null}
         {props.section === "providers" ? (
           <ProviderSettingsPage settings={props.providerSettings} catalog={props.catalog} loading={props.loading} onSave={props.onSaveProvider} onCreate={props.onCreateProvider} />

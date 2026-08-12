@@ -17,6 +17,7 @@ import { runtimeError } from "../../runtime/errors.js";
 import { isPathInScope } from "../../runtime/permissionManager.js";
 import type { PlannerResult } from "../planner/contracts.js";
 import { PlannerAgent } from "../planner/plannerAgent.js";
+import { PlannerAgentRuntime } from "../planner/plannerAgentRuntime.js";
 import type { ExplorerExecution } from "../explorer/explorerAgentRuntime.js";
 import { ExplorerAgentRuntime } from "../explorer/explorerAgentRuntime.js";
 import type { DeveloperTaskOptions } from "../developer/developerAgentRuntime.js";
@@ -97,6 +98,7 @@ export type DeveloperScopeChangeDecision =
 export type MainAgentRuntimeOptions = {
   agent?: MainAgent;
   planner?: PlannerAgent;
+  plannerRuntime?: Pick<PlannerAgentRuntime, "createPlan" | "replan">;
   explorer?: Pick<ExplorerAgentRuntime, "executePlanTask">;
   developer?: Pick<DeveloperAgentRuntime, "executePlanTask">;
   tester?: Pick<TesterAgentRuntime, "executePlanTask">;
@@ -156,6 +158,7 @@ function createPlan(task: AgentTaskPacket, decision: RouteDecision): Plan {
 export class MainAgentRuntime {
   private readonly agent: MainAgent;
   private readonly planner: PlannerAgent;
+  private readonly plannerRuntime: Pick<PlannerAgentRuntime, "createPlan" | "replan">;
   private readonly explorer: Pick<ExplorerAgentRuntime, "executePlanTask">;
   private readonly developer: Pick<DeveloperAgentRuntime, "executePlanTask">;
   private readonly tester: Pick<TesterAgentRuntime, "executePlanTask">;
@@ -166,6 +169,7 @@ export class MainAgentRuntime {
   constructor(options: MainAgentRuntimeOptions = {}) {
     this.agent = options.agent ?? new MainAgent();
     this.planner = options.planner ?? new PlannerAgent();
+    this.plannerRuntime = options.plannerRuntime ?? new PlannerAgentRuntime(this.planner);
     this.explorer = options.explorer ?? new ExplorerAgentRuntime();
     this.developer = options.developer ?? new DeveloperAgentRuntime();
     this.tester = options.tester ?? new TesterAgentRuntime();
@@ -229,7 +233,7 @@ export class MainAgentRuntime {
     const decision = await this.agent.route(goal, request.signal);
     if (decision.route !== "planned") return { decision, planning: null };
 
-    const planning = await this.planner.createPlan({
+    const planning = await this.plannerRuntime.createPlan({
       goal,
       knownFacts: request.knownFacts ?? [],
       constraints: request.constraints ?? [],
@@ -505,7 +509,7 @@ export class MainAgentRuntime {
     state.completedTasks = completedTasks;
     state.facts = [...new Set(request.newFacts ?? [])];
 
-    return this.planner.replan({
+    return this.plannerRuntime.replan({
       oldPlan: request.oldPlan,
       completedTasks,
       newFacts: request.newFacts ?? [],

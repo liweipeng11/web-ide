@@ -1,4 +1,4 @@
-import type { Plan, Task, TaskType } from "../../runtime/contracts.js";
+import type { Agent, AgentContext, AgentResult, AgentTaskPacket, Plan, RuntimeToolDescriptor, Task, TaskType } from "../../runtime/contracts.js";
 import { AgentRuntimeError, runtimeError } from "../../runtime/errors.js";
 import { validatePlan } from "../../runtime/stateManager.js";
 import type {
@@ -10,7 +10,9 @@ import type {
 } from "./contracts.js";
 import type { PlannerAgentDecisionModel } from "./plannerAgentModel.js";
 import { ProviderPlannerAgentDecisionModel } from "./plannerAgentModel.js";
-import { buildCreatePlanPrompt, buildReplanPrompt } from "./prompt.js";
+import { EXPLORER_TOOL_NAMES } from "../explorer/explorerTools.js";
+import { recoverableToolObservation } from "../toolRecovery.js";
+import { buildCreatePlanPrompt, buildPlannerToolPrompt, buildReplanPrompt } from "./prompt.js";
 
 const TASK_TYPES = new Set<TaskType>(["explore", "implement", "test", "respond"]);
 export const PLANNER_LIMITS = {
@@ -22,6 +24,15 @@ export const PLANNER_LIMITS = {
 } as const;
 
 type TaskDraft = Pick<Task, "id" | "type" | "goal" | "dependencies" | "acceptanceCriteria">;
+
+type PlannerToolAction = { type: "tool"; tool: string; args: Record<string, unknown> };
+type PlannerRunContext = { phase: "create" | "replan"; request: PlannerCreatePlanInput | PlannerReplanInput };
+export type PlannerAgentResult = AgentResult & { planning: PlannerResult };
+const PLANNER_READ_TOOL_NAMES = new Set<string>(EXPLORER_TOOL_NAMES);
+// 读取次数与模型决策次数分开限制：最后一次读取后仍须给模型机会产出计划。
+const MAX_PLANNER_READ_TOOL_CALLS = 30;
+const MAX_PLANNER_FINALIZATION_STEPS = 4;
+const MAX_PLANNER_OBSERVATION_CHARS = 20_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -163,6 +174,131 @@ function parseResult(
   return { status: "ready", plan: parseReadyPlan(value, goal, version, scope, validateImmediately) };
 }
 
+/**
+ * 模型在探索预算耗尽后仍不收敛时，生成一个保守的最小计划，避免整个任务因模型循环而丢失。
+ */
+function createFallbackPlan(
+  request: PlannerCreatePlanInput | PlannerReplanInput,
+  phase: "create" | "replan",
+  observations: Array<{ tool: string; result: unknown }>
+): PlannerResult {
+  const goal = phase === "create" ? (request as PlannerCreatePlanInput).goal : (request as PlannerReplanInput).oldPlan.goal;
+  const scope = request as PlannerScope;
+  const evidenceCount = observations.filter((observation) => observation.tool !== "planner_policy").length;
+  const fallback = parseResult({
+    status: "ready",
+    plan: {
+      assumptions: [
+        `Planner 已收集 ${evidenceCount} 次只读观察；未完成的细节由实现任务继续确认。`,
+        "实现任务应先确认目标文件和目录存在性，再执行写入。"
+      ],
+      tasks: [
+        {
+          id: "T1",
+          type: "explore",
+          goal: `基于已收集证据确认与“${goal}”相关的文件、依赖和现有实现。`,
+          dependencies: [],
+          acceptanceCriteria: ["相关文件和依赖已记录", "未确认的细节已明确标注"]
+        },
+        {
+          id: "T2",
+          type: "implement",
+          goal: goal,
+          dependencies: ["T1"],
+          acceptanceCriteria: ["目标功能已实现", "实现范围符合 readScope 和 writeScope"]
+        },
+        {
+          id: "T3",
+          type: "test",
+          goal: "验证实现结果、边界场景及相关构建或测试命令。",
+          dependencies: ["T2"],
+          acceptanceCriteria: ["相关验证已执行", "发现的问题已修复或明确记录"]
+        },
+        {
+          id: "T4",
+          type: "respond",
+          goal: "汇总变更文件、验证结果和剩余假设。",
+          dependencies: ["T3"],
+          acceptanceCriteria: ["交付说明完整"]
+        }
+      ],
+      completionCriteria: ["目标功能完成并通过相关验证", "变更和剩余风险已说明"]
+    }
+  }, goal, phase === "create" ? 1 : (request as PlannerReplanInput).oldPlan.version + 1, scope, phase === "create");
+  if (phase === "replan" && fallback.status === "ready") preserveCompletedTasks(fallback.plan, request as PlannerReplanInput);
+  return fallback;
+}
+
+function compactObservation(value: unknown) {
+  const serialized = JSON.stringify(value);
+  return !serialized || serialized.length <= MAX_PLANNER_OBSERVATION_CHARS
+    ? value
+    : { truncated: true, preview: serialized.slice(0, MAX_PLANNER_OBSERVATION_CHARS) };
+}
+
+/** 将工具参数规范化，避免同一读取请求反复消耗 Planner 的只读预算。 */
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+function toolActionSignature(action: PlannerToolAction) {
+  return `${action.tool}:${stableSerialize(action.args)}`;
+}
+
+function isPositiveInteger(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+/** 仅兼容模型将 read_file 动作压缩为 { filePath, startLine?, endLine? } 的固定形式。 */
+function parseReadFileShorthand(value: Record<string, unknown>): PlannerToolAction | null {
+  if (value.type !== undefined || value.tool !== undefined || value.args !== undefined || value.status !== undefined) return null;
+  const allowedFields = new Set(["filePath", "startLine", "endLine"]);
+  if (Object.keys(value).some((key) => !allowedFields.has(key))) return null;
+  if (typeof value.filePath !== "string" || !value.filePath.trim()) return null;
+  if (value.startLine !== undefined && !isPositiveInteger(value.startLine)) return null;
+  if (value.endLine !== undefined && !isPositiveInteger(value.endLine)) return null;
+  return {
+    type: "tool",
+    tool: "read_file",
+    args: Object.fromEntries(Object.entries(value).filter(([key]) => allowedFields.has(key)))
+  };
+}
+
+function isMissingDirectoryObservation(action: PlannerToolAction, recovery: ReturnType<typeof recoverableToolObservation>) {
+  return action.tool === "list_directory"
+    && recovery
+    && /directory not found|目录不存在/i.test(recovery.message);
+}
+
+function parseToolAction(value: unknown, availableTools: RuntimeToolDescriptor[]): PlannerToolAction | null {
+  if (!isRecord(value)) return null;
+  const shorthand = parseReadFileShorthand(value);
+  if (shorthand) {
+    if (!availableTools.some((item) => item.name === shorthand.tool && item.effect === "read")) {
+      throw runtimeError("PERMISSION_DENIED", "Planner 无权调用工具 read_file。", { toolName: "read_file" });
+    }
+    return shorthand;
+  }
+  if (value.type !== "tool" && !(value.type === undefined && typeof value.tool === "string" && isRecord(value.args))) return null;
+  // 部分兼容模型会遗漏固定的 type 字段；仅在工具名与参数结构都明确时兼容，避免误把 PlannerResult 当作工具动作。
+  const tool = requiredString(value.tool, "Planner action.tool", 80);
+  if (!PLANNER_READ_TOOL_NAMES.has(tool) || !availableTools.some((item) => item.name === tool && item.effect === "read")) {
+    throw runtimeError("PERMISSION_DENIED", `Planner 无权调用工具 ${tool}。`, { toolName: tool });
+  }
+  if (!isRecord(value.args)) throw runtimeError("INVALID_CONTRACT", "Planner action.args 必须是对象。");
+  return { type: "tool", tool, args: value.args };
+}
+
+function isPlannerRunContext(value: unknown): value is PlannerRunContext {
+  return isRecord(value)
+    && (value.phase === "create" || value.phase === "replan")
+    && isRecord(value.request);
+}
+
 function cloneTask(task: Task): Task {
   return {
     ...task,
@@ -213,8 +349,124 @@ function failedResult(error: unknown, phase: "input" | "model"): PlannerResult {
 }
 
 /** Planner 只生成或修改计划，不持有 Runtime 工具和共享状态写权限。 */
-export class PlannerAgent {
+export class PlannerAgent implements Agent {
+  readonly id = "planner";
+  readonly capabilities = ["planning", "exploration"];
+
   constructor(private readonly model: PlannerAgentDecisionModel = new ProviderPlannerAgentDecisionModel()) {}
+
+  /** 供 Runtime 使用：Planner 只能在 Runtime 注入的只读工具白名单内补齐事实。 */
+  async run(task: AgentTaskPacket, context: AgentContext): Promise<PlannerAgentResult> {
+    if (task.writeScope.length) throw runtimeError("PERMISSION_DENIED", "Planner Task 不允许声明 writeScope。", { taskId: task.taskId });
+    if (!isPlannerRunContext(task.context)) throw runtimeError("INVALID_CONTRACT", "Planner Task 缺少规划请求上下文。", { taskId: task.taskId });
+
+    const request = task.context.request;
+    const phase = task.context.phase;
+    if (!this.model.nextAction) {
+      const planning = phase === "create"
+        ? await this.createPlan(request as PlannerCreatePlanInput)
+        : await this.replan(request as PlannerReplanInput);
+      return this.toRuntimeResult(task.taskId, planning);
+    }
+
+    const observations: Array<{ tool: string; result: unknown }> = [];
+    let rejectedMissingContextCount = 0;
+    let readToolCallCount = 0;
+    let finalizationStepCount = 0;
+    const executedToolActions = new Set<string>();
+    while (finalizationStepCount < MAX_PLANNER_FINALIZATION_STEPS) {
+      const actionValue = await this.model.nextAction(buildPlannerToolPrompt({
+        phase,
+        request,
+        availableTools: context.availableTools.filter((tool) => PLANNER_READ_TOOL_NAMES.has(tool.name)),
+        observations,
+        readToolCallCount,
+        maxReadToolCalls: MAX_PLANNER_READ_TOOL_CALLS,
+        forceFinalization: readToolCallCount >= MAX_PLANNER_READ_TOOL_CALLS
+      }), context.signal);
+      const action = parseToolAction(actionValue, context.availableTools);
+      if (!action) {
+        const planning = phase === "create"
+          ? parseResult(actionValue, (request as PlannerCreatePlanInput).goal, 1, request as PlannerCreatePlanInput)
+          : parseResult(actionValue, (request as PlannerReplanInput).oldPlan.goal, (request as PlannerReplanInput).oldPlan.version + 1, request as PlannerReplanInput, false);
+        if (planning.status === "missing_context" && context.availableTools.some((tool) => PLANNER_READ_TOOL_NAMES.has(tool.name) && tool.effect === "read") && rejectedMissingContextCount < 2) {
+          rejectedMissingContextCount += 1;
+          // 缺少的信息仍可由已授权只读工具获得时，不把责任转交给用户；要求 Planner 继续调查。
+          observations.push({
+            tool: "planner_policy",
+            result: {
+              rejected: "missing_context",
+              required: planning.required,
+              instruction: "这些信息仍可通过 availableTools 在 readScope 内读取。请选择下一项只读工具并继续调查；不要再次返回 missing_context。"
+            }
+          });
+          continue;
+        }
+        if (phase === "replan" && planning.status === "ready") preserveCompletedTasks(planning.plan, request as PlannerReplanInput);
+        return this.toRuntimeResult(task.taskId, planning);
+      }
+      const actionSignature = toolActionSignature(action);
+      if (executedToolActions.has(actionSignature)) {
+        finalizationStepCount += 1;
+        // 已有观察结果会持续传回模型，拒绝重复读取并让模型基于现有证据收敛。
+        observations.push({
+          tool: "planner_policy",
+          result: {
+            rejected: "duplicate_tool_action",
+            action: { tool: action.tool, args: action.args },
+            instruction: "该只读请求已经执行过，结果已在 observations 中。请选择未读取的相关文件，或直接根据现有证据返回 PlannerResult。"
+          }
+        });
+        continue;
+      }
+      if (readToolCallCount >= MAX_PLANNER_READ_TOOL_CALLS) {
+        finalizationStepCount += 1;
+        observations.push({
+          tool: "planner_policy",
+          result: {
+            rejected: "read_tool_budget_exhausted",
+            instruction: "已达到只读工具调用上限。不得再调用工具；请基于 observations 中的证据立即返回 PlannerResult，未验证的细节写入 assumptions。"
+          }
+        });
+        continue;
+      }
+      executedToolActions.add(actionSignature);
+      readToolCallCount += 1;
+      try {
+        observations.push({ tool: action.tool, result: compactObservation(await context.callTool(action.tool, action.args)) });
+      } catch (error) {
+        const recovery = recoverableToolObservation(error);
+        if (!recovery) throw error;
+        // 目标目录尚未创建是实现类任务的正常前置状态，不应阻断 Planner。
+        observations.push({
+          tool: action.tool,
+          result: isMissingDirectoryObservation(action, recovery)
+            ? {
+              ...recovery,
+              missingDirectory: typeof action.args.path === "string" ? action.args.path : "",
+              instruction: "该目录当前不存在；若计划涉及写入该目录，可在实现任务中先创建它。请继续调查或基于现有证据生成计划。"
+            }
+            : recovery
+        });
+      }
+    }
+    // 模型未遵守强制收敛提示时，使用保守计划继续后续流程；实际写入任务仍会自行读取和验证代码。
+    return this.toRuntimeResult(task.taskId, createFallbackPlan(request, phase, observations));
+  }
+
+  private toRuntimeResult(taskId: string, planning: PlannerResult): PlannerAgentResult {
+    const blockers = planning.status === "failed" ? planning.blockers : planning.status === "missing_context" ? planning.required : [];
+    return {
+      taskId,
+      status: planning.status === "failed" ? "failed" : planning.status === "missing_context" ? "blocked" : "success",
+      summary: planning.status === "ready" ? "Planner 已生成任务计划。" : planning.status === "missing_context" ? "Planner 仍需要仓库上下文。" : "Planner 未能生成有效计划。",
+      facts: [],
+      changedFiles: [],
+      evidence: [],
+      blockers,
+      planning
+    };
+  }
 
   async createPlan(input: PlannerCreatePlanInput): Promise<PlannerResult> {
     let normalizedInput: PlannerCreatePlanInput;

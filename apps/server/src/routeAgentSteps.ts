@@ -85,7 +85,8 @@ export type AgentStepPayload =
     }
   | Omit<Extract<AgentStep, { type: "completion_rejected" }>, "id" | "createdAt">
   | Omit<Extract<AgentStep, { type: "tool_blocked" }>, "id" | "createdAt">
-  | Omit<Extract<AgentStep, { type: "delivery_unit_started" | "delivery_unit_completed" | "replan_requested" | "awaiting_user_decision" | "tool_failure_recorded" }>, "id" | "createdAt">;
+  | Omit<Extract<AgentStep, { type: "delivery_unit_started" | "delivery_unit_completed" | "replan_requested" | "awaiting_user_decision" | "tool_failure_recorded" }>, "id" | "createdAt">
+  | Omit<Extract<AgentStep, { type: "orchestration" }>, "id" | "createdAt">;
 
 export function createAgentStep(step: AgentStepPayload): AgentStep {
   return {
@@ -207,4 +208,3 @@ export function createSubagentArtifactsRecoveredStep(input: {
   const type = "subagent_artifacts_recovered" as const;
   return { id: `${type}:${Date.now()}:${Math.random().toString(36).slice(2)}`, createdAt: Date.now(), type, ...input } as AgentStep;
 }
-

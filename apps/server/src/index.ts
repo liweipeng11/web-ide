@@ -1188,7 +1188,13 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
         taskSession.id,
         "act",
         modelSelection,
-        () => executeApprovedAgentPipeline(plannedTaskSession, { signal: controller.signal })
+        () => executeApprovedAgentPipeline(plannedTaskSession, {
+          signal: controller.signal,
+          // 新编排与旧 Runtime 共用 AgentStep：既实时推送，也持久化为可恢复的会话证据。
+          onLifecycleEvent(event) {
+            pushAgentStep(createAgentStep({ type: "orchestration", ...event }));
+          }
+        })
       );
       if (pipelineResult.outcome === "executed") {
         const { orchestration } = pipelineResult;

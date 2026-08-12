@@ -7,6 +7,19 @@ import type { MainAgentRequest, MainAgentRuntimeResult } from "./mainAgentRuntim
 
 export type OrchestrationAgentId = "main" | "planner" | "explorer" | "developer" | "tester";
 
+/**
+ * 编排器对外发布的最小生命周期事件。
+ *
+ * 它不携带模型上下文或工具原始输出，调用方可安全地映射为任务会话步骤并通过 SSE 推送。
+ */
+export type OrchestrationLifecycleEvent = {
+  agent: OrchestrationAgentId;
+  phase: "started" | "completed";
+  taskId?: string;
+  status?: AgentResult["status"];
+  summary?: string;
+};
+
 export interface OrchestrationTraceEvent {
   agent: OrchestrationAgentId;
   action: "route" | "plan" | "replan" | "execute" | "finish" | "stop";
@@ -72,6 +85,7 @@ export interface ExecuteOrchestrationPlanOptions {
     changedFiles: string[]
   ) => Promise<{ testScope: string[]; acceptanceEvidence: AcceptanceEvidenceInput[] }>;
   onExecution?: (execution: OrchestrationExecution) => Promise<void> | void;
+  onLifecycleEvent?: (event: OrchestrationLifecycleEvent) => Promise<void> | void;
   onPlanUpdate?: (plan: Plan, reason: "scope_expansion" | "retry" | "replan" | "concurrency_merge") => Promise<void> | void;
   onReplanExplorations?: (plan: Plan, explorations: ExplorerExecution[]) => Promise<void> | void;
   signal?: AbortSignal;

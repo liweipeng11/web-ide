@@ -206,7 +206,7 @@ export default function TaskPlanPanel({
             {planItems.length ? `${completedCount}/${planItems.length} 完成 · ${inProgressCount} 进行中 · ${blockedCount} 受阻` : session ? "暂无计划步骤" : "选择任务后可维护计划"}
           </span>
         </div>
-        <span className={`task-plan-mode ${effectiveAgentMode}`}>{effectiveAgentMode === "plan" ? "Plan" : "Act"}</span>
+        <span className={`task-plan-mode ${effectiveAgentMode}`}>{effectiveAgentMode === "plan" ? "规划阶段" : "实施阶段"}</span>
       </div>
 
       {runtimeStatus && (
@@ -251,7 +251,7 @@ export default function TaskPlanPanel({
             <div className="task-continuation-actions">
               {isPlanReadyForAct ? (
                 <button type="button" disabled={disabled || loading} onClick={() => void onApprovePlan()}>
-                  切换到 Act 并执行
+                  开始实施
                 </button>
               ) : (
                 <button type="button" disabled={disabled || loading} onClick={onOpenTaskConversation}>
@@ -316,10 +316,10 @@ export default function TaskPlanPanel({
 
       {session?.planApproval?.status === "pending" && (
         <div className="task-plan-approval">
-          <strong>{isAwaitingReplan ? "已进入计划模式" : "计划等待批准"}</strong>
-          <p>{isAwaitingReplan ? "当前执行已暂停，请先调整计划；确认后会切换到 Act 模式继续。" : "确认后智能体会进入 Act 模式，并按当前计划继续执行代码修改。"}</p>
+          <strong>{isAwaitingReplan ? "已返回规划阶段" : "计划等待确认"}</strong>
+          <p>{isAwaitingReplan ? "当前执行已暂停，请先调整计划；确认后智能体会继续实施。" : "确认后智能体会按当前计划继续修改代码。"}</p>
           <button type="button" disabled={!canEdit} onClick={() => void onApprovePlan()}>
-            {isAwaitingReplan ? "批准继续执行" : "批准执行"}
+            {isAwaitingReplan ? "确认后继续实施" : "开始实施"}
           </button>
         </div>
       )}

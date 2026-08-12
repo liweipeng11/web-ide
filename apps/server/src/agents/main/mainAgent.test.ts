@@ -127,14 +127,15 @@ test("direct 请求直接响应且不调用工具", async () => {
   const goal = "解释一下这个函数";
   const model = new FakeDecisionModel(
     { intent: "question", complexity: "simple", route: "direct", requiredCapabilities: [] },
-    [{ type: "respond", content: "这是一个示例函数。" }, { type: "finish" }]
+    [{ type: "respond", content: "这是一个示例函数。" }]
   );
   const main = new MainAgent(model);
   const result = await createKernel(main, goal).execute("main", createTask(goal));
 
   assert.equal(result.result.status, "success");
   assert.equal(result.result.summary, "这是一个示例函数。");
-  assert.equal(model.actionCalls, 2);
+  // direct 路由首个回答即完成，不能要求模型额外返回 finish。
+  assert.equal(model.actionCalls, 1);
 });
 
 test("main_loop 通过 Runtime 权限边界执行工具并消费观察结果", async () => {

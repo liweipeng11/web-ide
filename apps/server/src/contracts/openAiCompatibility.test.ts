@@ -12,6 +12,14 @@ test("OpenAI 兼容响应在边界转换为内部工具调用和 Usage", () => {
   assert.deepEqual(response.usage, { inputTokens: 10, outputTokens: 4, reasoningTokens: 2, cachedInputTokens: 3 });
 });
 
+test("OpenAI 兼容响应保留 reasoning_content 供 JSON Agent 兼容处理", () => {
+  const response = adaptOpenAiCompletionResponse({
+    choices: [{ message: { role: "assistant", content: null, reasoning_content: '{"type":"tool"}' } }]
+  });
+
+  assert.equal(response.message.reasoningContent, '{"type":"tool"}');
+});
+
 test("内部请求只在 Provider 边界恢复 OpenAI 字段", () => {
   const body = toOpenAiChatCompletionBody({ model: "mock", messages: [{ role: "assistant", toolCalls: [{ id: "call-1", name: "readFile", arguments: { path: "src/a.ts" } }] }], toolChoice: "auto" });
   assert.equal(body.tool_choice, "auto");

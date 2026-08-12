@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { derivePlanSearchKeywords, isIntermediateEditPlanSummary, isIntermediateEditStatus } from "./aiClient.js";
+import { deriveChatWorkspaceSearchTerms, derivePlanSearchKeywords, isIntermediateEditPlanSummary, isIntermediateEditStatus, requiresWorkspaceEvidenceForChat } from "./aiClient.js";
+
+test("项目分析聊天必须先取得工作区证据", () => {
+  assert.equal(requiresWorkspaceEvidenceForChat("分析一下 clr-vue-app 是一个什么项目"), true);
+  assert.equal(requiresWorkspaceEvidenceForChat("为什么 router 配置报错"), true);
+  assert.equal(requiresWorkspaceEvidenceForChat("你好，今天天气怎么样"), false);
+});
+
+test("项目分析仅提取简短目录或包名作为检索词", () => {
+  assert.deepEqual(deriveChatWorkspaceSearchTerms("分析一下 clr-vue-app 是一个什么项目"), ["clr-vue-app"]);
+  assert.deepEqual(deriveChatWorkspaceSearchTerms("请解释 src/router/index.ts 的职责"), ["index.ts"]);
+});
 
 test("uses structured edit status to identify intermediate agent states", () => {
   assert.equal(isIntermediateEditStatus("plan"), true);

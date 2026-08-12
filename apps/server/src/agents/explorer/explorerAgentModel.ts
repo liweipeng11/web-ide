@@ -2,16 +2,11 @@ import type { ModelSelection } from "../../contracts/model.js";
 import { config } from "../../config.js";
 import { getModelExecutionContext } from "../../modelExecutionContext.js";
 import { requestModelCompletionWithMetrics } from "../../modelGatewayClient.js";
+import { parseJsonModelResponse } from "../modelJsonResponse.js";
 import { EXPLORER_SYSTEM_PROMPT } from "./prompt.js";
 
 export interface ExplorerAgentDecisionModel {
   nextAction(input: string, signal?: AbortSignal): Promise<unknown>;
-}
-
-function parseJsonResponse(content: string | null | undefined) {
-  if (!content?.trim()) throw new Error("Explorer Agent 模型没有返回内容。");
-  const normalized = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  return JSON.parse(normalized) as unknown;
 }
 
 /** 复用项目 Provider Gateway，Explorer 不依赖具体模型供应商协议。 */
@@ -29,6 +24,6 @@ export class ProviderExplorerAgentDecisionModel implements ExplorerAgentDecision
       temperature: 0,
       responseFormat: "json_object"
     }, signal);
-    return parseJsonResponse(response.message.content);
+    return parseJsonModelResponse({ agentName: "Explorer", content: response.message.content, reasoningContent: response.message.reasoningContent }).value;
   }
 }

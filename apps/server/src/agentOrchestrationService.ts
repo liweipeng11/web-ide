@@ -6,6 +6,7 @@ import {
   type ExecuteOrchestrationPlanOptions,
   type MainOrchestrationResult,
   type OrchestrationExecution,
+  type OrchestrationLifecycleEvent,
   type OrchestrationTrace
 } from "./agents/main/index.js";
 import { MainAgentRuntime, type MainAgentRequest, type MainAgentRuntimeResult } from "./agents/main/mainAgentRuntime.js";
@@ -200,6 +201,8 @@ export async function executeApprovedAgentPipeline(
     testScope?: string[];
     acceptanceEvidence?: AcceptanceEvidenceInput[];
     signal?: AbortSignal;
+    /** 将新编排角色事件桥接到旧 Runtime 已使用的会话/SSE 生命周期。 */
+    onLifecycleEvent?: (event: OrchestrationLifecycleEvent) => Promise<void> | void;
   } = {}
 ): Promise<ApprovedAgentPipelineResult> {
   if (session.agentMode !== "act") return { outcome: "not_applicable", reason: "任务不处于 act 模式。" };
@@ -230,6 +233,7 @@ export async function executeApprovedAgentPipeline(
     trace: orchestrationTraceForSession(session, decision),
     resolveTestContext,
     onExecution: (execution) => persistExecution(session.id, execution),
+    onLifecycleEvent: options.onLifecycleEvent,
     // Planner 返回新版 DAG 或 Main 扩展当前任务后立即落盘，避免进程中断恢复到 blocked 旧计划。
     onPlanUpdate: async (plan) => {
       await setTaskSessionRuntimePlanning(session.id, { status: "ready", plan });

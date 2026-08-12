@@ -1,5 +1,5 @@
 import { lazy, Suspense, useMemo, type Dispatch, type PointerEvent, type SetStateAction } from "react";
-import type { AgentMode, AgentStep, CommandResult, FileTreeNode, PatchFileChange, SourceLocation, TaskPlanItemStatus, UnifiedDiagnostic, VerificationIssueCategory } from "../api";
+import type { AgentStep, CommandResult, FileTreeNode, PatchFileChange, SourceLocation, TaskPlanItemStatus, UnifiedDiagnostic, VerificationIssueCategory } from "../api";
 import type { AppState, CommandSuggestion } from "../appState";
 import { collectFilePaths } from "../appState";
 import type { WorkbenchLeftPanel } from "../hooks/useWorkbenchLayout";
@@ -65,7 +65,6 @@ type Props = {
   onRewritePlan: (taskSessionId: string, instruction: string) => Promise<void>;
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
-  onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
   onOpenSettings: () => void;
   onNewChat: () => void;
   onDeleteChatHistory: (path: string) => Promise<void>;
@@ -129,7 +128,6 @@ export default function AppLayout({
   onRewritePlan,
   onApprovePlan,
   onInterruptTaskForReplan,
-  onUpdateAgentMode,
   onOpenSettings,
   onNewChat,
   onDeleteChatHistory,
@@ -389,7 +387,6 @@ export default function AppLayout({
               onRewritePlan={onRewritePlan}
               onApprovePlan={onApprovePlan}
               onInterruptTaskForReplan={onInterruptTaskForReplan}
-              onUpdateAgentMode={onUpdateAgentMode}
               onOpenSettings={onOpenSettings}
               onRollbackCheckpoint={(checkpointId) => void onRollbackCheckpoint(checkpointId)}
               onNewChat={onNewChat}

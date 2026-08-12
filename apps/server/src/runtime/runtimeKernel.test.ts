@@ -113,6 +113,7 @@ test("RuntimeKernel 将 Agent 的越权工具调用转换为统一失败结果",
   );
   assert.equal(executionCount, 0);
   assert.equal(result.result.status, "failed");
+  assert.match(result.result.summary, /无权调用工具/);
   assert.match(result.result.blockers[0], /无权调用工具/);
   assert.deepEqual(result.state.failedTasks, ["T1"]);
 });

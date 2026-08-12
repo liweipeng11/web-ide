@@ -12,7 +12,7 @@ export function recoverableToolObservation(error: unknown) {
   if (error instanceof AgentRuntimeError) return null;
   const code = errorCode(error);
   const message = error instanceof Error ? error.message : "工具执行失败。";
-  if (!RECOVERABLE_CODES.has(code) && !/file not found|no match|找不到.*文件|文件不存在/i.test(message)) {
+  if (!RECOVERABLE_CODES.has(code) && !/file not found|directory not found|no match|找不到.*(?:文件|目录)|(?:文件|目录)不存在/i.test(message)) {
     return null;
   }
   return {

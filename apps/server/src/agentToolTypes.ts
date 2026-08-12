@@ -221,6 +221,7 @@ export type AgentToolSchema = {
 export type AgentCompletionMessage = {
   role?: "assistant";
   content?: string | null;
+  reasoning_content?: string | null;
   tool_calls?: AgentToolCall[];
 };
 

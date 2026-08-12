@@ -56,6 +56,7 @@ export function adaptOpenAiCompletionResponse(response: OpenAiCompletionResponse
     message: {
       role: "assistant",
       content: message.content,
+      reasoningContent: message.reasoning_content,
       toolCalls: message.tool_calls?.map(toModelToolCall)
     },
     usage,

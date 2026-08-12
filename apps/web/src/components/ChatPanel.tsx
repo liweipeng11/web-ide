@@ -38,7 +38,6 @@ type Props = {
   onRewritePlan: (taskSessionId: string, instruction: string) => Promise<void>;
   onApprovePlan: (taskSessionId: string) => Promise<void>;
   onInterruptTaskForReplan: (taskSessionId: string, instruction: string) => Promise<void>;
-  onUpdateAgentMode: (taskSessionId: string | null, mode: AgentMode) => Promise<void>;
   onOpenSettings: () => void;
   onRollbackCheckpoint: (checkpointId: string) => void;
   onNewChat: () => void;
@@ -305,7 +304,6 @@ export default function ChatPanel({
   onRewritePlan,
   onApprovePlan,
   onInterruptTaskForReplan,
-  onUpdateAgentMode,
   onOpenSettings,
   onRollbackCheckpoint,
   onNewChat,
@@ -773,20 +771,9 @@ export default function ChatPanel({
         </div>
       </div>
       <div className="chat-toolbar">
-        <div className="agent-mode-toggle" role="group" aria-label="Agent mode">
-          {(["plan", "act"] as AgentMode[]).map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              className={effectiveAgentMode === mode ? "active" : ""}
-              disabled={disabled || loading || streaming}
-              title={mode === "plan" ? "Plan 模式只读分析并输出方案" : "Act 模式可生成补丁并请求验证"}
-              aria-pressed={effectiveAgentMode === mode}
-              onClick={() => void onUpdateAgentMode(activeTaskSession?.id || selectedTaskSession?.id || null, mode)}
-            >
-              {mode === "plan" ? "Plan" : "Act"}
-            </button>
-          ))}
+        <div className="agent-phase-status" role="status" aria-label="智能体当前阶段">
+          <span>智能体</span>
+          <small>{effectiveAgentMode === "plan" ? "正在规划" : "正在实施"}</small>
         </div>
         {modelDefaults && selectableModels.length ? (
           <div className="model-status" aria-label={`当前模型：${effectiveTaskModel?.displayName || "默认"}`}>

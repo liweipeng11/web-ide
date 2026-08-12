@@ -364,6 +364,94 @@ function normalizeSearchKeyword(value: string) {
   return value.trim().replace(/\s+/g, " ").slice(0, 80);
 }
 
+/**
+ * 判断聊天问题是否必须以工作区事实为依据。此类问题不能直接退化为通用 LLM 问答，
+ * 至少需要读取一个真实项目文件后才能给出技术栈、目录或实现相关的结论。
+ */
+export function requiresWorkspaceEvidenceForChat(userRequest: string) {
+  return /(?:项目|工程|代码库|仓库|工作区|目录|文件|模块|组件|依赖|配置|脚本|路由|源码|代码|报错|错误|实现|测试|构建|启动|运行|package\.json|readme|\b(?:project|workspace|codebase|repository|package|module|component|dependency|config|route|router|source)\b)/i.test(userRequest);
+}
+
+/**
+ * 从请求中提取可用于定位子项目的简短名称，避免把整句自然语言直接传给文件搜索。
+ */
+export function deriveChatWorkspaceSearchTerms(userRequest: string) {
+  const terms: string[] = [];
+  const add = (value: string) => {
+    const normalized = normalizeSearchKeyword(value);
+    if (normalized.length >= 2 && !terms.some((item) => item.toLowerCase() === normalized.toLowerCase())) terms.push(normalized);
+  };
+
+  for (const match of userRequest.matchAll(/\b[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+\b/g)) add(match[0]);
+  for (const match of userRequest.matchAll(/(?:^|[\s“”"'：:/\\])([\w.-]+\.(?:ts|tsx|js|jsx|vue|json|md|yml|yaml))(?:$|[\s，。、“”"'])/g)) add(match[1]);
+
+  return terms.slice(0, 2);
+}
+
+function parseToolResult(content: string) {
+  try {
+    const parsed = JSON.parse(content);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+async function collectRequiredChatWorkspaceEvidence(userRequest: string, toolRuntime: ReturnType<typeof createAgentToolRuntime>) {
+  const evidence: Array<{ toolName: string; result: Record<string, unknown> }> = [];
+  let sequence = 0;
+  const call = async (name: string, args: Record<string, unknown>) => {
+    sequence += 1;
+    const result = await executeAgentToolCall({
+      id: `chat-grounding-${sequence}`,
+      type: "function",
+      function: { name, arguments: JSON.stringify(args) }
+    }, toolRuntime);
+    const parsed = parseToolResult(result.content);
+    evidence.push({ toolName: name, result: parsed });
+    return parsed;
+  };
+
+  // 优先寻找用户明确提到的子项目；未指定时直接从根清单开始。
+  const projectTerm = deriveChatWorkspaceSearchTerms(userRequest)[0];
+  const projectLookup = projectTerm ? await call("searchFilesByName", { query: projectTerm, limit: 20 }) : null;
+  const projectPaths = Array.isArray(projectLookup?.matches)
+    ? projectLookup.matches
+      .map((item) => item && typeof item === "object" ? (item as Record<string, unknown>).path : "")
+      .filter((path): path is string => typeof path === "string" && path.length > 0)
+    : [];
+  const projectDirectory = projectPaths.find((path) => !/\.[^/\\]+$/.test(path)) || "";
+
+  const manifestLookup = await call("searchFilesByName", {
+    query: "package.json",
+    ...(projectDirectory ? { path: projectDirectory } : {}),
+    limit: 10
+  });
+  const manifestPath = Array.isArray(manifestLookup.matches)
+    ? manifestLookup.matches
+      .map((item) => item && typeof item === "object" ? (item as Record<string, unknown>).path : "")
+      .find((path): path is string => typeof path === "string" && /(^|[/\\])package\.json$/i.test(path))
+    : undefined;
+
+  if (manifestPath) {
+    await call("readFile", { filePath: manifestPath });
+  } else {
+    const readmeLookup = await call("searchFilesByName", {
+      query: "README",
+      ...(projectDirectory ? { path: projectDirectory } : {}),
+      limit: 10
+    });
+    const readmePath = Array.isArray(readmeLookup.matches)
+      ? readmeLookup.matches
+        .map((item) => item && typeof item === "object" ? (item as Record<string, unknown>).path : "")
+        .find((path): path is string => typeof path === "string" && /(^|[/\\])README(?:\.md)?$/i.test(path))
+      : undefined;
+    if (readmePath) await call("readFile", { filePath: readmePath });
+  }
+
+  return evidence;
+}
+
 // 提取用户显式提到的按钮、文案或引号文本，避免搜索关键词只剩英文技术词。
 function extractQuotedSearchKeywords(source: string) {
   const keywords: string[] = [];
@@ -826,6 +914,8 @@ async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentC
   const startedAt = Date.now();
   const toolMessages = [...messages];
   const toolRuntime = createAgentToolRuntime({ agentContext, runId, onAgentStep });
+  const requiresWorkspaceEvidence = requiresWorkspaceEvidenceForChat(agentContext.userGoal);
+  let automaticGroundingAttempted = false;
   logAi(runId, "start", { userGoal: agentContext.userGoal, contextFiles: agentContext.relevantFiles });
 
   for (let step = 0; step < MAX_FILE_CHAT_TOOL_STEPS; step += 1) {
@@ -851,6 +941,19 @@ async function runFileChatToolLoop(messages: ChatMessage[], agentContext: AgentC
     }
 
     if (!message.tool_calls?.length) {
+      if (requiresWorkspaceEvidence && agentContext.filesRead.length === 0 && !automaticGroundingAttempted) {
+        automaticGroundingAttempted = true;
+        const evidence = await collectRequiredChatWorkspaceEvidence(agentContext.userGoal, toolRuntime);
+        // 将服务端收集到的真实项目证据显式放入下一轮上下文，避免模型把项目名当成通用模板名进行补全。
+        toolMessages.push({
+          role: "user",
+          content: JSON.stringify({
+            automaticWorkspaceEvidence: evidence,
+            instruction: "This is a workspace-grounded question. Answer only from the retrieved evidence. If the requested project was not found or no file could be read, say so clearly and do not infer a generic project template."
+          })
+        });
+        continue;
+      }
       if (deferFinalAnswer) {
         logAi(runId, "tools.done.deferFinal", { elapsedMs: Date.now() - startedAt, contentPreview: message.content || "" });
         return {

@@ -2,17 +2,17 @@ import type { ModelSelection } from "../../contracts/model.js";
 import { config } from "../../config.js";
 import { getModelExecutionContext } from "../../modelExecutionContext.js";
 import { requestModelCompletionWithMetrics } from "../../modelGatewayClient.js";
+import { parseJsonModelResponse } from "../modelJsonResponse.js";
 import { PLANNER_CREATE_SYSTEM_PROMPT, PLANNER_REPLAN_SYSTEM_PROMPT } from "./prompt.js";
 
 export interface PlannerAgentDecisionModel {
   createPlan(input: string, signal?: AbortSignal): Promise<unknown>;
   replan(input: string, signal?: AbortSignal): Promise<unknown>;
-}
-
-function parseJsonResponse(content: string | null | undefined) {
-  if (!content?.trim()) throw new Error("Planner Agent 模型没有返回内容。");
-  const normalized = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  return JSON.parse(normalized) as unknown;
+  /**
+   * 规划阶段的只读工具循环。保留为可选字段，以兼容仅支持一次性 JSON
+   * 规划结果的测试替身和旧模型适配器。
+   */
+  nextAction?(input: string, signal?: AbortSignal): Promise<unknown>;
 }
 
 /** 复用 Provider Gateway，避免 Planner 与具体模型供应商耦合。 */
@@ -31,7 +31,7 @@ export class ProviderPlannerAgentDecisionModel implements PlannerAgentDecisionMo
       temperature: 0,
       responseFormat: "json_object"
     }, signal);
-    return parseJsonResponse(response.message.content);
+    return parseJsonModelResponse({ agentName: "Planner", content: response.message.content, reasoningContent: response.message.reasoningContent }).value;
   }
 
   createPlan(input: string, signal?: AbortSignal) {
@@ -40,5 +40,10 @@ export class ProviderPlannerAgentDecisionModel implements PlannerAgentDecisionMo
 
   replan(input: string, signal?: AbortSignal) {
     return this.complete(PLANNER_REPLAN_SYSTEM_PROMPT, input, signal);
+  }
+
+  nextAction(input: string, signal?: AbortSignal) {
+    // 工具循环的请求会携带阶段标记；据此保留 create 与 replan 的约束差异。
+    return this.complete(input.includes('"phase":"replan"') ? PLANNER_REPLAN_SYSTEM_PROMPT : PLANNER_CREATE_SYSTEM_PROMPT, input, signal);
   }
 }
