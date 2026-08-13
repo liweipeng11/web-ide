@@ -36,6 +36,7 @@ import { createModelRouter } from "./modelRoutes.js";
 import { resolveModelSelection } from "./modelSelectionStore.js";
 import { configureProviderGateway, ProviderError } from "./providers/index.js";
 import { withModelExecution } from "./modelExecutionContext.js";
+import { isModelBudgetExceededError } from "./runtime/errors.js";
 import { createLanguageServiceRouter, languageServiceGateway } from "./languageService/index.js";
 import { createInlineEditRouter } from "./inlineEdit/routes.js";
 import { initializeProviderSettings } from "./providerSettingsStore.js";
@@ -58,6 +59,11 @@ async function classifyDirectEditRequest(userRequest: string) {
 
 function runWithTaskModel<T>(taskSessionId: string, mode: "chat" | "plan" | "act", selection: import("./contracts/model.js").ModelSelection, callback: () => T) {
   return withModelExecution({ selection, taskSessionId, mode }, callback);
+}
+
+/** 预算耗尽是可恢复暂停，不应把既有计划与任务标记为失败。*/
+function taskRuntimeStatusForError(error: unknown): "budget_exhausted" | "failed" {
+  return isModelBudgetExceededError(error) ? "budget_exhausted" : "failed";
 }
 
 function getPlannerPauseMessage(session: TaskSession | null | undefined) {
@@ -207,15 +213,15 @@ async function advanceTaskPlanFromCommandResult(taskSessionId: string | null | u
 
 async function persistStreamTaskSessionOutcome(
   taskSessionId: string | null,
-  progressEvent: Parameters<typeof advanceTaskPlanProgress>[1],
-  status: "failed" | "cancelled",
+  progressEvent: Parameters<typeof advanceTaskPlanProgress>[1] | null,
+  status: "budget_exhausted" | "failed" | "cancelled",
   failureSource: "provider_error" | "route_error" = "route_error"
 ) {
   if (!taskSessionId) return;
 
   // 错误收尾属于降级路径；即使状态文件仍被占用，也不能让持久化异常再次击穿流式路由。
   const results = await Promise.allSettled([
-    advanceTaskPlanProgress(taskSessionId, progressEvent),
+    progressEvent ? advanceTaskPlanProgress(taskSessionId, progressEvent) : Promise.resolve(),
     finalizeTaskSession({
       taskSessionId,
       runtimeResult: { status },
@@ -548,8 +554,9 @@ app.post(
       });
     } catch (error) {
       await Promise.allSettled(taskStepWrites);
-      await advanceTaskPlanProgress(taskSession.id, "task_failed");
-      await finalizeTaskSession({ taskSessionId: taskSession.id, runtimeResult: { status: "failed" }, source: "route_error" });
+      const runtimeStatus = taskRuntimeStatusForError(error);
+      if (runtimeStatus === "failed") await advanceTaskPlanProgress(taskSession.id, "task_failed");
+      await finalizeTaskSession({ taskSessionId: taskSession.id, runtimeResult: { status: runtimeStatus, statusReason: error instanceof Error ? error.message : undefined }, source: "route_error" });
       throw error;
     }
   })
@@ -661,8 +668,9 @@ app.post("/api/ai/generate-edit/stream", async (request, response) => {
         await finalizeTaskSession({ taskSessionId, clientClosed: true, source: "client_disconnect" });
       }
     } else {
-      await advanceTaskPlanProgress(taskSessionId, "task_failed");
-      await finalizeTaskSession({ taskSessionId, runtimeResult: { status: "failed" }, source: error instanceof ProviderError ? "provider_error" : "route_error" });
+      const runtimeStatus = taskRuntimeStatusForError(error);
+      if (runtimeStatus === "failed") await advanceTaskPlanProgress(taskSessionId, "task_failed");
+      await finalizeTaskSession({ taskSessionId, runtimeResult: { status: runtimeStatus, statusReason: error instanceof Error ? error.message : undefined }, source: error instanceof ProviderError ? "provider_error" : "route_error" });
     }
 
     if (!response.headersSent) {
@@ -1013,8 +1021,9 @@ app.post(
 
       response.json({ messages, taskSessionId: taskSession.id });
     } catch (error) {
-      await advanceTaskPlanProgress(taskSession.id, "task_failed");
-      await finalizeTaskSession({ taskSessionId: taskSession.id, runtimeResult: { status: "failed" }, source: error instanceof ProviderError ? "provider_error" : "route_error" });
+      const runtimeStatus = taskRuntimeStatusForError(error);
+      if (runtimeStatus === "failed") await advanceTaskPlanProgress(taskSession.id, "task_failed");
+      await finalizeTaskSession({ taskSessionId: taskSession.id, runtimeResult: { status: runtimeStatus, statusReason: error instanceof Error ? error.message : undefined }, source: error instanceof ProviderError ? "provider_error" : "route_error" });
       throw error;
     }
   })
@@ -1412,10 +1421,11 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
     completed = true;
     const message = error instanceof Error ? error.message : "Internal server error";
     console.error(message);
+    const runtimeStatus = clientClosed ? "cancelled" : taskRuntimeStatusForError(error);
     await persistStreamTaskSessionOutcome(
       taskSessionId,
-      clientClosed ? "task_cancelled" : "task_failed",
-      clientClosed ? "cancelled" : "failed",
+      clientClosed ? "task_cancelled" : runtimeStatus === "failed" ? "task_failed" : null,
+      runtimeStatus,
       error instanceof ProviderError ? "provider_error" : "route_error"
     );
 

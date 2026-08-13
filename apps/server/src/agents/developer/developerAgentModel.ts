@@ -9,7 +9,7 @@ export interface DeveloperAgentDecisionModel {
   nextAction(input: string, signal?: AbortSignal): Promise<unknown>;
 }
 
-function hasActionType(value: unknown) {
+export function hasActionType(value: unknown) {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) && typeof (value as { type?: unknown }).type === "string");
 }
 
@@ -36,7 +36,8 @@ export class ProviderDeveloperAgentDecisionModel implements DeveloperAgentDecisi
       content: first.message.content,
       reasoningContent: first.message.reasoningContent
     });
-    if (parsed.source === "content" || hasActionType(parsed.value)) return parsed.value;
+    // content 只代表 JSON 语法正确，不代表符合 Developer action 协议；缺少 type 时必须进入修复重试。
+    if (hasActionType(parsed.value)) return parsed.value;
 
     const repaired = await request(true);
     const repairedParsed = parseJsonModelResponse({

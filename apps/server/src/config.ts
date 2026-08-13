@@ -152,7 +152,12 @@ export function resolveAgentRuntimeStabilityPolicy(env: NodeJS.ProcessEnv = proc
     retryMaxDelayMs: Math.max(retryBaseDelayMs, retryMaxDelayMs),
     maxConcurrency: positiveIntegerFromEnv("AI_AGENT_MAX_CONCURRENCY", 3, env),
     maxOrchestrationSteps: positiveIntegerFromEnv("AI_AGENT_MAX_ORCHESTRATION_STEPS", 30, env),
-    maxReplans: positiveIntegerFromEnv("AI_AGENT_MAX_REPLANS", 3, env)
+    // 重规划是高成本恢复手段，默认只允许一次；后续应把当前事实交给用户或停止执行。
+    maxReplans: positiveIntegerFromEnv("AI_AGENT_MAX_REPLANS", 1, env),
+    // Token 预算是任务成本的主阈值；调用次数仅用于拦截异常循环或极碎片化调用。
+    maxModelCalls: positiveIntegerFromEnv("AI_AGENT_MAX_MODEL_CALLS", 80, env),
+    maxInputTokens: positiveIntegerFromEnv("AI_AGENT_MAX_INPUT_TOKENS", 500_000, env),
+    maxOutputTokens: positiveIntegerFromEnv("AI_AGENT_MAX_OUTPUT_TOKENS", 80_000, env)
   };
 }
 

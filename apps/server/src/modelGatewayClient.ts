@@ -8,7 +8,7 @@ import {
   requestJsonChatCompletion as requestLegacyJson,
   requestJsonChatCompletionWithToolChoiceFallback as requestLegacyJsonToolFallback
 } from "./aiHttp.js";
-import { getModelExecutionContext } from "./modelExecutionContext.js";
+import { consumeModelExecutionBudget, getModelExecutionContext, recordModelExecutionUsage } from "./modelExecutionContext.js";
 import { RunMetricsTracker, classifyRunFailure } from "./observability/index.js";
 import { ProviderError, providerGateway } from "./providers/index.js";
 import { abortableDelay, retryDelayMs, runControlled } from "./runtime/executionControl.js";
@@ -36,6 +36,27 @@ function selectionFor(body: Record<string, unknown>): ModelSelection {
     providerId: "openai-compatible",
     modelId: typeof body.model === "string" && body.model ? body.model : config.aiModel
   };
+}
+
+/** 在请求 Provider 前校验本轮任务的调用与 Token 预算。*/
+function consumeTaskModelBudget() {
+  const policy = config.agentRuntimeStabilityPolicy;
+  const result = consumeModelExecutionBudget(policy);
+  if (result.allowed) return;
+
+  const limit = result.reason === "calls"
+    ? policy.maxModelCalls
+    : result.reason === "input_tokens"
+      ? policy.maxInputTokens
+      : policy.maxOutputTokens;
+  const label = result.reason === "calls" ? "调用次数" : result.reason === "input_tokens" ? "输入 Token" : "输出 Token";
+  throw runtimeError("AGENT_MODEL_BUDGET_EXCEEDED", `本轮任务模型${label}已达到预算上限 ${limit}，任务已暂停，可继续后恢复。`, {
+    reason: result.reason,
+    limit,
+    usedCalls: result.budget.usedCalls,
+    usedInputTokens: result.budget.usedInputTokens,
+    usedOutputTokens: result.budget.usedOutputTokens
+  });
 }
 
 function toCompatibleResponse(response: ModelResponse): GatewayCompatibleCompletionResponse {
@@ -83,9 +104,12 @@ export async function requestModelCompletionWithMetrics(
 ): Promise<ModelResponse> {
   const policy = config.agentRuntimeStabilityPolicy;
   for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
+    consumeTaskModelBudget();
     const tracker = await createMetrics(selection);
     const startedAt = Date.now();
     try {
+      // 每次真实 Provider 请求都必须进入任务级聚合，避免总调用数错误地保持为 0。
+      tracker?.recordProviderCall();
       const response = await runControlled({
         timeoutMs: policy.timeoutMs,
         signal,
@@ -93,6 +117,7 @@ export async function requestModelCompletionWithMetrics(
       });
       tracker?.recordFirstTokenLatency(response.firstTokenLatencyMs ?? Date.now() - startedAt, response.firstTokenLatencyMs === undefined ? "completion_upper_bound" : "provider");
       tracker?.addUsage(response.usage);
+      recordModelExecutionUsage(response.usage);
       await tracker?.finish({ status: "completed" });
       return response;
     } catch (error) {
@@ -174,12 +199,14 @@ export async function requestChatCompletionStream(body: Record<string, unknown>,
   if (!config.featureFlags.modelProviderGateway) return requestLegacyStream(body, onDelta, signal);
   const selection = selectionFor(body);
   const request = fromOpenAiChatCompletionBody({ ...body, model: selection.modelId });
+  consumeTaskModelBudget();
   const tracker = await createMetrics(selection);
   const usage: ModelUsage = { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cachedInputTokens: 0 };
   let answer = "";
   const startedAt = Date.now();
   let firstEventRecorded = false;
   try {
+    tracker?.recordProviderCall();
     for await (const event of providerGateway.stream(selection, {
       systemPrompt: request.systemPrompt,
       messages: request.messages,
@@ -198,6 +225,7 @@ export async function requestChatCompletionStream(body: Record<string, unknown>,
     }
     if (!firstEventRecorded) tracker?.recordFirstTokenLatency(Date.now() - startedAt, "completion_upper_bound");
     tracker?.addUsage(usage);
+    recordModelExecutionUsage(usage);
     await tracker?.finish({ status: signal?.aborted ? "cancelled" : "completed" });
     return answer;
   } catch (error) {

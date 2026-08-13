@@ -66,6 +66,21 @@ test("等待审批保持非终态，审批恢复完成后才能进入 success", 
   });
 });
 
+test("模型预算耗尽时暂停任务并写入可恢复续跑指引", async () => {
+  await withTaskSession(async (taskSessionId) => {
+    const paused = await finalizeTaskSession({
+      taskSessionId,
+      runtimeResult: { status: "budget_exhausted", statusReason: "本轮输入 Token 已达到预算" },
+      source: "provider_error"
+    });
+
+    assert.equal(paused?.status, "paused");
+    assert.equal(paused?.runtimeStatus, "budget_exhausted");
+    assert.equal(paused?.continuation?.nextStep, "continue_current_unit");
+    assert.match(paused?.continuation?.message || "", /输入 Token/);
+  });
+});
+
 test("finalize 前使用持久化成功证据补齐系统计划", async () => {
   await withTaskSession(async (taskSessionId) => {
     const session = await getTaskSession(taskSessionId);

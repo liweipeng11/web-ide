@@ -1,8 +1,9 @@
 import type { CompletionEvidence } from "./agentCompletionPolicy.js";
-import { commitTaskSessionFinalization, reconcileTaskPlanFromRuntimeEvidence, updateTaskSessionStatus } from "./taskSessionStore.js";
+import { commitTaskSessionFinalization, reconcileTaskPlanFromRuntimeEvidence, setTaskSessionContinuation, updateTaskSessionStatus } from "./taskSessionStore.js";
 import { isTerminalTaskSessionStatus, resolvePlanModeTaskStatus, resolveRuntimeTaskStatus } from "./taskWorkflow/index.js";
 import type { TaskWorkflowType } from "./taskWorkflow/index.js";
 import type { AgentRuntimeStatus, TaskSessionFinalizationSource, TaskSessionStatus } from "./types.js";
+import { clearModelExecutionBudget } from "./modelExecutionContext.js";
 
 export type TaskSessionFinalizerRuntimeResult = {
   status: AgentRuntimeStatus | "failed" | "cancelled";
@@ -61,12 +62,26 @@ export async function finalizeTaskSession(input: FinalizeTaskSessionInput) {
     : undefined;
 
   if (isTerminalTaskSessionStatus(status)) {
-    return commitTaskSessionFinalization(input.taskSessionId, {
+    const finalized = await commitTaskSessionFinalization(input.taskSessionId, {
       status,
       source: input.clientClosed ? "client_disconnect" : input.source,
       runtimeOutcome
     });
+    clearModelExecutionBudget(input.taskSessionId);
+    return finalized;
   }
 
-  return updateTaskSessionStatus(input.taskSessionId, status, runtimeOutcome);
+  if (runtimeStatus === "budget_exhausted") {
+    await setTaskSessionContinuation(input.taskSessionId, {
+      nextStep: "continue_current_unit",
+      requiredUserInputs: [],
+      autoContinueConditions: ["用户继续任务后以新的本轮模型预算恢复执行"],
+      message: input.runtimeResult?.statusReason || "本轮模型预算已耗尽，任务已暂停，可继续后恢复。"
+    });
+  }
+
+  const updated = await updateTaskSessionStatus(input.taskSessionId, status, runtimeOutcome);
+  // 非终态同样意味着当前请求已结束；释放本轮预算，让后续继续操作获得新额度。
+  clearModelExecutionBudget(input.taskSessionId);
+  return updated;
 }

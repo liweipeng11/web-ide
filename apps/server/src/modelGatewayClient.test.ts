@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { config } from "./config.js";
 import { requestChatCompletion, requestChatCompletionStream, requestModelCompletionWithMetrics } from "./modelGatewayClient.js";
-import { withModelExecution } from "./modelExecutionContext.js";
+import { clearModelExecutionBudget, withModelExecution } from "./modelExecutionContext.js";
 import { clearTaskMetricsForTest, getTaskMetricsSnapshot } from "./observability/index.js";
 
 test("Agent 模型入口只重试 Provider 明确标记的瞬时错误", async () => {
@@ -124,4 +124,94 @@ test("Gateway 流式客户端消费统一文本和 Usage 事件", async () => {
     assert.equal(answer, "A");
     assert.equal(visible, "A");
   } finally { globalThis.fetch = originalFetch; config.featureFlags.modelProviderGateway = originalFlag; config.aiApiKey = originalKey; config.aiModels = originalModels; }
+});
+
+test("同一任务跨模型入口共享调用预算并聚合 Provider 调用数", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = config.aiApiKey;
+  const originalModels = config.aiModels;
+  const originalLimit = config.agentRuntimeStabilityPolicy.maxModelCalls;
+  const originalInputLimit = config.agentRuntimeStabilityPolicy.maxInputTokens;
+  const originalOutputLimit = config.agentRuntimeStabilityPolicy.maxOutputTokens;
+  const taskSessionId = "task-model-budget";
+  const modelId = "budget-model";
+  let calls = 0;
+  config.aiApiKey = "test-key";
+  config.aiModels = [modelId];
+  config.agentRuntimeStabilityPolicy.maxModelCalls = 2;
+  config.agentRuntimeStabilityPolicy.maxInputTokens = 100;
+  config.agentRuntimeStabilityPolicy.maxOutputTokens = 100;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "{}" } }],
+      usage: { prompt_tokens: 3, completion_tokens: 1 }
+    }), { status: 200 });
+  };
+  try {
+    await clearTaskMetricsForTest({ key: taskSessionId });
+    clearModelExecutionBudget(taskSessionId);
+    const selection = { providerId: "openai-compatible", modelId };
+    await withModelExecution({ selection, taskSessionId, mode: "act" }, () => requestModelCompletionWithMetrics(selection, { messages: [] }));
+    await withModelExecution({ selection, taskSessionId, mode: "act" }, () => requestModelCompletionWithMetrics(selection, { messages: [] }));
+    await assert.rejects(
+      () => withModelExecution({ selection, taskSessionId, mode: "act" }, () => requestModelCompletionWithMetrics(selection, { messages: [] })),
+      /调用次数已达到预算上限 2/
+    );
+    const metrics = await getTaskMetricsSnapshot(taskSessionId);
+    assert.equal(calls, 2);
+    assert.equal(metrics?.providerCallCount, 2);
+    assert.equal(metrics?.usage.inputTokens, 6);
+  } finally {
+    clearModelExecutionBudget(taskSessionId);
+    globalThis.fetch = originalFetch;
+    config.aiApiKey = originalKey;
+    config.aiModels = originalModels;
+    config.agentRuntimeStabilityPolicy.maxModelCalls = originalLimit;
+    config.agentRuntimeStabilityPolicy.maxInputTokens = originalInputLimit;
+    config.agentRuntimeStabilityPolicy.maxOutputTokens = originalOutputLimit;
+    await clearTaskMetricsForTest({ key: taskSessionId });
+  }
+});
+
+test("任务输入 Token 达到预算后暂停后续 Provider 调用", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = config.aiApiKey;
+  const originalModels = config.aiModels;
+  const originalLimit = config.agentRuntimeStabilityPolicy.maxModelCalls;
+  const originalInputLimit = config.agentRuntimeStabilityPolicy.maxInputTokens;
+  const originalOutputLimit = config.agentRuntimeStabilityPolicy.maxOutputTokens;
+  const taskSessionId = "task-input-token-budget";
+  const modelId = "input-budget-model";
+  let calls = 0;
+  config.aiApiKey = "test-key";
+  config.aiModels = [modelId];
+  config.agentRuntimeStabilityPolicy.maxModelCalls = 10;
+  config.agentRuntimeStabilityPolicy.maxInputTokens = 5;
+  config.agentRuntimeStabilityPolicy.maxOutputTokens = 100;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { role: "assistant", content: "{}" } }],
+      usage: { prompt_tokens: 5, completion_tokens: 1 }
+    }), { status: 200 });
+  };
+  try {
+    clearModelExecutionBudget(taskSessionId);
+    const selection = { providerId: "openai-compatible", modelId };
+    await withModelExecution({ selection, taskSessionId, mode: "act" }, () => requestModelCompletionWithMetrics(selection, { messages: [] }));
+    await assert.rejects(
+      () => withModelExecution({ selection, taskSessionId, mode: "act" }, () => requestModelCompletionWithMetrics(selection, { messages: [] })),
+      /输入 Token已达到预算上限 5/
+    );
+    assert.equal(calls, 1);
+  } finally {
+    clearModelExecutionBudget(taskSessionId);
+    globalThis.fetch = originalFetch;
+    config.aiApiKey = originalKey;
+    config.aiModels = originalModels;
+    config.agentRuntimeStabilityPolicy.maxModelCalls = originalLimit;
+    config.agentRuntimeStabilityPolicy.maxInputTokens = originalInputLimit;
+    config.agentRuntimeStabilityPolicy.maxOutputTokens = originalOutputLimit;
+  }
 });

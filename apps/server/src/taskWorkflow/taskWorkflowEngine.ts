@@ -89,6 +89,7 @@ export function resolveRuntimeTaskStatus(runtimeStatus: AgentRuntimeStatus): Tas
   if (runtimeStatus === "awaiting_approval") return "awaiting_approval";
   if (runtimeStatus === "incomplete") return "incomplete";
   if (runtimeStatus === "blocked") return "blocked";
+  if (runtimeStatus === "budget_exhausted") return "paused";
   return "failed";
 }
 

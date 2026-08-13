@@ -463,6 +463,7 @@ export type AgentRuntimeStatus =
   | "blocked"
   | "step_limit_reached"
   | "no_progress"
+  | "budget_exhausted"
   | "failed";
 
 export type TaskPlanItemStatus = "pending" | "in_progress" | "completed" | "blocked";

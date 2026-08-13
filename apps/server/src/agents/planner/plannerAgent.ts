@@ -333,6 +333,8 @@ function preserveCompletedTasks(plan: Plan, input: PlannerReplanInput) {
 }
 
 function failedResult(error: unknown, phase: "input" | "model"): PlannerResult {
+  // 模型预算耗尽由路由统一转为可恢复暂停，不能在 Planner 内降级成不可区分的计划失败。
+  if (error instanceof AgentRuntimeError && error.code === "AGENT_MODEL_BUDGET_EXCEEDED") throw error;
   if (error instanceof AgentRuntimeError) {
     return {
       status: "failed",
@@ -386,9 +388,24 @@ export class PlannerAgent implements Agent {
       }), context.signal);
       const action = parseToolAction(actionValue, context.availableTools);
       if (!action) {
-        const planning = phase === "create"
-          ? parseResult(actionValue, (request as PlannerCreatePlanInput).goal, 1, request as PlannerCreatePlanInput)
-          : parseResult(actionValue, (request as PlannerReplanInput).oldPlan.goal, (request as PlannerReplanInput).oldPlan.version + 1, request as PlannerReplanInput, false);
+        let planning: PlannerResult;
+        try {
+          planning = phase === "create"
+            ? parseResult(actionValue, (request as PlannerCreatePlanInput).goal, 1, request as PlannerCreatePlanInput)
+            : parseResult(actionValue, (request as PlannerReplanInput).oldPlan.goal, (request as PlannerReplanInput).oldPlan.version + 1, request as PlannerReplanInput, false);
+        } catch (error) {
+          // 模型返回合法 JSON 但不是 PlannerResult 时，保留诊断并让有限的最终化轮次继续收敛。
+          finalizationStepCount += 1;
+          observations.push({
+            tool: "planner_policy",
+            result: {
+              rejected: "invalid_planner_result",
+              message: error instanceof Error ? error.message : "PlannerResult 格式无效",
+              instruction: "请基于已有 observations 返回合法 PlannerResult；若证据不足，将未知细节写入 assumptions。"
+            }
+          });
+          continue;
+        }
         if (planning.status === "missing_context" && context.availableTools.some((tool) => PLANNER_READ_TOOL_NAMES.has(tool.name) && tool.effect === "read") && rejectedMissingContextCount < 2) {
           rejectedMissingContextCount += 1;
           // 缺少的信息仍可由已授权只读工具获得时，不把责任转交给用户；要求 Planner 继续调查。

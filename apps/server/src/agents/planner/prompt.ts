@@ -1,5 +1,8 @@
 import type { PlannerCreatePlanInput, PlannerReplanInput } from "./contracts.js";
 
+const MAX_PLANNER_PROMPT_OBSERVATION_CHARS = 24_000;
+const MAX_SINGLE_PLANNER_PROMPT_OBSERVATION_CHARS = 3_000;
+
 const PLAN_SCHEMA = `Return exactly one JSON object in one of these forms:
 {"status":"missing_context","required":["specific repository fact needed"]}
 or
@@ -92,11 +95,29 @@ export function buildPlannerToolPrompt(input: {
   const base = input.phase === "create"
     ? buildCreatePlanPrompt(input.request as PlannerCreatePlanInput)
     : buildReplanPrompt(input.request as PlannerReplanInput);
+  const compactedObservations: Array<{ tool: string; result: unknown }> = [];
+  let retainedChars = 0;
+  // 只保留最新且可装入固定窗口的证据，避免每轮把全部工具原文重新注入而导致上下文线性膨胀。
+  for (const observation of [...input.observations].reverse()) {
+    const serialized = JSON.stringify(observation.result);
+    const result = !serialized || serialized.length <= MAX_SINGLE_PLANNER_PROMPT_OBSERVATION_CHARS
+      ? observation.result
+      : { truncated: true, preview: serialized.slice(0, MAX_SINGLE_PLANNER_PROMPT_OBSERVATION_CHARS) };
+    const size = JSON.stringify({ tool: observation.tool, result }).length;
+    if (retainedChars + size > MAX_PLANNER_PROMPT_OBSERVATION_CHARS) continue;
+    compactedObservations.unshift({ tool: observation.tool, result });
+    retainedChars += size;
+  }
   return JSON.stringify({
     phase: input.phase,
     request: JSON.parse(base),
     availableTools: input.availableTools,
-    observations: input.observations,
+    observations: compactedObservations,
+    observationWindow: {
+      total: input.observations.length,
+      retained: compactedObservations.length,
+      truncated: compactedObservations.length !== input.observations.length
+    },
     readBudget: {
       used: input.readToolCallCount,
       maximum: input.maxReadToolCalls,

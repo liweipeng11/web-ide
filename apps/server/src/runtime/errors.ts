@@ -13,7 +13,8 @@ export type RuntimeErrorCode =
   | "AGENT_LOOP_LIMIT_EXCEEDED"
   | "AGENT_TIMEOUT"
   | "AGENT_CANCELLED"
-  | "AGENT_RETRY_EXHAUSTED";
+  | "AGENT_RETRY_EXHAUSTED"
+  | "AGENT_MODEL_BUDGET_EXCEEDED";
 
 /** 对外暴露稳定错误码，避免上层依赖第三方库或内部异常文本。 */
 export class AgentRuntimeError extends Error {
@@ -29,4 +30,9 @@ export class AgentRuntimeError extends Error {
 
 export function runtimeError(code: RuntimeErrorCode, message: string, details: Record<string, unknown> = {}) {
   return new AgentRuntimeError(code, message, details);
+}
+
+/** 模型预算耗尽可由用户继续任务恢复，不能按普通运行失败处理。*/
+export function isModelBudgetExceededError(error: unknown): error is AgentRuntimeError {
+  return error instanceof AgentRuntimeError && error.code === "AGENT_MODEL_BUDGET_EXCEEDED";
 }

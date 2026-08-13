@@ -150,6 +150,25 @@ test("Planner Runtime 不暴露写入工具", async () => {
   if (result.status === "failed") assert.match(result.blockers.join(" "), /无权调用工具|writeFile/);
 });
 
+test("Planner 收到无效 PlannerResult 时继续最终化并使用兜底计划", async () => {
+  const model: PlannerAgentDecisionModel = {
+    async createPlan() { throw new Error("不应调用 createPlan"); },
+    async replan() { throw new Error("不应调用 replan"); },
+    async nextAction() { return { summary: "缺少 status" }; }
+  };
+  const result = await new PlannerAgentRuntime(new PlannerAgent(model)).createPlan({
+    goal: "迁移登录页面",
+    knownFacts: [],
+    constraints: [],
+    readScope: ["src/**"],
+    writeScope: ["src/**"],
+    state: createAgentState("迁移登录页面")
+  });
+
+  assert.equal(result.status, "ready");
+  if (result.status === "ready") assert.equal(result.plan.tasks.length, 4);
+});
+
 test("Planner 对可读取上下文返回 missing_context 时会被要求继续调用只读工具", async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mini-ai-planner-retry-"));
   try {

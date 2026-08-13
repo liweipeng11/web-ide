@@ -473,7 +473,8 @@ function isAgentRuntimeStatus(value: unknown): value is NonNullable<TaskSession[
     || value === "incomplete"
     || value === "blocked"
     || value === "step_limit_reached"
-    || value === "no_progress";
+    || value === "no_progress"
+    || value === "budget_exhausted";
 }
 
 function isTaskSessionTerminalStatus(value: unknown): value is TaskSessionTerminalStatus {
