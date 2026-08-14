@@ -115,30 +115,31 @@ test("阶段七场景 3：连续提交相同内容不会产生物理写入", asy
 
 function approvalRegistry(executions: { count: number }) {
   return createAgentToolRegistry([
-    tool("applyPatch", async () => { executions.count += 1; return { changed: true, filePath: "src/a.ts" }; }),
+    // 当前权限策略只暂停高风险工具；使用 deleteFile 验证审批链路，避免把中风险 Patch 误判为待审批。
+    tool("deleteFile", async () => { executions.count += 1; return { changed: true, filePath: "src/a.ts" }; }),
     ...completionAgentToolDefinitions
   ]);
 }
 
-test("阶段七场景 4：Patch 应用进入等待审批且不提前执行", async () => {
+test("阶段七场景 4：高风险操作进入等待审批且不提前执行", async () => {
   const executions = { count: 0 };
   const result = await runAgentRuntime({
-    userRequest: "应用待审核 Patch", mode: "act", registry: approvalRegistry(executions), maxSteps: 2,
+    userRequest: "执行待审批的高风险操作", mode: "act", registry: approvalRegistry(executions), maxSteps: 2,
     contextBudgetEnabled: false, explicitCompletionRollout: strictRollout, metricsRecorder: async () => undefined,
-    requestCompletion: async () => response(call("apply", "applyPatch", { patchId: "patch-1" }))
+    requestCompletion: async () => response(call("delete", "deleteFile", { filePath: "src/a.ts" }))
   });
   assert.equal(result.status, "awaiting_approval");
   assert.equal(result.completionEvidence?.pendingApprovalCount, 1);
   assert.equal(executions.count, 0);
 });
 
-test("阶段七场景 5：用户拒绝 Patch 后不会执行被拒绝的变更", async () => {
+test("阶段七场景 5：用户拒绝高风险操作后不会执行副作用", async () => {
   const executions = { count: 0 };
   const registry = approvalRegistry(executions);
   const base: AgentRuntimeOptions = {
-    userRequest: "应用待审核 Patch", mode: "act", registry, maxSteps: 2, contextBudgetEnabled: false,
+    userRequest: "执行待审批的高风险操作", mode: "act", registry, maxSteps: 2, contextBudgetEnabled: false,
     explicitCompletionRollout: strictRollout, metricsRecorder: async () => undefined,
-    requestCompletion: async () => response(call("apply", "applyPatch", { patchId: "patch-2" }))
+    requestCompletion: async () => response(call("delete", "deleteFile", { filePath: "src/a.ts" }))
   };
   const waiting = await runAgentRuntime(base);
   assert.ok(waiting.pendingToolCall);
@@ -152,12 +153,13 @@ test("阶段七场景 5：用户拒绝 Patch 后不会执行被拒绝的变更",
   assert.equal(executions.count, 0);
 });
 
-test("阶段一验收：writeFile 与 runCommand 跨两次审批后仍可完成", async () => {
+test("阶段一验收：两次高风险审批后仍可保留修改与验证证据", async () => {
   await withWorkspace(async () => {
     const session = await createTaskSession("创建 src/evidence.ts 并验证");
     const registry = createAgentToolRegistry([
-      tool("writeFile", async () => ({ changed: true, filePath: "src/evidence.ts" })),
-      tool("runCommand", async (_args, runtime) => {
+      // 用同一个高风险工具模拟两段副作用，专门验证跨两次审批后的证据连续性。
+      tool("deleteFile", async (args, runtime) => {
+        if (args.phase === "write") return { changed: true, filePath: "src/evidence.ts" };
         runtime.agentContext.commandsRun = [{
           command: "pnpm test",
           status: "success",
@@ -168,6 +170,8 @@ test("阶段一验收：writeFile 与 runCommand 跨两次审批后仍可完成"
         }];
         return { exitCode: 0, status: "success" };
       }),
+      // 注册验证能力供完成证据判定使用，实际执行仍由高风险审批工具模拟。
+      tool("runCommand", async () => ({ exitCode: 0, status: "success" })),
       ...completionAgentToolDefinitions
     ]);
     const common: AgentRuntimeOptions = {
@@ -185,7 +189,7 @@ test("阶段一验收：writeFile 与 runCommand 跨两次审批后仍可完成"
     const waitingForWrite = await runAgentRuntime({
       ...common,
       runtimeEvidence: session.runtimeEvidence,
-      requestCompletion: async () => response(call("write-evidence", "writeFile", { filePath: "src/evidence.ts", content: "export const evidence = true;\n" }))
+      requestCompletion: async () => response(call("write-evidence", "deleteFile", { filePath: "src/evidence.ts", phase: "write" }))
     });
     assert.equal(waitingForWrite.status, "awaiting_approval");
     await decideTaskSessionApproval(session.id, waitingForWrite.pendingToolCall!.actionId, "approved");
@@ -194,7 +198,7 @@ test("阶段一验收：writeFile 与 runCommand 跨两次审批后仍可完成"
       ...common,
       pendingToolCall: waitingForWrite.pendingToolCall!,
       decision: "approved",
-      requestCompletion: async () => response(call("validate-evidence", "runCommand", { command: "pnpm test" }))
+      requestCompletion: async () => response(call("validate-evidence", "deleteFile", { filePath: "validation", phase: "validate" }))
     });
     assert.equal(waitingForValidation.status, "awaiting_approval");
     const afterWrite = await getTaskSession(session.id);
@@ -237,15 +241,15 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
       const requestedToolNames: string[] = [];
       const targetFile = "src/phase-zero.ts";
       const registry = createAgentToolRegistry([
-        tool("writeFile", async (args) => {
-          // 使用真实文件服务落盘，确保基线同时包含物理文件与 Runtime 变更证据。
-          return writeWorkspaceContent({
-            filePath: String(args.filePath),
-            content: String(args.content),
-            createIfMissing: true
-          });
-        }),
-        tool("runCommand", async (_args, runtime) => {
+        tool("deleteFile", async (args, runtime) => {
+          if (args.phase === "write") {
+            // 使用真实文件服务落盘，确保基线同时包含物理文件与 Runtime 变更证据。
+            return writeWorkspaceContent({
+              filePath: String(args.filePath),
+              content: String(args.content),
+              createIfMissing: true
+            });
+          }
           runtime.agentContext.commandsRun = [{
             command: "pnpm build",
             status: "success",
@@ -256,6 +260,7 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
           }];
           return { exitCode: 0, status: "success" };
         }),
+        tool("runCommand", async () => ({ exitCode: 0, status: "success" })),
         ...completionAgentToolDefinitions
       ]);
       const common: AgentRuntimeOptions = {
@@ -284,10 +289,11 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
         ...common,
         runtimeEvidence: plannedSession.runtimeEvidence,
         requestCompletion: async () => {
-          requestedToolNames.push("writeFile");
-          return response(call("phase-zero-write", "writeFile", {
+          requestedToolNames.push("deleteFile");
+          return response(call("phase-zero-write", "deleteFile", {
             filePath: targetFile,
-            content: "export const phaseZero = true;\n"
+            content: "export const phaseZero = true;\n",
+            phase: "write"
           }));
         }
       });
@@ -299,8 +305,8 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
         pendingToolCall: waitingForWrite.pendingToolCall!,
         decision: "approved",
         requestCompletion: async () => {
-          requestedToolNames.push("runCommand");
-          return response(call("phase-zero-validate", "runCommand", { command: "pnpm build" }));
+          requestedToolNames.push("deleteFile");
+          return response(call("phase-zero-validate", "deleteFile", { filePath: "validation", phase: "validate" }));
         }
       });
       assert.equal(waitingForValidation.status, "awaiting_approval");
@@ -358,9 +364,9 @@ test("阶段二验收：遗漏瞬时进度回调时由持久化证据恢复跨�
       assert.equal(runMetrics.at(-1)?.result.status, "completed");
       assert.equal(runMetrics.at(-1)?.result.validationStatus, "passed");
       assert.equal(runMetrics.every((metrics) => metrics.tools.repeatedCalls === 0 && metrics.tools.mostRepeatedCall === null), true);
-      assert.deepEqual(requestedToolNames, ["writeFile", "runCommand", "completeTask"]);
+      assert.deepEqual(requestedToolNames, ["deleteFile", "deleteFile", "completeTask"]);
       assert.equal(requestedToolNames.filter((name) => name === "completeTask").length, 1);
-      assert.equal(requestedToolNames.slice(requestedToolNames.indexOf("runCommand") + 1).some((name) => /^(readFile|listFiles|search)/.test(name)), false);
+      assert.equal(requestedToolNames.slice(2).some((name) => /^(readFile|listFiles|search)/.test(name)), false);
       assert.doesNotMatch(JSON.stringify(steps), /PENDING_PLAN|UNCHANGED_COMPLETION_EVIDENCE/);
     } finally {
       config.aiApiKey = previousAiApiKey;

@@ -13,8 +13,61 @@ import { ProviderPlannerAgentDecisionModel } from "./plannerAgentModel.js";
 import { EXPLORER_TOOL_NAMES } from "../explorer/explorerTools.js";
 import { recoverableToolObservation } from "../toolRecovery.js";
 import { buildCreatePlanPrompt, buildPlannerToolPrompt, buildReplanPrompt } from "./prompt.js";
+import { appendFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// 当前文件所在目录（ESM 下用 import.meta.url 推导，避免依赖 __dirname）。
+const PLANNER_CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const TASK_TYPES = new Set<TaskType>(["explore", "implement", "test", "respond"]);
+
+// Planner 专属 debug 日志：
+// - 仅在环境变量 PLANNER_DEBUG=1 时启用，避免污染生产日志与文件 IO；
+// - 日志按天滚动写入文件（默认 server 包根下的 logs/planner-debug-YYYY-MM-DD.log），
+//   可通过 PLANNER_LOG_DIR 覆盖目录，避免硬编码路径。
+const PLANNER_DEBUG_ENABLED = process.env.PLANNER_DEBUG === "1" || process.env.PLANNER_DEBUG === "true";
+const PLANNER_LOG_DIR = process.env.PLANNER_LOG_DIR
+  ? path.resolve(process.env.PLANNER_LOG_DIR)
+  : path.resolve(PLANNER_CURRENT_DIR, "..", "..", "logs");
+
+// 缓存当天的日志文件路径，跨调用复用，避免重复拼装。
+let plannerLogFile: string | null = null;
+function resolvePlannerLogFile(): string {
+  if (!plannerLogFile) {
+    const day = new Date().toISOString().slice(0, 10);
+    plannerLogFile = path.join(PLANNER_LOG_DIR, `planner-debug-${day}.log`);
+  }
+  return plannerLogFile;
+}
+
+// 将一条 debug 日志异步追加到文件，失败仅告警不影响主流程。
+async function writePlannerLogFile(line: string): Promise<void> {
+  try {
+    await mkdir(PLANNER_LOG_DIR, { recursive: true });
+    await appendFile(resolvePlannerLogFile(), line + "\n", "utf8");
+  } catch (error) {
+    console.warn(`[planner:debug] 写入日志文件失败：${(error as Error).message}`);
+  }
+}
+
+function debugPlanner(message: string, detail?: unknown): void {
+  if (!PLANNER_DEBUG_ENABLED) return;
+  // 写入文件（含时间戳与可选结构化详情）。
+  const timestamp = new Date().toISOString();
+  const payload = detail === undefined ? message : `${message} ${safeStringify(detail)}`;
+  void writePlannerLogFile(`[${timestamp}] [planner:debug] ${payload}`);
+}
+
+// 将详情安全地序列化：循环引用或不可序列化对象降级为字符串，避免日志写入抛错。
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 export const PLANNER_LIMITS = {
   maxTasks: 30,
   maxDependenciesPerTask: 10,
@@ -473,6 +526,19 @@ export class PlannerAgent implements Agent {
 
   private toRuntimeResult(taskId: string, planning: PlannerResult): PlannerAgentResult {
     const blockers = planning.status === "failed" ? planning.blockers : planning.status === "missing_context" ? planning.required : [];
+    // 输出 Planner 决策结果的统一 debug 日志（任务数、阻断原因等核心摘要）。
+    if (planning.status === "ready") {
+      debugPlanner(`decision=ready taskId=${taskId} taskCount=${planning.plan.tasks.length} completionCriteriaCount=${planning.plan.completionCriteria.length}`, {
+        version: planning.plan.version,
+        goal: planning.plan.goal,
+        assumptions: planning.plan.assumptions,
+        tasks: planning.plan.tasks.map((task) => ({ id: task.id, type: task.type, goal: task.goal, dependencies: task.dependencies, acceptanceCriteriaCount: task.acceptanceCriteria.length }))
+      });
+    } else if (planning.status === "missing_context") {
+      debugPlanner(`decision=missing_context taskId=${taskId} required=${JSON.stringify(planning.required)}`);
+    } else {
+      debugPlanner(`decision=failed taskId=${taskId} reason=${planning.reason} blockers=${JSON.stringify(planning.blockers)}`);
+    }
     return {
       taskId,
       status: planning.status === "failed" ? "failed" : planning.status === "missing_context" ? "blocked" : "success",
@@ -501,6 +567,14 @@ export class PlannerAgent implements Agent {
     } catch (error) {
       return failedResult(error, "input");
     }
+    // 输出 createPlan 输入摘要，便于排查计划为何如此生成。
+    debugPlanner("createPlan input", {
+      goal: normalizedInput.goal,
+      readScope: normalizedInput.readScope,
+      writeScope: normalizedInput.writeScope,
+      knownFactsCount: normalizedInput.knownFacts.length,
+      constraintsCount: normalizedInput.constraints.length
+    });
     try {
       return parseResult(await this.model.createPlan(buildCreatePlanPrompt(normalizedInput), normalizedInput.signal), normalizedInput.goal, 1, normalizedInput);
     } catch (error) {
@@ -525,6 +599,16 @@ export class PlannerAgent implements Agent {
     } catch (error) {
       return failedResult(error, "input");
     }
+    // 输出 replan 输入摘要，便于排查重规划为何如此生成。
+    debugPlanner("replan input", {
+      oldPlanVersion: input.oldPlan.version,
+      goal: input.oldPlan.goal,
+      completedTasks: normalizedInput.completedTasks,
+      readScope: normalizedInput.readScope,
+      writeScope: normalizedInput.writeScope,
+      newFactsCount: normalizedInput.newFacts.length,
+      constraintsCount: normalizedInput.constraints.length
+    });
     try {
       const result = parseResult(
         await this.model.replan(buildReplanPrompt(normalizedInput), normalizedInput.signal),

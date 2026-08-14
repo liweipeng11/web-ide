@@ -3,6 +3,7 @@ import path from "node:path";
 import { resolveAgentBudgetPolicy } from "./agentBudgetPolicy.js";
 import { readCompletionPolicyRollout, readExplicitCompletionRollout, readFeatureFlags, readProgressiveDeliveryRollout } from "./featureFlags.js";
 import { readProjectMemoryFeatureFlags } from "./projectMemory/projectMemoryFeatureFlags.js";
+import { readReadOnlyRuntimeRollout } from "./langgraph/rollout/featureFlags.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), "../../.env") });
 dotenv.config();
@@ -208,5 +209,6 @@ export const config = {
   explicitCompletionRollout: readExplicitCompletionRollout(),
   completionPolicyRollout: readCompletionPolicyRollout(),
   progressiveDeliveryRollout: readProgressiveDeliveryRollout(),
+  readOnlyRuntimeRollout: readReadOnlyRuntimeRollout(),
   projectMemoryFeatureFlags: readProjectMemoryFeatureFlags()
 };

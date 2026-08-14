@@ -13,6 +13,7 @@ import { RunMetricsTracker, classifyRunFailure } from "./observability/index.js"
 import { ProviderError, providerGateway } from "./providers/index.js";
 import { abortableDelay, retryDelayMs, runControlled } from "./runtime/executionControl.js";
 import { AgentRuntimeError, runtimeError } from "./runtime/errors.js";
+import { invokeProviderChatModel } from "./langgraph/adapters/providerChatModel.js";
 
 export type GatewayCompatibleCompletionResponse = {
   choices?: Array<{
@@ -144,14 +145,20 @@ export async function requestChatCompletion(body: Record<string, unknown>, signa
   if (!config.featureFlags.modelProviderGateway) return requestLegacyCompletion(body, signal);
   const selection = selectionFor(body);
   const request = fromOpenAiChatCompletionBody({ ...body, model: selection.modelId });
-  const response = await requestModelCompletionWithMetrics(selection, {
+  // 非流式模型调用统一经过 LangChain BaseChatModel；Provider、预算和重试仍由现有 Gateway 控制。
+  const response = await invokeProviderChatModel({
+    selection,
+    execute: requestModelCompletionWithMetrics,
+    signal,
+    request: {
       systemPrompt: request.systemPrompt,
       messages: request.messages,
       temperature: request.temperature,
       tools: request.tools,
       toolChoice: request.toolChoice,
       responseFormat: request.responseFormat
-    }, signal);
+    }
+  });
   return toCompatibleResponse(response);
 }
 

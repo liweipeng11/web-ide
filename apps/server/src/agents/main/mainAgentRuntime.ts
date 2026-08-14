@@ -29,6 +29,9 @@ import type { MainSummaryInput } from "./mainAgent.js";
 import type { ReplanPolicyInput } from "./replanPolicy.js";
 import { DEFAULT_MAX_REPLANS, SAME_TASK_FAILURE_REPLAN_THRESHOLD } from "./replanPolicy.js";
 import { config } from "../../config.js";
+import { runPlanningGraph } from "../../langgraph/planning/planningGraph.js";
+import { executeReadOnlyRuntimeRollout } from "../../langgraph/rollout/runtimeSelector.js";
+import type { ReadOnlyRuntimeMode } from "../../langgraph/rollout/featureFlags.js";
 
 export type MainAgentRequest = {
   goal: string;
@@ -38,6 +41,8 @@ export type MainAgentRequest = {
   readScope?: string[];
   writeScope?: string[];
   allowedTools?: string[];
+  /** 仅供受控灰度标记，普通请求不能自行借此扩大任何工具权限。 */
+  internalTask?: boolean;
   signal?: AbortSignal;
 };
 
@@ -106,6 +111,8 @@ export type MainAgentRuntimeOptions = {
   allowedTools?: string[];
   /** 计划准备阶段同层 explore 任务的最大并发数，默认复用运行时稳定性策略。 */
   explorationConcurrency?: number;
+  /** 测试或受控装配可覆盖规划图灰度模式；生产默认读取统一环境配置。 */
+  planningGraphMode?: ReadOnlyRuntimeMode;
 };
 
 function taskTypeFor(decision: RouteDecision): TaskType {
@@ -165,6 +172,7 @@ export class MainAgentRuntime {
   private readonly tools: ToolRegistry;
   private readonly policyTools: string[];
   private readonly explorationConcurrency: number;
+  private readonly planningGraphMode: ReadOnlyRuntimeMode;
 
   constructor(options: MainAgentRuntimeOptions = {}) {
     this.agent = options.agent ?? new MainAgent();
@@ -176,6 +184,7 @@ export class MainAgentRuntime {
     this.tools = new ToolRegistry(options.tools ?? []);
     this.policyTools = [...new Set(options.allowedTools ?? [])];
     this.explorationConcurrency = options.explorationConcurrency ?? config.agentRuntimeStabilityPolicy.maxConcurrency;
+    this.planningGraphMode = options.planningGraphMode ?? config.readOnlyRuntimeRollout.mode;
   }
 
   async execute(request: MainAgentRequest): Promise<MainAgentRuntimeResult> {
@@ -439,8 +448,8 @@ export class MainAgentRuntime {
     };
   }
 
-  /** Planner 缺少仓库事实时执行一次受限探索，再把压缩事实交回 Planner。 */
-  async planWithExploration(request: MainAgentRequest): Promise<MainAgentExplorationPlanningResult> {
+  /** Legacy 规划循环保留为迁移期回退路径，关闭 Flag 后仍保持原有行为。 */
+  private async planWithExplorationLegacy(request: MainAgentRequest): Promise<MainAgentExplorationPlanningResult> {
     const initial = await this.plan(request);
     if (initial.planning?.status === "ready") {
       const executed = await this.executeRunnableExploreTasks(initial.planning, [], request);
@@ -499,6 +508,34 @@ export class MainAgentRuntime {
       return { decision: initial.decision, ...executed };
     }
     return { decision: initial.decision, planning, explorations: [exploration] };
+  }
+
+  /**
+   * Planner / Explorer 的新控制流由 LangGraph 表达；off/shadow/internal 的选择继续复用统一灰度器。
+   * shadow 只对比结构化结果并返回 Legacy，Graph 失败也不会改变用户可见结果。
+   */
+  async planWithExploration(request: MainAgentRequest): Promise<MainAgentExplorationPlanningResult> {
+    const graph = () => runPlanningGraph(request, {
+      route: (goal, signal) => this.agent.route(goal, signal),
+      createPlan: (input) => this.plannerRuntime.createPlan(input),
+      replan: (input) => this.replan(input),
+      executeExploreTask: (plan, taskId, context, options) => this.executeExploreTask(plan, taskId, context, options),
+      shouldReplan: (input) => this.shouldReplan(input)
+    }, {
+      maxConcurrency: this.explorationConcurrency,
+      maxReplans: DEFAULT_MAX_REPLANS
+    });
+    return executeReadOnlyRuntimeRollout({
+      mode: this.planningGraphMode,
+      internalTask: request.internalTask,
+      legacy: () => this.planWithExplorationLegacy(request),
+      next: graph,
+      equivalent: planningResultsEquivalent,
+      observe: (observation) => {
+        // 仅记录固定枚举和等价布尔值，不记录计划目标、源码、Prompt 或模型输出。
+        console.info(`[langgraph-planning-rollout] ${JSON.stringify(observation)}`);
+      }
+    });
   }
 
   /** Main 持有重规划入口；Planner 只返回新计划，不直接修改真实 AgentState。 */
@@ -571,4 +608,22 @@ export class MainAgentRuntime {
       explorations: [exploration]
     };
   }
+}
+
+function planningResultsEquivalent(
+  legacy: MainAgentExplorationPlanningResult,
+  next: MainAgentExplorationPlanningResult
+): boolean {
+  if (legacy.decision.route !== next.decision.route || legacy.planning?.status !== next.planning?.status) return false;
+  if (legacy.planning?.status !== "ready" || next.planning?.status !== "ready") return true;
+  const normalize = (plan: Plan) => plan.tasks.map((task) => ({
+    id: task.id,
+    type: task.type,
+    dependencies: [...task.dependencies].sort(),
+    readScope: [...task.readScope].sort(),
+    writeScope: [...task.writeScope].sort(),
+    acceptanceCriteria: [...task.acceptanceCriteria].sort(),
+    status: task.status
+  }));
+  return JSON.stringify(normalize(legacy.planning.plan)) === JSON.stringify(normalize(next.planning.plan));
 }

@@ -652,3 +652,13 @@ pnpm --filter @mini-ai-web-editor/server test
 - Set `AI_FULL_IO_LOGGING=1` to persist each model call into `.mini-ai/state/runtime/ai-logs/`.
 - Each JSON log keeps `requestBody`, `responseBody` / `responseText`, `outputText`, `status`, `error`, and `aborted`.
 - The server does not write the `Authorization` header, but it does keep the complete model input and output body.
+# LangChain / LangGraph 智能体运行时
+
+服务端已提供 LangChain Provider Gateway/Tool 适配器、只读 Agent，以及 Planner / Explorer LangGraph 子图。规划图负责缺上下文探索、受限并行证据合并和有界重规划；现有权限、任务状态、Patch、Safe Editor、Checkpoint 和完成策略继续作为唯一业务边界。迁移期间生产默认保持 Legacy，可通过只读灰度模式进行 shadow 或 internal 验证。
+
+```env
+AGENT_LANGGRAPH_RUNTIME_ENABLED=false
+AGENT_LANGGRAPH_READ_ONLY_MODE=off
+```
+
+仅在受控验证环境开启批准后兼容图，或将只读模式设为 `shadow` / `internal`。恢复上述默认值即可回退，不需要迁移任务数据。实现边界和验证命令见 `docs/langchain-langgraph/current-implementation.md`。

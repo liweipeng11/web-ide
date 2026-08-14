@@ -402,6 +402,66 @@ test("simple 请求通过生产服务入口执行 Main 并持久化轨迹", asyn
   });
 });
 
+test("只读 shadow 同时执行新路径但仍向用户返回 Legacy 结果", async () => {
+  await withWorkspace(async () => {
+    const created = await createTaskSession("解释登录函数", { agentMode: "act" });
+    const routeDecision: RouteDecision = { intent: "question", complexity: "simple", route: "direct", requiredCapabilities: [] };
+    const execution = (summary: string) => ({
+      outcome: "executed" as const,
+      decision: routeDecision,
+      execution: {
+        result: { taskId: "MAIN-READ", status: "success" as const, summary, facts: [], changedFiles: [], evidence: [], blockers: [] },
+        state: { goal: created.userGoal, completedTasks: ["MAIN-READ"], failedTasks: [], changedFiles: [], facts: [], status: "completed" as const }
+      }
+    });
+    const observations: unknown[] = [];
+    const result = await executeDirectMainRequest(created, { goal: created.userGoal }, {
+      runtime: {
+        async plan() { return { decision: routeDecision, planning: null }; },
+        async executeDecision() { return execution("Legacy 回答"); }
+      },
+      readOnlyRollout: {
+        mode: "shadow",
+        async execute() { return execution("新只读回答"); },
+        observe(value) { observations.push(value); }
+      }
+    });
+
+    assert.equal(result.outcome === "executed" && result.summary, "Legacy 回答");
+    assert.deepEqual(observations, [{ mode: "shadow", selected: "legacy", legacyStatus: "completed", nextStatus: "completed", equivalent: true }]);
+    assert.equal(JSON.stringify(observations).includes("回答"), false);
+  });
+});
+
+test("internal 只在调用方明确标记内部任务时采用只读新结果", async () => {
+  await withWorkspace(async () => {
+    const created = await createTaskSession("解释登录函数", { agentMode: "act" });
+    const routeDecision: RouteDecision = { intent: "question", complexity: "simple", route: "direct", requiredCapabilities: [] };
+    const execution = (summary: string) => ({
+      outcome: "executed" as const,
+      decision: routeDecision,
+      execution: {
+        result: { taskId: "MAIN-INTERNAL", status: "success" as const, summary, facts: [], changedFiles: [], evidence: [], blockers: [] },
+        state: { goal: created.userGoal, completedTasks: ["MAIN-INTERNAL"], failedTasks: [], changedFiles: [], facts: [], status: "completed" as const }
+      }
+    });
+    const result = await executeDirectMainRequest(created, { goal: created.userGoal }, {
+      runtime: {
+        async plan() { return { decision: routeDecision, planning: null }; },
+        async executeDecision() { return execution("Legacy 回答"); }
+      },
+      readOnlyRollout: {
+        mode: "internal",
+        internalTask: true,
+        async execute() { return execution("内部只读回答"); },
+        observe() {}
+      }
+    });
+
+    assert.equal(result.outcome === "executed" && result.summary, "内部只读回答");
+  });
+});
+
 test("非 direct 请求由生产服务入口交还现有链路", async () => {
   await withWorkspace(async () => {
     const created = await createTaskSession("分析认证模块", { agentMode: "act" });

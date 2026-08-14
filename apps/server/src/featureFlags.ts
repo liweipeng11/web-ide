@@ -14,6 +14,7 @@ export type FeatureFlags = {
   progressiveDelivery: boolean;
   progressiveRecovery: boolean;
   unitContextBudget: boolean;
+  langGraphRuntime: boolean;
 };
 
 export type FeatureImplementations = Record<keyof FeatureFlags, boolean>;
@@ -35,7 +36,8 @@ const featureFlagEnvironmentNames: Record<keyof FeatureFlags, string> = {
   structuredCompletionRejection: "AGENT_STRUCTURED_COMPLETION_REJECTION",
   progressiveDelivery: "AGENT_PROGRESSIVE_DELIVERY_ENABLED",
   progressiveRecovery: "AGENT_PROGRESSIVE_RECOVERY_ENABLED",
-  unitContextBudget: "AGENT_UNIT_CONTEXT_BUDGET_ENABLED"
+  unitContextBudget: "AGENT_UNIT_CONTEXT_BUDGET_ENABLED",
+  langGraphRuntime: "AGENT_LANGGRAPH_RUNTIME_ENABLED"
 };
 
 export const defaultFeatureFlags: FeatureFlags = {
@@ -56,7 +58,9 @@ export const defaultFeatureFlags: FeatureFlags = {
   // 分级恢复已具备完整实现，默认将可恢复阻塞保留为可继续状态；可通过环境变量立即回退。
   progressiveRecovery: true,
   // 单元级上下文预算已具备完整实现，默认避免大任务在上下文压力下继续无边界探索。
-  unitContextBudget: true
+  unitContextBudget: true,
+  // LangGraph 迁移尚未完成，默认保持 Legacy 生产路径；仅允许显式开启进行受控验证。
+  langGraphRuntime: false
 };
 
 export type FeatureDecisionDifference = {
@@ -264,5 +268,7 @@ export const implementedFeatures: FeatureImplementations = {
   // 阶段 0 只有解析与观测夹具，尚未提供可切换的新执行路径。
   progressiveDelivery: false,
   progressiveRecovery: true,
-  unitContextBudget: true
+  unitContextBudget: true,
+  // 阶段 0 仅完成基线与关闭状态开关，Capability 不应提前宣告新运行时可用。
+  langGraphRuntime: false
 };

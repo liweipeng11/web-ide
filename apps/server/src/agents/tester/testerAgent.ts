@@ -76,7 +76,7 @@ function toFailure(issue: VerificationIssue, execution: VerificationExecution): 
   };
 }
 
-function toValidationReport(
+export function toValidationReport(
   report: VerificationReport,
   criteria: string[],
   acceptanceEvidence: AcceptanceEvidenceInput[]
@@ -131,7 +131,7 @@ function toValidationReport(
   };
 }
 
-function blockersFor(report: VerificationReport, validation: ValidationReport) {
+export function blockersFor(report: VerificationReport, validation: ValidationReport) {
   if (report.status === "no_commands") return ["项目中没有发现可执行的验证命令。"];
   if (report.status === "needs_confirmation") return ["验证命令需要用户确认，Tester 不会自行扩大执行权限。"];
   if (report.status === "blocked") return ["验证命令被命令安全策略阻止。"];

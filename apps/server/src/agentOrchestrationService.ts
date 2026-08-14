@@ -24,9 +24,23 @@ import {
   setTaskSessionRuntimePlanning
 } from "./taskSessionStore.js";
 import type { TaskSession } from "./types.js";
+import { config } from "./config.js";
+import { runApprovedPipelineGraph } from "./langgraph/approvedPipelineGraph.js";
+import type { ReadOnlyRuntimeMode } from "./langgraph/rollout/featureFlags.js";
+import {
+  executeReadOnlyRuntimeRollout,
+  type ReadOnlyRuntimeObservation
+} from "./langgraph/rollout/runtimeSelector.js";
 
 type OrchestratorFacade = Pick<MainAgentOrchestrator, "executePlan">;
 type DirectMainRuntimeFacade = Pick<MainAgentRuntime, "plan" | "executeDecision">;
+
+export type DirectMainReadOnlyRollout = {
+  mode?: ReadOnlyRuntimeMode;
+  internalTask?: boolean;
+  execute: (request: MainAgentRequest, decision: RouteDecision) => Promise<MainAgentRuntimeResult>;
+  observe?: (observation: ReadOnlyRuntimeObservation) => void;
+};
 
 export type ApprovedAgentPipelineResult =
   | { outcome: "not_applicable"; reason: string }
@@ -44,12 +58,23 @@ export type DirectMainExecutionResult =
 export async function executeDirectMainRequest(
   session: TaskSession,
   request: MainAgentRequest,
-  options: { runtime?: DirectMainRuntimeFacade } = {}
+  options: { runtime?: DirectMainRuntimeFacade; readOnlyRollout?: DirectMainReadOnlyRollout } = {}
 ): Promise<DirectMainExecutionResult> {
   const runtime = options.runtime ?? new MainAgentRuntime();
   const planning = await runtime.plan(request);
   if (planning.decision.route !== "direct") return { outcome: "not_applicable" };
-  const execution = await runtime.executeDecision(request, planning.decision);
+  const rollout = options.readOnlyRollout;
+  const execution = await executeReadOnlyRuntimeRollout({
+    mode: rollout?.mode ?? config.readOnlyRuntimeRollout.mode,
+    internalTask: rollout?.internalTask,
+    legacy: () => runtime.executeDecision(request, planning.decision),
+    next: rollout ? () => rollout.execute(request, planning.decision) : undefined,
+    equivalent: (legacy, next) => directExecutionStatus(legacy) === directExecutionStatus(next),
+    observe: rollout?.observe ?? ((observation) => {
+      // 日志仅包含固定状态枚举和等价布尔值，不记录用户问题、回答或源码。
+      console.info(`[langgraph-readonly-rollout] ${JSON.stringify(observation)}`);
+    })
+  });
   const summary = execution.outcome === "executed" ? execution.execution.result.summary : "Main 未能完成直接响应。";
   const status = execution.outcome === "executed" ? execution.execution.result.status : "blocked";
   await recordTaskSessionOrchestrationResult(session.id, {
@@ -60,6 +85,12 @@ export async function executeDirectMainRequest(
     ]
   }, summary);
   return { outcome: "executed", execution, summary };
+}
+
+function directExecutionStatus(execution: MainAgentRuntimeResult): string {
+  return execution.outcome === "executed"
+    ? `${execution.outcome}:${execution.execution.result.status}`
+    : execution.outcome;
 }
 
 function routeDecisionForSession(session: TaskSession): RouteDecision {
@@ -194,7 +225,7 @@ async function persistReplanExplorations(taskSessionId: string, plan: import("./
 }
 
 /** 在用户批准后连续推进 Runtime DAG，并在每个 Agent 返回后立即持久化可信进度。 */
-export async function executeApprovedAgentPipeline(
+async function executeApprovedAgentPipelineLegacy(
   session: TaskSession,
   options: {
     orchestrator?: OrchestratorFacade;
@@ -249,4 +280,29 @@ export async function executeApprovedAgentPipeline(
   await recordTaskSessionOrchestrationResult(session.id, orchestration.trace, orchestration.summary);
   const updated = await getTaskSession(session.id);
   return { outcome: "executed", orchestration, session: updated };
+}
+
+/**
+ * 批准后任务默认由 LangGraph 控制流程入口；关闭 Flag 时立即回退到原有编排路径。
+ * Graph 不持有业务状态，也不直接执行工具，因此不会改变审批、写入或恢复语义。
+ */
+export async function executeApprovedAgentPipeline(
+  session: TaskSession,
+  options: {
+    orchestrator?: OrchestratorFacade;
+    testScope?: string[];
+    acceptanceEvidence?: AcceptanceEvidenceInput[];
+    signal?: AbortSignal;
+    onLifecycleEvent?: (event: OrchestrationLifecycleEvent) => Promise<void> | void;
+  } = {}
+): Promise<ApprovedAgentPipelineResult> {
+  if (!config.featureFlags.langGraphRuntime) {
+    return executeApprovedAgentPipelineLegacy(session, options);
+  }
+
+  const result = await runApprovedPipelineGraph(session, (approvedSession) =>
+    executeApprovedAgentPipelineLegacy(approvedSession, options)
+  );
+  if (result.outcome === "not_applicable") return result;
+  return result.value;
 }

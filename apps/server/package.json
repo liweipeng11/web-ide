@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "pretest": "pnpm test:providers && pnpm test:context-budget && pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow && pnpm test:external-context && pnpm test:language-service && pnpm test:inline-edit && pnpm test:runtime-kernel && pnpm test:tester-agent && pnpm test:stage5",
+    "pretest": "pnpm test:providers && pnpm test:context-budget && pnpm test:symbol-graph && pnpm test:impact-analyzer && pnpm test:safe-editor && pnpm test:task-workflow && pnpm test:external-context && pnpm test:language-service && pnpm test:inline-edit && pnpm test:runtime-kernel && pnpm test:tester-agent && pnpm test:langgraph && pnpm test:stage5",
     "test:providers": "tsx --test src/providers/providerGateway.test.ts src/providers/openAiCompatibleProvider.test.ts src/modelGatewayClient.test.ts src/modelSelectionStore.test.ts src/modelRoutes.test.ts",
     "test:context-budget": "tsx --test src/contextBudget/contextBudgetManager.test.ts src/contextBudget/contextBudgetIntegration.test.ts",
     "test:symbol-graph": "tsx --test src/symbolGraph/symbolGraph.test.ts",
@@ -15,6 +15,7 @@
     "test:language-service": "tsx --test src/languageService/*.test.ts",
     "test:inline-edit": "tsx --test src/inlineEdit/*.test.ts",
     "test:runtime-kernel": "tsx --test src/runtime/*.test.ts",
+    "test:langgraph": "tsx --test src/langgraph/**/*.test.ts src/langchain/**/*.test.ts",
     "verify:runtime-phase0": "pnpm typecheck && pnpm test:runtime-kernel && pnpm exec tsx --test src/agentCompletionPolicy.test.ts src/taskSessionStore.test.ts",
     "test:main-agent": "tsx --test src/agents/main/*.test.ts",
     "verify:runtime-phase1": "pnpm typecheck && pnpm test:runtime-kernel && pnpm test:main-agent",
@@ -57,12 +58,15 @@
     "acceptance:stage5": "tsx src/acceptance/cli.ts"
   },
   "dependencies": {
+    "@langchain/core": "^1.2.6",
+    "@langchain/langgraph": "^1.4.9",
     "@vscode/ripgrep": "^1.18.0",
     "@vue/language-server": "^3.3.7",
     "basedpyright": "^1.39.9",
     "diff": "^7.0.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "langchain": "^1.5.6",
     "node-pty": "^1.1.0",
     "playwright-core": "^1.61.1",
     "typescript-language-server": "^5.3.0",

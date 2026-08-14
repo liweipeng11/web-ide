@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createVerifier, type VerifierDependencies } from "./verifier.js";
+import { createVerifier, executeVerificationPlan, type VerifierDependencies } from "./verifier.js";
 import type { CommandResult } from "../types.js";
 import type { VerificationCommand } from "./types.js";
 
@@ -99,4 +99,26 @@ test("没有可用验证命令时返回明确状态", async () => {
 
   assert.equal(report.status, "no_commands");
   assert.deepEqual(report.executions, []);
+});
+
+test("执行冻结计划时不重新规划，并在执行边界重新检查命令策略", async () => {
+  let commandCalls = 0;
+  const frozen = plan([command("test", "test")]);
+  const report = await executeVerificationPlan(frozen, {}, {
+    evaluateCommandPolicy: () => ({ level: "safe", reason: "测试白名单" }),
+    runProjectCommand: async (value) => {
+      commandCalls += 1;
+      return result(value, "success");
+    }
+  });
+  assert.equal(report.plan, frozen);
+  assert.equal(commandCalls, 1);
+
+  const tightened = await executeVerificationPlan(frozen, {}, {
+    evaluateCommandPolicy: () => ({ level: "blocked", reason: "策略已收紧" }),
+    runProjectCommand: async () => {
+      throw new Error("策略阻止后不应执行命令");
+    }
+  });
+  assert.equal(tightened.status, "blocked");
 });

@@ -181,6 +181,50 @@ test("计划准备阶段将无依赖关系的 explore Task 按并发上限执行
   assert.equal(result.planning.plan.tasks.find((task) => task.id === "I1")?.status, "pending");
 });
 
+test("internal 灰度下计划准备由 LangGraph 执行且保持原返回契约", async () => {
+  const routeModel = new RuntimeDecisionModel(
+    { intent: "analysis", complexity: "complex", route: "planned", requiredCapabilities: [] },
+    []
+  );
+  const planner = new PlannerAgent(new RuntimePlannerModel({
+    status: "ready",
+    plan: {
+      assumptions: [],
+      tasks: [{ id: "E1", type: "explore", goal: "读取入口", dependencies: [], acceptanceCriteria: ["入口已确认"] }],
+      completionCriteria: ["探索完成"]
+    }
+  }));
+  let explorerCalls = 0;
+  const runtime = new MainAgentRuntime({
+    agent: new MainAgent(routeModel),
+    planner,
+    planningGraphMode: "internal",
+    explorer: {
+      async executePlanTask(plan, taskId) {
+        explorerCalls += 1;
+        const artifact = successfulExploration();
+        return {
+          ...artifact,
+          result: { ...artifact.result, taskId },
+          state: { ...artifact.state, plan }
+        };
+      }
+    }
+  });
+
+  const result = await runtime.planWithExploration({
+    goal: "分析认证系统",
+    readScope: ["src/**"],
+    internalTask: true
+  });
+
+  assert.equal(routeModel.routeCalls, 1);
+  assert.equal(explorerCalls, 1);
+  assert.equal(result.planning?.status, "ready");
+  if (result.planning?.status !== "ready") return;
+  assert.equal(result.planning.plan.tasks[0].status, "completed");
+});
+
 test("direct 请求把入口已读代码作为事实交给 Main", async () => {
   const model = new RuntimeDecisionModel(
     { intent: "question", complexity: "simple", route: "direct", requiredCapabilities: [] },

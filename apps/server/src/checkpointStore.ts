@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { HttpError } from "./errors.js";
 import { safeResolve } from "./fileTools.js";
-import { legacyProjectRuntimeDirectory, projectRuntimeDirectory } from "./statePaths.js";
+import { legacyProjectRuntimeDirectory, listJsonFilesWithLegacyFallback, projectRuntimeDirectory } from "./statePaths.js";
 import type { Checkpoint, CheckpointSource, FileEditResult, FilePatch } from "./types.js";
 
 type CheckpointPatch = FilePatch & {
@@ -160,6 +160,24 @@ export async function getCheckpoint(checkpointId: string): Promise<Checkpoint> {
   });
 
   return JSON.parse(content) as Checkpoint;
+}
+
+/**
+ * 按副作用 action ID 查找文件 Checkpoint，供 LangGraph 在状态保存失败后核对真实落盘结果。
+ * 这里只读取现有快照，不根据 Checkpoint 的存在直接推断写入成功。
+ */
+export async function findCheckpointsByActionId(actionId: string): Promise<Checkpoint[]> {
+  const normalizedActionId = actionId.trim();
+  if (!normalizedActionId) throw new HttpError(400, "actionId is required");
+
+  const files = await listJsonFilesWithLegacyFallback(checkpointDirectory(), legacyCheckpointDirectory());
+  const checkpoints = await Promise.all(files.map(async (filePath) => {
+    const content = await fs.readFile(filePath, "utf8");
+    return JSON.parse(content) as Checkpoint;
+  }));
+  return checkpoints
+    .filter((checkpoint) => checkpoint.source?.actionId === normalizedActionId)
+    .sort((left, right) => left.createdAt - right.createdAt);
 }
 
 export async function rollbackCheckpoint(checkpointId: string): Promise<void> {

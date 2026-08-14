@@ -954,4 +954,12 @@ export type PendingPatch = {
   // 父代理合并时可据此按 delegationId 去重/去冲突。
   delegationId?: string;
   subagentId?: string;
+  /** LangGraph 候选 Patch 的稳定来源；旧 Patch 可不包含此字段。 */
+  source?: {
+    kind: "langgraph_developer";
+    taskId: string;
+    graphRunId: string;
+    actionId: string;
+    evidenceIds: string[];
+  };
 };

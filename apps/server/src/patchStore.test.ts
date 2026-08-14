@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { clearPendingPatches, createPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
+import { clearPendingPatches, createOrReusePendingPatch, createPendingPatch, normalizePatchPath, removePendingPatchFile } from "./patchStore.js";
 
 test("removes pending patch files using normalized workspace paths", () => {
   clearPendingPatches();
@@ -34,4 +34,29 @@ test("removes pending patch files using normalized workspace paths", () => {
 
 test("normalizes Windows and POSIX patch paths to the same key", () => {
   assert.equal(normalizePatchPath("SRC\\views\\LoginView.vue"), normalizePatchPath("src/views/loginview.vue"));
+});
+
+test("稳定 Patch ID 只复用相同内容并拒绝静默覆盖", () => {
+  clearPendingPatches();
+  const input = {
+    patchId: "patch-stable",
+    files: [{
+      filePath: "src/index.ts",
+      path: "src/index.ts",
+      status: "modify" as const,
+      summary: "更新入口",
+      diffHtml: "",
+      oldContent: "before",
+      newContent: "after"
+    }]
+  };
+
+  const first = createOrReusePendingPatch(input);
+  const replay = createOrReusePendingPatch(input);
+
+  assert.equal(replay, first);
+  assert.throws(
+    () => createOrReusePendingPatch({ ...input, files: [{ ...input.files[0], newContent: "conflict" }] }),
+    /内容冲突/
+  );
 });
