@@ -1202,6 +1202,11 @@ app.post("/api/ai/file-chat/stream", async (request, response) => {
           // 新编排与旧 Runtime 共用 AgentStep：既实时推送，也持久化为可恢复的会话证据。
           onLifecycleEvent(event) {
             pushAgentStep(createAgentStep({ type: "orchestration", ...event }));
+          },
+          // Graph 步骤已在服务层按稳定 ID 落盘，此处只桥接到当前 SSE 连接。
+          onGraphStep(step) {
+            agentSteps.push(step);
+            sendEvent("agent_step", { step });
           }
         })
       );

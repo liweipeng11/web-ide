@@ -1,4 +1,10 @@
 import type { ReadOnlyRuntimeMode } from "./featureFlags.js";
+import {
+  compareShadowResults,
+  shadowDurationBucket,
+  type ShadowComparison,
+  type ShadowResultDescriptor
+} from "./shadowComparison.js";
 
 export type ReadOnlyRuntimeSelection = {
   runLegacy: boolean;
@@ -12,6 +18,10 @@ export type ReadOnlyRuntimeObservation = {
   legacyStatus: "completed" | "failed" | "not_run";
   nextStatus: "completed" | "failed" | "not_run";
   equivalent?: boolean;
+  /** 仅包含固定维度的匹配情况，不包含两条路径的原始值。 */
+  comparison?: ShadowComparison;
+  legacyDuration?: ReturnType<typeof shadowDurationBucket>;
+  nextDuration?: ReturnType<typeof shadowDurationBucket>;
 };
 
 export function selectReadOnlyRuntime(input: {
@@ -40,7 +50,8 @@ export async function executeReadOnlyRuntimeRollout<T>(input: {
   legacy: () => Promise<T>;
   next?: () => Promise<T>;
   equivalent?: (legacy: T, next: T) => boolean;
-  observe?: (observation: ReadOnlyRuntimeObservation) => void;
+  describe?: (value: T) => ShadowResultDescriptor;
+  observe?: (observation: ReadOnlyRuntimeObservation) => Promise<void> | void;
 }): Promise<T> {
   const selection = selectReadOnlyRuntime({
     mode: input.mode,
@@ -53,38 +64,64 @@ export async function executeReadOnlyRuntimeRollout<T>(input: {
   if (!selection.runLegacy) {
     try {
       const nextValue = await input.next();
-      safeObserve(input.observe, { mode: input.mode, selected: "next", legacyStatus: "not_run", nextStatus: "completed" });
+      await safeObserve(input.observe, { mode: input.mode, selected: "next", legacyStatus: "not_run", nextStatus: "completed" });
       return nextValue;
     } catch {
       const legacyValue = await input.legacy();
-      safeObserve(input.observe, { mode: input.mode, selected: "legacy", legacyStatus: "completed", nextStatus: "failed" });
+      await safeObserve(input.observe, { mode: input.mode, selected: "legacy", legacyStatus: "completed", nextStatus: "failed" });
       return legacyValue;
     }
   }
 
-  const [legacyResult, nextResult] = await Promise.allSettled([input.legacy(), input.next()]);
+  type TimedResult =
+    | { ok: true; value: T; durationMs: number }
+    | { ok: false; error: unknown; durationMs: number };
+  const timed = async (execute: () => Promise<T>): Promise<TimedResult> => {
+    const pathStartedAt = Date.now();
+    try {
+      return { ok: true, value: await execute(), durationMs: Date.now() - pathStartedAt };
+    } catch (error) {
+      return { ok: false, error, durationMs: Date.now() - pathStartedAt };
+    }
+  };
+  const [legacyResult, nextResult] = await Promise.all([timed(input.legacy), timed(input.next)]);
+  const comparison = legacyResult.ok && nextResult.ok && input.describe
+    ? safeCompare(input.describe, legacyResult.value, nextResult.value)
+    : undefined;
   const observation: ReadOnlyRuntimeObservation = {
     mode: input.mode,
     selected: "legacy",
-    legacyStatus: legacyResult.status === "fulfilled" ? "completed" : "failed",
-    nextStatus: nextResult.status === "fulfilled" ? "completed" : "failed",
-    ...(legacyResult.status === "fulfilled" && nextResult.status === "fulfilled" && input.equivalent
+    legacyStatus: legacyResult.ok ? "completed" : "failed",
+    nextStatus: nextResult.ok ? "completed" : "failed",
+    ...(input.describe ? {
+      legacyDuration: shadowDurationBucket(legacyResult.durationMs),
+      nextDuration: shadowDurationBucket(nextResult.durationMs),
+      ...(comparison ? { comparison, equivalent: comparison.equivalent } : {})
+    } : legacyResult.ok && nextResult.ok && input.equivalent
       ? { equivalent: safeEquivalent(input.equivalent, legacyResult.value, nextResult.value) }
       : {})
   };
-  safeObserve(input.observe, observation);
-  if (legacyResult.status === "rejected") throw legacyResult.reason;
+  await safeObserve(input.observe, observation);
+  if (!legacyResult.ok) throw legacyResult.error;
   return legacyResult.value;
 }
 
-function safeObserve(
-  observe: ((observation: ReadOnlyRuntimeObservation) => void) | undefined,
+async function safeObserve(
+  observe: ((observation: ReadOnlyRuntimeObservation) => Promise<void> | void) | undefined,
   observation: ReadOnlyRuntimeObservation
-): void {
+): Promise<void> {
   try {
-    observe?.(observation);
+    await observe?.(observation);
   } catch {
     // 观测失败不能改变用户结果或触发新旧路径重跑。
+  }
+}
+
+function safeCompare<T>(describe: (value: T) => ShadowResultDescriptor, legacy: T, next: T): ShadowComparison {
+  try {
+    return compareShadowResults(describe(legacy), describe(next));
+  } catch {
+    return { comparedDimensions: 0, differingDimensions: [], equivalent: false };
   }
 }
 

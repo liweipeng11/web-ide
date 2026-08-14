@@ -6,6 +6,7 @@ import test from "node:test";
 import type { MainOrchestrationResult, OrchestrationExecution } from "./agents/main/index.js";
 import { executeApprovedAgentPipeline, executeDirectMainRequest } from "./agentOrchestrationService.js";
 import { config } from "./config.js";
+import type { ReadOnlyRuntimeObservation } from "./langgraph/rollout/runtimeSelector.js";
 import type { AgentState, Plan, RouteDecision } from "./runtime/contracts.js";
 import {
   approveTaskSessionPlan,
@@ -428,7 +429,13 @@ test("只读 shadow 同时执行新路径但仍向用户返回 Legacy 结果", a
     });
 
     assert.equal(result.outcome === "executed" && result.summary, "Legacy 回答");
-    assert.deepEqual(observations, [{ mode: "shadow", selected: "legacy", legacyStatus: "completed", nextStatus: "completed", equivalent: true }]);
+    assert.equal(observations.length, 1);
+    assert.deepEqual((observations[0] as ReadOnlyRuntimeObservation).comparison, {
+      comparedDimensions: 3,
+      differingDimensions: [],
+      equivalent: true
+    });
+    assert.equal((observations[0] as ReadOnlyRuntimeObservation).selected, "legacy");
     assert.equal(JSON.stringify(observations).includes("回答"), false);
   });
 });
@@ -551,6 +558,53 @@ test("未批准计划不会启动统一编排", async () => {
 
     assert.equal(result.outcome, "not_applicable");
     assert.equal(calls, 0);
+  });
+});
+
+test("LangGraph Flag 开启后批准任务保持生产服务返回契约和 TaskSession 结果", async () => {
+  await withWorkspace(async () => {
+    const previous = config.featureFlags.langGraphRuntime;
+    config.featureFlags.langGraphRuntime = true;
+    try {
+      const created = await createTaskSession("修改并验证认证限流", { agentMode: "act" });
+      await setTaskSessionRuntimePlanning(created.id, { status: "ready", plan: plan() });
+      const approved = await approveTaskSessionPlan(created.id);
+      assert.ok(approved);
+      let calls = 0;
+
+      const result = await executeApprovedAgentPipeline(approved, {
+        orchestrator: {
+          async executePlan(decision, currentPlan, options): Promise<MainOrchestrationResult> {
+            calls += 1;
+            assert.equal(decision.route, "main_loop");
+            assert.equal(currentPlan, approved.runtimePlan);
+            return {
+              status: "blocked",
+              decision,
+              plan: currentPlan,
+              summary: "等待补充验收范围",
+              changedFiles: [],
+              results: [],
+              executions: [],
+              trace: options?.trace ?? { calledAgents: ["main"], events: [] }
+            };
+          }
+        }
+      });
+
+      assert.equal(result.outcome, "executed");
+      assert.equal(calls, 1);
+      if (result.outcome !== "executed") return;
+      assert.equal(result.orchestration.status, "blocked");
+      assert.equal(result.orchestration.summary, "等待补充验收范围");
+      const restored = await getTaskSession(created.id);
+      assert.equal(restored.orchestrationSummary, "等待补充验收范围");
+      const graphSteps = restored.steps.filter((step) => step.id.startsWith("graph-step:"));
+      assert.ok(graphSteps.length >= 4);
+      assert.equal(new Set(graphSteps.map((step) => step.id)).size, graphSteps.length);
+    } finally {
+      config.featureFlags.langGraphRuntime = previous;
+    }
   });
 });
 

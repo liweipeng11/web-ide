@@ -1,8 +1,8 @@
 # LangChain / LangGraph 迁移状态
 
-- 当前阶段：阶段 8 Main Graph 接管与前端兼容
-- 当前工作包：8A 已完成；下一工作包为 8B
-- 总体状态：in_progress（Main Graph 已统一 direct、main_loop、planned 路由与子图组合；批准后 TaskSession 生产入口细化尚待 8B）
+- 当前阶段：阶段 9 进行中；Shadow 对照与脱敏指标已完成
+- 当前工作包：9A 已完成；下一工作包为 9B
+- 总体状态：in_progress（只读 Shadow 可量化观测已就绪；尚未启用百分比灰度）
 - 最后更新：2026-08-14
 
 | 工作包 | 状态 | 前置工作包 | 最近验证 | 备注 |
@@ -39,10 +39,10 @@
 | 7C | completed | 7B | `repairLoopGraph.test.ts`；`pnpm typecheck` | 实现失败回 Developer、计划失败回 Planner、环境/取消停止及循环耗尽 incomplete |
 | 7D | completed | 7C | `pnpm verify:langgraph-stage7` | 统一完成策略、错误完成为 0、Runtime Phase 8、新文件、任务完成和 Safe Editor 累计验收通过 |
 | 8A | completed | 7D | `mainGraph.test.ts`；`pnpm typecheck` | direct/main_loop/planned 条件路由、Planning 与计划执行子图组合、取消和契约失败收敛 |
-| 8B | incomplete | 8A | `verify:runtime-phase8` | 批准后 TaskSession 入口已接入；完整 Main Graph 节点细化尚未实施 |
-| 8C | pending | 8B | 未运行 | 流式事件、审批和恢复兼容 |
-| 8D | pending | 8C | 未运行 | 双端端到端验收和报告 |
-| 9A | pending | 8D | 未运行 | Shadow 对照器与脱敏指标 |
+| 8B | completed | 8A | `taskSessionMainGraph.test.ts`；`agentOrchestrationService.test.ts`；`pnpm typecheck` | Feature Flag 保护下接入批准后 TaskSession，恢复已批准计划并保持单次副作用执行 |
+| 8C | completed | 8B | `agentStepAdapter.test.ts`；`taskSessionMainGraph.test.ts`；`agentOrchestrationService.test.ts`；`pnpm typecheck` | 稳定 Graph 事件实时桥接、TaskSession 步骤去重、审批前零执行及跨重启快照恢复 |
+| 8D | completed | 8C | `pnpm verify:langgraph-stage8` | direct/main_loop/planned、审批等待、SSE、刷新恢复、Legacy 共存及双端构建累计验收 |
+| 9A | completed | 8D | `shadowComparison.test.ts`；`runtimeSelector.test.ts`；`agentOrchestrationService.test.ts`；`pnpm --dir apps/server typecheck` | 固定维度差异、耗时分桶、JSONL 指标、观测失败隔离与 Legacy 返回语义均已验证 |
 | 9B | pending | 9A | 未运行 | 稳定分桶与只读灰度 |
 | 9C | pending | 9B | 未运行 | 写任务灰度与自动回退 |
 | 9D | pending | 9C | 未运行 | 全量观察、回退演练和报告 |

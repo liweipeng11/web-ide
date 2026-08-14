@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { graphEventToAgentStep } from "./agentStepAdapter.js";
-import { streamGraphAgentSteps } from "./graphEventStream.js";
+import { createGraphAgentStepEmitter, streamGraphAgentSteps } from "./graphEventStream.js";
 
 test("Graph node/task/update/interrupt/final 事件映射为现有 AgentStep", () => {
   const base = { runId: "run-1", sequence: 1 };
@@ -38,4 +38,31 @@ test("Graph 事件流在恢复重放时不重复持久化步骤", async () => {
   for await (const step of streamGraphAgentSteps(events(), { onStep: (value) => { persisted.push(value.id); } })) steps.push(step);
   assert.equal(steps.length, 2);
   assert.deepEqual(persisted, steps.map((step) => step.id));
+});
+
+test("实时事件发射器使用稳定 ID 去重，观测失败不改变后续事件", async () => {
+  const persisted: string[] = [];
+  const failures: string[] = [];
+  const first = createGraphAgentStepEmitter({
+    runId: "stable-run",
+    onStep(step) {
+      persisted.push(step.id);
+      if (persisted.length === 1) throw new Error("存储暂时不可用");
+    },
+    onError(error) { failures.push(error instanceof Error ? error.message : String(error)); }
+  });
+  const route = await first.emit({ type: "node", node: "route", phase: "started" });
+  const final = await first.emit({ type: "final", summary: "执行完成" });
+  assert.ok(route);
+  assert.ok(final);
+  assert.deepEqual(failures, ["存储暂时不可用"]);
+
+  const replay = createGraphAgentStepEmitter({
+    runId: "stable-run",
+    seenStepIds: persisted,
+    onStep(step) { persisted.push(step.id); }
+  });
+  assert.equal(await replay.emit({ type: "node", node: "route", phase: "started" }), null);
+  assert.equal(await replay.emit({ type: "final", summary: "执行完成" }), null);
+  assert.equal(persisted.length, 2);
 });

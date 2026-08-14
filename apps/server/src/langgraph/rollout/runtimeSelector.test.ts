@@ -61,3 +61,24 @@ test("shadow 观测器失败不会改变 Legacy 用户结果", async () => {
   });
   assert.equal(result, "legacy");
 });
+
+test("shadow 生成脱敏结构差异和耗时区间", async () => {
+  let observation: ReadOnlyRuntimeObservation | undefined;
+  const result = await executeReadOnlyRuntimeRollout({
+    mode: "shadow",
+    legacy: async () => ({ outcome: "executed", status: "success", secret: "legacy answer" }),
+    next: async () => ({ outcome: "executed", status: "failed", secret: "next answer" }),
+    describe: (value) => ({ outcome: value.outcome, result_status: value.status, route: value.secret }),
+    observe: (value) => { observation = value; }
+  });
+
+  assert.equal(result.secret, "legacy answer");
+  assert.deepEqual(observation?.comparison, {
+    comparedDimensions: 3,
+    differingDimensions: ["result_status", "route"],
+    equivalent: false
+  });
+  assert.equal(observation?.legacyDuration, "lt_100ms");
+  assert.equal(observation?.nextDuration, "lt_100ms");
+  assert.equal(JSON.stringify(observation).includes("answer"), false);
+});

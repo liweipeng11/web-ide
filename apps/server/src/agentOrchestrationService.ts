@@ -18,19 +18,25 @@ import { planVerification } from "./verifier/index.js";
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import {
   getTaskSession,
+  appendTaskSessionStep,
   recordTaskSessionOrchestrationResult,
   recordTaskSessionDeveloperExecution,
   recordTaskSessionTesterExecution,
   setTaskSessionRuntimePlanning
 } from "./taskSessionStore.js";
-import type { TaskSession } from "./types.js";
+import type { AgentStep, TaskSession } from "./types.js";
 import { config } from "./config.js";
 import { runApprovedPipelineGraph } from "./langgraph/approvedPipelineGraph.js";
+import {
+  routeApprovedTaskSession,
+  runApprovedTaskSessionMainGraph
+} from "./langgraph/main/taskSessionMainGraph.js";
 import type { ReadOnlyRuntimeMode } from "./langgraph/rollout/featureFlags.js";
 import {
   executeReadOnlyRuntimeRollout,
   type ReadOnlyRuntimeObservation
 } from "./langgraph/rollout/runtimeSelector.js";
+import { appendShadowComparisonMetric, type ShadowComparisonMetric } from "./langgraph/rollout/shadowComparison.js";
 
 type OrchestratorFacade = Pick<MainAgentOrchestrator, "executePlan">;
 type DirectMainRuntimeFacade = Pick<MainAgentRuntime, "plan" | "executeDecision">;
@@ -39,7 +45,7 @@ export type DirectMainReadOnlyRollout = {
   mode?: ReadOnlyRuntimeMode;
   internalTask?: boolean;
   execute: (request: MainAgentRequest, decision: RouteDecision) => Promise<MainAgentRuntimeResult>;
-  observe?: (observation: ReadOnlyRuntimeObservation) => void;
+  observe?: (observation: ReadOnlyRuntimeObservation) => Promise<void> | void;
 };
 
 export type ApprovedAgentPipelineResult =
@@ -69,10 +75,23 @@ export async function executeDirectMainRequest(
     internalTask: rollout?.internalTask,
     legacy: () => runtime.executeDecision(request, planning.decision),
     next: rollout ? () => rollout.execute(request, planning.decision) : undefined,
-    equivalent: (legacy, next) => directExecutionStatus(legacy) === directExecutionStatus(next),
-    observe: rollout?.observe ?? ((observation) => {
-      // 日志仅包含固定状态枚举和等价布尔值，不记录用户问题、回答或源码。
-      console.info(`[langgraph-readonly-rollout] ${JSON.stringify(observation)}`);
+    describe: describeDirectExecution,
+    observe: rollout?.observe ?? (async (observation) => {
+      // 生产观测只持久化 shadow 固定枚举、差异维度和耗时区间。
+      if (observation.mode === "shadow" && observation.legacyStatus !== "not_run" && observation.nextStatus !== "not_run") {
+        const metric: ShadowComparisonMetric = {
+          schemaVersion: 1,
+          recordedAt: new Date().toISOString(),
+          mode: "shadow",
+          selected: "legacy",
+          legacyStatus: observation.legacyStatus,
+          nextStatus: observation.nextStatus,
+          legacyDuration: observation.legacyDuration ?? "gte_10s",
+          nextDuration: observation.nextDuration ?? "gte_10s",
+          ...(observation.comparison ? { comparison: observation.comparison } : {})
+        };
+        await appendShadowComparisonMetric(metric);
+      }
     })
   });
   const summary = execution.outcome === "executed" ? execution.execution.result.summary : "Main 未能完成直接响应。";
@@ -87,21 +106,11 @@ export async function executeDirectMainRequest(
   return { outcome: "executed", execution, summary };
 }
 
-function directExecutionStatus(execution: MainAgentRuntimeResult): string {
-  return execution.outcome === "executed"
-    ? `${execution.outcome}:${execution.execution.result.status}`
-    : execution.outcome;
-}
-
-function routeDecisionForSession(session: TaskSession): RouteDecision {
-  const usesPlanner = session.runtimePlan?.tasks.some((task) => task.type === "explore") ?? false;
+function describeDirectExecution(execution: MainAgentRuntimeResult) {
   return {
-    intent: "code_change",
-    complexity: usesPlanner ? "complex" : "medium",
-    route: usesPlanner ? "planned" : "main_loop",
-    requiredCapabilities: usesPlanner
-      ? ["planning", "exploration", "editing", "testing"]
-      : ["read", "edit"]
+    outcome: execution.outcome,
+    route: execution.decision.route,
+    result_status: execution.outcome === "executed" ? execution.execution.result.status : execution.planning.status
   };
 }
 
@@ -243,7 +252,7 @@ async function executeApprovedAgentPipelineLegacy(
   if (!session.runtimePlan) return { outcome: "not_applicable", reason: "任务没有 Runtime Plan。" };
 
   const orchestrator = options.orchestrator ?? new MainAgentOrchestrator();
-  const decision = routeDecisionForSession(session);
+  const decision = routeApprovedTaskSession(session);
   const executionOptions: ExecuteOrchestrationPlanOptions = {
     constraints: ["只能执行已批准 Runtime Plan 中的任务和授权范围。"],
     context: {
@@ -283,7 +292,7 @@ async function executeApprovedAgentPipelineLegacy(
 }
 
 /**
- * 批准后任务默认由 LangGraph 控制流程入口；关闭 Flag 时立即回退到原有编排路径。
+ * 显式开启 Flag 后，批准任务由 Main Graph 控制流程入口；默认关闭时继续使用原有编排路径。
  * Graph 不持有业务状态，也不直接执行工具，因此不会改变审批、写入或恢复语义。
  */
 export async function executeApprovedAgentPipeline(
@@ -294,15 +303,46 @@ export async function executeApprovedAgentPipeline(
     acceptanceEvidence?: AcceptanceEvidenceInput[];
     signal?: AbortSignal;
     onLifecycleEvent?: (event: OrchestrationLifecycleEvent) => Promise<void> | void;
+    /** Graph 步骤已经由服务持久化；该回调只用于 SSE 等实时传输。 */
+    onGraphStep?: (step: AgentStep) => Promise<void> | void;
   } = {}
 ): Promise<ApprovedAgentPipelineResult> {
   if (!config.featureFlags.langGraphRuntime) {
     return executeApprovedAgentPipelineLegacy(session, options);
   }
 
-  const result = await runApprovedPipelineGraph(session, (approvedSession) =>
-    executeApprovedAgentPipelineLegacy(approvedSession, options)
-  );
+  const result = await runApprovedPipelineGraph(session, async (approvedSession) => {
+    const execution = await runApprovedTaskSessionMainGraph({
+      session: approvedSession,
+      signal: options.signal,
+      async onGraphStep(step) {
+        await appendTaskSessionStep(approvedSession.id, step);
+        await options.onGraphStep?.(step);
+      },
+      onGraphEventError(error) {
+        // 事件观测失败不能触发业务流水线重跑，也不能输出用户内容或源码。
+        console.warn("[langgraph-event] AgentStep 持久化或推送失败", error instanceof Error ? error.name : "unknown");
+      },
+      execute: () => executeApprovedAgentPipelineLegacy(approvedSession, options),
+      describe(value) {
+        if (value.outcome !== "executed") {
+          throw runtimeError("INVALID_CONTRACT", "已批准流水线没有返回执行结果。");
+        }
+        const { orchestration } = value;
+        return {
+          outcome: orchestration.status === "completed"
+            ? "completed"
+            : orchestration.status === "cancelled"
+              ? "cancelled"
+              : orchestration.status,
+          summary: orchestration.summary,
+          changedFiles: orchestration.changedFiles,
+          blockers: orchestration.status === "completed" ? [] : [orchestration.summary]
+        };
+      }
+    });
+    return execution.value;
+  });
   if (result.outcome === "not_applicable") return result;
   return result.value;
 }

@@ -1,4 +1,4 @@
-import { END, START, StateGraph } from "@langchain/langgraph";
+import { END, START, StateGraph, type BaseCheckpointSaver } from "@langchain/langgraph";
 import type { MainAgentRequest } from "../../agents/main/mainAgentRuntime.js";
 import { runtimeError } from "../../runtime/errors.js";
 import type { RouteDecision } from "../../runtime/contracts.js";
@@ -42,6 +42,15 @@ export interface MainGraphResult {
   blockers: string[];
   history: string[];
 }
+
+export type MainGraphOptions = {
+  checkpointer?: BaseCheckpointSaver;
+};
+
+export type MainGraphInvocationOptions = {
+  threadId?: string;
+  checkpointNamespace?: string;
+};
 
 const ROUTES = new Set<RouteDecision["route"]>(["direct", "main_loop", "planned"]);
 const TERMINAL_OUTCOMES = new Set<TerminalOutcome>([
@@ -95,8 +104,8 @@ function branchUpdate(branch: Exclude<MainGraphBranch, null>, result: MainGraphB
  * 统一组合 direct、main loop 和 planned 分支。各节点只负责编排，模型、工具、审批及副作用
  * 继续由注入的现有 Runtime 或子图执行，避免绕过项目权限边界。
  */
-export function createMainGraph(dependencies: MainGraphDependencies) {
-  const graph = new StateGraph(MainGraphState)
+export function createMainGraph(dependencies: MainGraphDependencies, options: MainGraphOptions = {}) {
+  const builder = new StateGraph(MainGraphState)
     .addNode("route", async (_state, config) => {
       const request = config.configurable?.request as MainAgentRequest | undefined;
       if (!request) return failureUpdate(new Error("Main Graph 缺少请求配置。"));
@@ -156,12 +165,14 @@ export function createMainGraph(dependencies: MainGraphDependencies) {
       execute: "planned",
       stop: END
     })
-    .addEdge("planned", END)
-    .compile();
+    .addEdge("planned", END);
+  const graph = options.checkpointer
+    ? builder.compile({ checkpointer: options.checkpointer })
+    : builder.compile();
 
   return {
     graph,
-    async invoke(request: MainAgentRequest): Promise<MainGraphResult> {
+    async invoke(request: MainAgentRequest, invocation: MainGraphInvocationOptions = {}): Promise<MainGraphResult> {
       if (!request.goal.trim()) throw runtimeError("INVALID_CONTRACT", "Main Graph 用户目标不能为空。");
       const result = await graph.invoke({
         decision: null,
@@ -173,7 +184,14 @@ export function createMainGraph(dependencies: MainGraphDependencies) {
         changedFiles: [],
         blockers: [],
         history: []
-      }, { configurable: { request }, recursionLimit: 20 });
+      }, {
+        configurable: {
+          request,
+          ...(invocation.threadId ? { thread_id: invocation.threadId } : {}),
+          ...(invocation.checkpointNamespace !== undefined ? { checkpoint_ns: invocation.checkpointNamespace } : {})
+        },
+        recursionLimit: 20
+      });
       if (result.outcome === "routing" || result.outcome === "planning") {
         throw runtimeError("INVALID_CONTRACT", "Main Graph 未收敛到终态。", { outcome: result.outcome });
       }
