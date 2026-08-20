@@ -6,7 +6,52 @@ import path from "node:path";
 import { config } from "./config.js";
 import { requestChatCompletion, requestChatCompletionStream, requestModelCompletionWithMetrics } from "./modelGatewayClient.js";
 import { clearModelExecutionBudget, withModelExecution } from "./modelExecutionContext.js";
+import { ModelRateLimiter } from "./modelRateLimiter.js";
 import { clearTaskMetricsForTest, getTaskMetricsSnapshot } from "./observability/index.js";
+
+test("模型限流器在滑动窗口内最多放行指定次数并按 FIFO 释放等待请求", async () => {
+  let now = 0;
+  const waits: number[] = [];
+  const limiter = new ModelRateLimiter({
+    maxCalls: 2,
+    windowMs: 60_000,
+    now: () => now,
+    sleep: async (ms) => {
+      waits.push(ms);
+      now += ms;
+    }
+  });
+
+  await limiter.acquire();
+  await limiter.acquire();
+  await Promise.all([limiter.acquire(), limiter.acquire()]);
+
+  assert.deepEqual(waits, [60_000]);
+  assert.equal(now, 60_000);
+});
+
+test("模型限流等待支持取消且不会阻塞队列中的后续请求", async () => {
+  let now = 0;
+  const controller = new AbortController();
+  const limiter = new ModelRateLimiter({
+    maxCalls: 1,
+    windowMs: 60_000,
+    now: () => now,
+    sleep: async (_ms, signal) => {
+      controller.abort();
+      if (signal?.aborted) {
+        const error = new Error("cancelled");
+        error.name = "AbortError";
+        throw error;
+      }
+    }
+  });
+
+  await limiter.acquire();
+  await assert.rejects(() => limiter.acquire(controller.signal), { name: "AbortError" });
+  now = 60_000;
+  await limiter.acquire();
+});
 
 test("Agent 模型入口只重试 Provider 明确标记的瞬时错误", async () => {
   const originalFetch = globalThis.fetch;

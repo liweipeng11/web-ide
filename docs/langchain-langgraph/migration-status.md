@@ -1,9 +1,9 @@
 # LangChain / LangGraph 迁移状态
 
-- 当前阶段：阶段 9 进行中；Shadow 对照与脱敏指标已完成
-- 当前工作包：9A 已完成；下一工作包为 9B
-- 总体状态：in_progress（只读 Shadow 可量化观测已就绪；尚未启用百分比灰度）
-- 最后更新：2026-08-14
+- 当前阶段：阶段 9 进行中；全量观察门禁和自动化回退演练已就绪
+- 当前工作包：9D 进行中；控制面来源采集已就绪，等待新版本的 Legacy 基线和两个真实 `all` 发布周期
+- 总体状态：in_progress（自动化累计验收已通过；真实全量观察尚未完成，阶段 10 不准入）
+- 最后更新：2026-08-18
 
 | 工作包 | 状态 | 前置工作包 | 最近验证 | 备注 |
 |---|---|---|---|---|
@@ -43,9 +43,9 @@
 | 8C | completed | 8B | `agentStepAdapter.test.ts`；`taskSessionMainGraph.test.ts`；`agentOrchestrationService.test.ts`；`pnpm typecheck` | 稳定 Graph 事件实时桥接、TaskSession 步骤去重、审批前零执行及跨重启快照恢复 |
 | 8D | completed | 8C | `pnpm verify:langgraph-stage8` | direct/main_loop/planned、审批等待、SSE、刷新恢复、Legacy 共存及双端构建累计验收 |
 | 9A | completed | 8D | `shadowComparison.test.ts`；`runtimeSelector.test.ts`；`agentOrchestrationService.test.ts`；`pnpm --dir apps/server typecheck` | 固定维度差异、耗时分桶、JSONL 指标、观测失败隔离与 Legacy 返回语义均已验证 |
-| 9B | pending | 9A | 未运行 | 稳定分桶与只读灰度 |
-| 9C | pending | 9B | 未运行 | 写任务灰度与自动回退 |
-| 9D | pending | 9C | 未运行 | 全量观察、回退演练和报告 |
+| 9B | completed | 9A | `runtimeSelector.test.ts`；`agentOrchestrationService.test.ts`；`taskSessionStore.test.ts`；`pnpm --dir apps/server test:langgraph`；`pnpm --dir apps/server test:main-agent`；`pnpm --dir apps/server typecheck` | 支持 10/50/all 和 TaskSession ID 稳定分桶；请求一旦选中 Graph，执行器不可用或新路径失败均直接报错 |
+| 9C | completed | 9B | `writeRuntimeGate.test.ts`；`agentOrchestrationService.test.ts`；`taskSessionMainGraph.test.ts`；`pnpm --dir apps/server test:langgraph`；`pnpm --dir apps/server typecheck` | 写任务稳定分桶、无双写 shadow、进程内熔断；Graph 请求失败时禁止同请求降级 |
+| 9D | in_progress | 9C | `pnpm verify:langgraph-stage9`；观察决策与输入解析 9 项；来源标记与指标兼容 33 项；回退验收 2 项；双端类型检查与 Web 构建 | 已实现严格导入、控制面来源采集、硬安全回退和无迁移回退演练；旧指标不可用，仍需新版本 Legacy 基线、两个真实 `all` 周期及团队确认阈值 |
 | 10A | pending | 9D | 未运行 | Legacy 调用方审计 |
 | 10B | pending | 10A | 未运行 | 清理重复编排代码 |
 | 10C | pending | 10B | 未运行 | 测试、文档和运维收敛 |

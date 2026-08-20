@@ -90,6 +90,44 @@ test("Main Agent 将简单问题路由到 direct", async () => {
   assert.deepEqual(result.requiredCapabilities, []);
 });
 
+test("需要仓库证据的简单问题允许路由到 main_loop", async () => {
+  const main = new MainAgent(new FakeDecisionModel({
+    intent: "question",
+    complexity: "simple",
+    route: "main_loop",
+    requiredCapabilities: []
+  }));
+  const result = await main.route("这是个什么项目");
+
+  assert.equal(result.intent, "question");
+  assert.equal(result.complexity, "simple");
+  assert.equal(result.route, "main_loop");
+  assert.deepEqual(result.requiredCapabilities, ["read"]);
+});
+
+test("需要仓库证据时覆盖模型错误返回的 direct 路由", async () => {
+  const main = new MainAgent(new FakeDecisionModel({
+    intent: "question",
+    complexity: "simple",
+    route: "direct",
+    requiredCapabilities: []
+  }));
+  const result = await main.route("这是一个什么项目");
+
+  assert.equal(result.intent, "question");
+  assert.equal(result.complexity, "simple");
+  assert.equal(result.route, "main_loop");
+  assert.deepEqual(result.requiredCapabilities, ["read"]);
+});
+
+test("需要仓库证据时离线兜底仍进入 main_loop", async () => {
+  const main = new MainAgent(new FakeDecisionModel(new Error("offline")));
+  const result = await main.route("介绍一下当前仓库");
+
+  assert.equal(result.route, "main_loop");
+  assert.deepEqual(result.requiredCapabilities, ["read"]);
+});
+
 test("Main Agent 将小范围代码修改路由到 main_loop", async () => {
   const main = new MainAgent(new FakeDecisionModel(new Error("offline")));
   const result = await main.route("把 auth.ts 的 timeout 改成 30 秒");

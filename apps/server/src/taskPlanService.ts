@@ -318,6 +318,8 @@ export async function initializeTaskPlan(session: TaskSession, classification?: 
     const runtimePlanner = options.runtimePlanner ?? new MainAgentRuntime();
     const request = {
       goal: classification?.normalizedGoal || session.userGoal,
+      // TaskSession ID 在重试和服务重启后保持不变，确保只读 Graph 灰度路径稳定。
+      rolloutKey: session.id,
       knownFacts: workflowSession.filesRead.map((filePath) => `已读取文件：${filePath}`),
       constraints: classification?.reason ? [classification.reason] : [],
       acceptanceCriteria: [`完成并验证用户目标：${classification?.normalizedGoal || session.userGoal}`],

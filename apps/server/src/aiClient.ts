@@ -21,6 +21,7 @@ import type { AgentStep, AiEditResult, ChatContextFile, FileChatMessage, FilePat
 import { getWorkspaceRoot } from "./workspaceStore.js";
 import { agentToolSchemas, createAgentToolRuntime, executeAgentToolCall, type AgentContext, type AgentToolCall } from "./agentTools.js";
 import { createAgentStep } from "./routeAgentSteps.js";
+import { requiresRepositoryEvidence } from "./repositoryEvidence.js";
 import { getRelevantProjectMemoryPrompt } from "./projectMemory/index.js";
 import { getActiveModelId } from "./modelExecutionContext.js";
 
@@ -112,10 +113,11 @@ export function inferAgentRequestClassification(userRequest: string): AgentReque
   const hasEditIntent = hasExplicitEditRequest(userRequest);
   const hasCommandIntent = isCommandExecutionRequest(userRequest);
   const hasDiagnosticIntent = isDiagnosticRequest(userRequest);
+  const needsRepositoryEvidence = requiresRepositoryEvidence(userRequest);
   let intent: AgentIntent = "chat";
 
   if (hasReadOnlyConstraint) {
-    intent = hasDiagnosticIntent || hasEditIntent ? "inspect" : "chat";
+    intent = hasDiagnosticIntent || hasEditIntent || needsRepositoryEvidence ? "inspect" : "chat";
   } else if (hasEditIntent && hasDiagnosticIntent) {
     intent = "diagnose_then_edit";
   } else if (hasEditIntent) {
@@ -123,6 +125,8 @@ export function inferAgentRequestClassification(userRequest: string): AgentReque
   } else if (hasCommandIntent) {
     intent = "command";
   } else if (hasDiagnosticIntent) {
+    intent = "inspect";
+  } else if (needsRepositoryEvidence) {
     intent = "inspect";
   }
 
@@ -153,6 +157,14 @@ function protectExplicitEditIntent(userRequest: string, classification: AgentReq
   }
 
   if (!hasExplicitEditRequest(userRequest)) {
+    if (requiresRepositoryEvidence(userRequest) && (classification.intent === "chat" || classification.intent === "command")) {
+      return {
+        ...classification,
+        intent: "inspect",
+        confidence: Math.max(classification.confidence, 0.9),
+        reason: `${classification.reason || "Model route"}; repository evidence required`
+      };
+    }
     return classification;
   }
 
@@ -192,28 +204,34 @@ export async function classifyAgentRequest(history: FileChatMessage[], userReque
   const runId = createAiRunId("intent");
 
   try {
-    const data = await requestJsonChatCompletion({
-      model: getActiveModelId(config.aiModel),
-      temperature: 0,
-      messages: [
-        { role: "system", content: AI_AGENT_INTENT_SYSTEM_PROMPT },
-        ...history.slice(-6).map((message) => ({ role: message.role, content: message.content })),
-        { role: "user", content: userRequest }
-      ]
-    });
-    const rawContent = data.choices?.[0]?.message?.content;
-    const parsed = rawContent ? (JSON.parse(extractJsonContent(rawContent)) as { intent?: unknown; confidence?: unknown; normalizedGoal?: unknown; reason?: unknown }) : null;
-
-    if (isAgentIntent(parsed?.intent)) {
-      const classification = protectExplicitEditIntent(userRequest, {
-        intent: parsed.intent,
-        confidence: normalizeConfidence(parsed.confidence, inferred.confidence),
-        normalizedGoal: typeof parsed.normalizedGoal === "string" && parsed.normalizedGoal.trim() ? parsed.normalizedGoal.trim() : inferred.normalizedGoal,
-        reason: typeof parsed.reason === "string" ? parsed.reason : ""
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const repairInstruction = attempt === 0
+        ? ""
+        : "\n\nYour previous response violated the classification schema. Return an object with an intent field; do not return name, tool_calls, or a command invocation.";
+      const data = await requestJsonChatCompletion({
+        model: getActiveModelId(config.aiModel),
+        temperature: 0,
+        messages: [
+          { role: "system", content: `${AI_AGENT_INTENT_SYSTEM_PROMPT}${repairInstruction}` },
+          ...history.slice(-6).map((message) => ({ role: message.role, content: message.content })),
+          { role: "user", content: userRequest }
+        ]
       });
+      const rawContent = data.choices?.[0]?.message?.content;
+      const parsed = rawContent ? (JSON.parse(extractJsonContent(rawContent)) as { intent?: unknown; confidence?: unknown; normalizedGoal?: unknown; reason?: unknown }) : null;
 
-      logAi(runId, "done", classification);
-      return classification;
+      if (isAgentIntent(parsed?.intent)) {
+        const classification = protectExplicitEditIntent(userRequest, {
+          intent: parsed.intent,
+          confidence: normalizeConfidence(parsed.confidence, inferred.confidence),
+          normalizedGoal: typeof parsed.normalizedGoal === "string" && parsed.normalizedGoal.trim() ? parsed.normalizedGoal.trim() : inferred.normalizedGoal,
+          reason: typeof parsed.reason === "string" ? parsed.reason : ""
+        });
+
+        logAi(runId, "done", classification);
+        return classification;
+      }
+      logAi(runId, "invalid_contract", { attempt: attempt + 1 });
     }
   } catch (error) {
     logAi(runId, "fallback", { error: error instanceof Error ? error.message : String(error) });

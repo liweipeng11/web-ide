@@ -3,7 +3,7 @@ import path from "node:path";
 import { resolveAgentBudgetPolicy } from "./agentBudgetPolicy.js";
 import { readCompletionPolicyRollout, readExplicitCompletionRollout, readFeatureFlags, readProgressiveDeliveryRollout } from "./featureFlags.js";
 import { readProjectMemoryFeatureFlags } from "./projectMemory/projectMemoryFeatureFlags.js";
-import { readReadOnlyRuntimeRollout } from "./langgraph/rollout/featureFlags.js";
+import { readReadOnlyRuntimeRollout, readWriteRuntimeRollout } from "./langgraph/rollout/featureFlags.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), "../../.env") });
 dotenv.config();
@@ -168,6 +168,7 @@ export const config = {
   aiApiKey: process.env.AI_API_KEY || "",
   aiBaseUrl: process.env.AI_BASE_URL || "https://api.openai.com/v1",
   aiModel: process.env.AI_MODEL || "gpt-4.1-mini",
+  aiModelMaxCallsPerMinute: positiveIntegerFromEnv("AI_MODEL_MAX_CALLS_PER_MINUTE", 9, process.env),
   aiModels: modelListFromEnv(),
   aiModelCatalog: modelCatalogFromEnv(),
   aiInputPricePerMillionTokens: optionalNumberFromEnv("AI_INPUT_PRICE_PER_MILLION_TOKENS"),
@@ -210,5 +211,6 @@ export const config = {
   completionPolicyRollout: readCompletionPolicyRollout(),
   progressiveDeliveryRollout: readProgressiveDeliveryRollout(),
   readOnlyRuntimeRollout: readReadOnlyRuntimeRollout(),
+  writeRuntimeRollout: readWriteRuntimeRollout(),
   projectMemoryFeatureFlags: readProjectMemoryFeatureFlags()
 };

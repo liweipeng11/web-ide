@@ -5,6 +5,7 @@ import type { ModelPrice, ModelUsage } from "../contracts/model.js";
 import type { CompletionRejectionCode } from "../types.js";
 import type { DeliveryUnit, ToolFailureDiagnostic } from "../types.js";
 import type { SubagentKind, SubagentArtifactsKind } from "../agentToolTypes.js";
+import { getRuntimeObservationContext, type RuntimeControlPlane, type RuntimeRolloutMode } from "../langgraph/rollout/runtimeObservationContext.js";
 
 export const COMPLETION_RESOURCE_LIMITS = {
   maxInputTokensPerChangedFile: 100_000,
@@ -169,6 +170,9 @@ export type RunMetrics = {
   provider: string;
   model: string;
   mode: string;
+  /** 旧指标缺少来源时由读取层补为 unknown，不能用于阶段 9 发布周期证明。 */
+  runtimeControlPlane?: RuntimeControlPlane;
+  runtimeRolloutMode?: RuntimeRolloutMode;
   startedAt: string;
   finishedAt: string;
   durationMs: number;
@@ -315,9 +319,10 @@ export class RunMetricsTracker {
   };
   private progressiveDelivery = createEmptyProgressiveDeliveryMetrics();
   private subagentMetrics = createEmptySubagentMetrics();
+  private readonly runtimeObservation = getRuntimeObservationContext();
 
   constructor(
-    private readonly identity: Pick<RunMetrics, "runId" | "taskSessionId" | "provider" | "model" | "mode"> & Partial<Pick<RunMetrics, "scope">>,
+    private readonly identity: Pick<RunMetrics, "runId" | "taskSessionId" | "provider" | "model" | "mode"> & Partial<Pick<RunMetrics, "scope" | "runtimeControlPlane" | "runtimeRolloutMode">>,
     private readonly recorder: RunMetricsRecorder = appendRunMetrics,
     private readonly aggregateTaskMetrics = true
   ) {}
@@ -604,6 +609,8 @@ export class RunMetricsTracker {
       schemaVersion: 1,
       ...this.identity,
       scope: this.identity.scope ?? "model_run",
+      runtimeControlPlane: this.identity.runtimeControlPlane ?? this.runtimeObservation.controlPlane,
+      runtimeRolloutMode: this.identity.runtimeRolloutMode ?? this.runtimeObservation.rolloutMode,
       startedAt: new Date(this.startedAt).toISOString(),
       finishedAt: new Date(finishedAt).toISOString(),
       durationMs: finishedAt - this.startedAt,

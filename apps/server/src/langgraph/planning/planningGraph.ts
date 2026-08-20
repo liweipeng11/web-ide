@@ -152,65 +152,79 @@ export async function runPlanningGraph(
         planning: { status: "ready" as const, plan },
         processedExplorerResults: state.explorerResults.length,
         facts: explorationFacts(batch),
-        latestFailureTaskId: batch.find((execution) => execution.result.status !== "success")?.result.taskId ?? null
+        latestEvaluationTaskIds: batch.map((execution) => execution.result.taskId)
       };
     })
     .addNode("retry_or_replan", async (state) => {
       if (!state.plan) throw new Error("重规划节点缺少计划。");
-      const failed = state.latestFailureTaskId
-        ? [...state.explorerResults].reverse().find((execution) => execution.result.taskId === state.latestFailureTaskId)
-        : undefined;
-      if (!failed) return {};
-      const taskId = failed.result.taskId;
-      const failures = (state.failureCounts[taskId] ?? 0) + 1;
-      if (failed.result.status === "failed" && failures < SAME_TASK_FAILURE_REPLAN_THRESHOLD) {
+      const batch = state.latestEvaluationTaskIds
+        .map((taskId) => [...state.explorerResults].reverse().find((execution) => execution.result.taskId === taskId))
+        .filter((execution): execution is ExplorerExecution => Boolean(execution));
+      if (!batch.length) return {};
+
+      let plan = state.plan;
+      const failureCounts: Record<string, number> = {};
+      for (const execution of batch) {
+        const taskId = execution.result.taskId;
+        const failures = execution.result.status === "failed"
+          ? (state.failureCounts[taskId] ?? 0) + 1
+          : state.failureCounts[taskId] ?? 0;
+        if (execution.result.status === "failed" && failures < SAME_TASK_FAILURE_REPLAN_THRESHOLD) {
+          failureCounts[taskId] = failures;
+          plan = {
+            ...plan,
+            tasks: plan.tasks.map((task) => task.id === taskId ? { ...task, status: "pending" as const } : task)
+          };
+          continue;
+        }
+
+        const decision = await runtime.shouldReplan({ plan, result: execution.result, sameTaskFailures: failures });
+        if (!decision.shouldReplan) {
+          if (execution.result.status === "success") continue;
+          return {
+            failureCounts: { ...failureCounts, [taskId]: failures },
+            planning: {
+              status: "failed" as const,
+              reason: "model_error" as const,
+              blockers: execution.result.blockers.length ? execution.result.blockers : [`Explorer 任务 ${taskId} 未能完成。`]
+            },
+            status: "blocked" as const
+          };
+        }
+        if (state.replanCount >= maxReplans) {
+          return {
+            planning: {
+              status: "failed" as const,
+              reason: "invalid_plan" as const,
+              blockers: [`重规划次数已达到上限 ${maxReplans}。`]
+            },
+            status: "blocked" as const
+          };
+        }
+        const planning = await runtime.replan({
+          oldPlan: plan,
+          completedTasks: plan.tasks.filter((task) => task.status === "completed").map((task) => task.id),
+          newFacts: state.facts,
+          constraints: request.constraints,
+          readScope,
+          writeScope,
+          signal: request.signal
+        });
+        if (planning.status === "ready") validatePlan(planning.plan);
         return {
-          failureCounts: { [taskId]: failures },
-          plan: {
-            ...state.plan,
-            tasks: state.plan.tasks.map((task) => task.id === taskId ? { ...task, status: "pending" as const } : task)
-          }
+          failureCounts: { ...failureCounts, [taskId]: failures },
+          planning,
+          ...(planning.status === "ready" ? { plan: planning.plan } : {}),
+          replans: [{ taskId, reason: decision.reason, status: planning.status }],
+          replanCount: state.replanCount + 1,
+          status: planning.status === "ready" ? "planning" as const : "blocked" as const
         };
       }
-      const decision = await runtime.shouldReplan({ plan: state.plan, result: failed.result, sameTaskFailures: failures });
-      if (!decision.shouldReplan) {
-        return {
-          failureCounts: { [taskId]: failures },
-          planning: {
-            status: "failed" as const,
-            reason: "model_error" as const,
-            blockers: failed.result.blockers.length ? failed.result.blockers : [`Explorer 任务 ${taskId} 未能完成。`]
-          },
-          status: "blocked" as const
-        };
-      }
-      if (state.replanCount >= maxReplans) {
-        return {
-          planning: {
-            status: "failed" as const,
-            reason: "invalid_plan" as const,
-            blockers: [`重规划次数已达到上限 ${maxReplans}。`]
-          },
-          status: "blocked" as const
-        };
-      }
-      const planning = await runtime.replan({
-        oldPlan: state.plan,
-        completedTasks: state.plan.tasks.filter((task) => task.status === "completed").map((task) => task.id),
-        newFacts: state.facts,
-        constraints: request.constraints,
-        readScope,
-        writeScope,
-        signal: request.signal
-      });
-      if (planning.status === "ready") validatePlan(planning.plan);
+
       return {
-        failureCounts: { [taskId]: failures },
-        planning,
-        ...(planning.status === "ready" ? { plan: planning.plan } : {}),
-        replans: [{ taskId, reason: decision.reason, status: planning.status }],
-        replanCount: state.replanCount + 1,
-        status: planning.status === "ready" ? "planning" as const : "blocked" as const
+        failureCounts,
+        plan,
+        planning: { status: "ready" as const, plan }
       };
     })
     .addNode("replan_after_context", async (state) => {
@@ -272,7 +286,7 @@ export async function runPlanningGraph(
     failureCounts: {},
     contextRequirements: [],
     explorationSource: "planner_ready_task",
-    latestFailureTaskId: null
+    latestEvaluationTaskIds: []
   }, { recursionLimit: 100 });
 
   return {

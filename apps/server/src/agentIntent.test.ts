@@ -12,6 +12,14 @@ test("routes warning plus repair requests to diagnose_then_edit in local fallbac
   assert.equal(shouldGeneratePatchForIntent(classification.intent), true);
 });
 
+test("项目识别类问题在本地兜底中进入只读检查而不是 chat", () => {
+  for (const goal of ["这是一个什么项目", "介绍一下当前仓库", "what kind of project is this"]) {
+    const classification = inferAgentRequestClassification(goal);
+    assert.equal(classification.intent, "inspect");
+    assert.equal(shouldGeneratePatchForIntent(classification.intent), false);
+  }
+});
+
 test("显式只读约束覆盖同一句中的修复和命令关键词", () => {
   const chinese = inferAgentRequestClassification("只分析构建错误如何修复，不要修改或运行命令");
   const english = inferAgentRequestClassification("analysis only: explain how to fix this error, do not edit");

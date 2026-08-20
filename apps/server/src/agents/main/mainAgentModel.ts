@@ -40,7 +40,22 @@ export class ProviderMainAgentDecisionModel implements MainAgentDecisionModel {
   }
 
   nextAction(input: string, signal?: AbortSignal) {
-    return this.complete(MAIN_ACTION_SYSTEM_PROMPT, input, signal);
+    return this.completeMainAction(input, signal);
+  }
+
+  private async completeMainAction(input: string, signal?: AbortSignal) {
+    const first = await this.complete(MAIN_ACTION_SYSTEM_PROMPT, input, signal);
+    if (hasActionType(first)) return first;
+
+    const repaired = await this.complete(
+      `${MAIN_ACTION_SYSTEM_PROMPT}\n\n上一次响应缺少 type 字段。请严格返回上述某一种 NextAction；工具调用必须使用 {"type":"tool","tool":"工具名","args":{}}，不要返回 name/tool_calls 包装。`,
+      input,
+      signal
+    );
+    if (!hasActionType(repaired)) {
+      throw new Error("Main Agent 响应协议错误：模型未返回包含 type 字段的完整 NextAction，已自动重试 1 次。");
+    }
+    return repaired;
   }
 
   summarize(input: string, signal?: AbortSignal) {
@@ -50,4 +65,9 @@ export class ProviderMainAgentDecisionModel implements MainAgentDecisionModel {
   shouldReplan(input: string, signal?: AbortSignal) {
     return this.complete(MAIN_REPLAN_SYSTEM_PROMPT, input, signal);
   }
+}
+
+function hasActionType(value: unknown) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && typeof (value as { type?: unknown }).type === "string");
 }

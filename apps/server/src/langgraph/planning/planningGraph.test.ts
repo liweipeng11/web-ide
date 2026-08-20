@@ -149,6 +149,26 @@ test("Explorer 使用 Send 并行执行且 fan-in 不覆盖同批结果", async 
   );
 });
 
+test("成功的 Explorer 结果推翻关键假设时也会触发重规划", async () => {
+  const initialPlan = { ...planWithExplorers(["E1"]), assumptions: ["使用 JWT"] };
+  const nextPlan = { ...planWithExplorers([]), version: 2, assumptions: [] };
+  let replanCalls = 0;
+  const result = await runPlanningGraph({ goal: "分析项目", readScope: ["src/**"] }, runtime({
+    createPlan: async () => ({ status: "ready", plan: initialPlan }),
+    shouldReplan: async () => ({ shouldReplan: true, reason: "新事实推翻 JWT 假设", source: "semantic" }),
+    replan: async () => {
+      replanCalls += 1;
+      return { status: "ready", plan: nextPlan };
+    }
+  }), { maxConcurrency: 1, maxReplans: 1 });
+
+  assert.equal(replanCalls, 1);
+  assert.equal(result.replans?.length, 1);
+  assert.equal(result.planning?.status, "ready");
+  if (result.planning?.status !== "ready") return;
+  assert.equal(result.planning.plan.version, 2);
+});
+
 test("Explorer 连续失败后执行有界重规划并返回新版计划", async () => {
   const initialPlan = planWithExplorers(["E1"]);
   const nextPlan = planWithExplorers([]);

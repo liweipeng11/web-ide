@@ -1521,6 +1521,7 @@ test("阶段 2 初始化和重写计划会同步交付单元并保留已完成�
 test("生产计划入口优先使用带 Explorer 的规划协调能力", async () => {
   const { workspaceRoot, session } = await createIsolatedTaskSession("探索后规划认证系统");
   let explorationPlanningCalls = 0;
+  let rolloutKey: string | undefined;
   const previousAiApiKey = config.aiApiKey;
   config.aiApiKey = "";
   try {
@@ -1535,8 +1536,9 @@ test("生产计划入口优先使用带 Explorer 的规划协调能力", async (
         async plan() {
           throw new Error("存在 planWithExploration 时不应调用普通 plan");
         },
-        async planWithExploration() {
+        async planWithExploration(request) {
           explorationPlanningCalls += 1;
+          rolloutKey = request.rolloutKey;
           return {
             decision: { intent: "code_change", complexity: "complex", route: "planned", requiredCapabilities: ["planning"] } as const,
             explorations: [{
@@ -1583,6 +1585,7 @@ test("生产计划入口优先使用带 Explorer 的规划协调能力", async (
     });
 
     assert.equal(explorationPlanningCalls, 1);
+    assert.equal(rolloutKey, session.id);
     assert.equal(planned?.plannerOutcome?.status, "ready");
     assert.equal(planned?.runtimePlan?.tasks[0]?.type, "explore");
     const restored = await getTaskSession(session.id);

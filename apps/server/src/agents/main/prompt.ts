@@ -9,6 +9,7 @@ Allowed route values: direct, main_loop, planned.
 
 Routing rules:
 - Simple questions that need no repository evidence use direct.
+- Questions about the current project, repository, codebase identity, structure, purpose, features, or tech stack require repository evidence and must use main_loop, even when simple.
 - Scoped analysis, debugging, or small code changes use main_loop.
 - Broad migrations, architecture changes, or multi-module refactors use planned.
 - Explicit read-only instructions must never request editing capability.

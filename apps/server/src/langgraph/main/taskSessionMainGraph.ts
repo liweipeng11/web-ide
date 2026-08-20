@@ -67,19 +67,26 @@ export async function runApprovedTaskSessionMainGraph<T extends object>(input: {
   });
   let executionPromise: Promise<T> | null = null;
   let completedValue: T | null = null;
+  let executionError: unknown;
   const executeOnce = async () => {
     await emitter.emit({ type: "node", node: decision.route, phase: "started" });
-    executionPromise ??= input.execute();
-    completedValue = await executionPromise;
-    const described = input.describe(completedValue);
-    await emitter.emit({
-      type: "node",
-      node: decision.route,
-      phase: "completed",
-      status: described.outcome === "completed" ? "success" : described.outcome === "failed" ? "failed" : "blocked",
-      summary: described.summary
-    });
-    return described;
+    try {
+      executionPromise ??= input.execute();
+      completedValue = await executionPromise;
+      const described = input.describe(completedValue);
+      await emitter.emit({
+        type: "node",
+        node: decision.route,
+        phase: "completed",
+        status: described.outcome === "completed" ? "success" : described.outcome === "failed" ? "failed" : "blocked",
+        summary: described.summary
+      });
+      return described;
+    } catch (error) {
+      // Main Graph 会把节点异常收敛为 failed state；入口仍需保留原错误供写路径安全门禁判断。
+      executionError = error;
+      throw error;
+    }
   };
 
   const runtime = createMainGraph({
@@ -113,6 +120,7 @@ export async function runApprovedTaskSessionMainGraph<T extends object>(input: {
   };
   const graph = await runtime.invoke(request, mainGraphInvocation(input.session));
   await emitter.emit({ type: "final", summary: graph.summary || "Main Graph 执行结束。" });
+  if (executionError) throw executionError;
   if (!completedValue) {
     throw runtimeError("INVALID_CONTRACT", "Main Graph 未执行已批准的任务流水线。", {
       outcome: graph.outcome,

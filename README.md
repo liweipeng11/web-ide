@@ -654,11 +654,12 @@ pnpm --filter @mini-ai-web-editor/server test
 - The server does not write the `Authorization` header, but it does keep the complete model input and output body.
 # LangChain / LangGraph 智能体运行时
 
-服务端已提供 LangChain Provider Gateway/Tool 适配器、只读 Agent，以及 Planner / Explorer LangGraph 子图。规划图负责缺上下文探索、受限并行证据合并和有界重规划；现有权限、任务状态、Patch、Safe Editor、Checkpoint 和完成策略继续作为唯一业务边界。迁移期间生产默认保持 Legacy，可通过只读灰度模式进行 shadow 或 internal 验证。
+服务端已提供 LangChain Provider Gateway/Tool 适配器、Main Graph、Planner / Explorer 规划子图和已批准写任务子图。Graph 负责 direct、main_loop、planned、审批和恢复的控制流；现有权限、任务状态、Patch、Safe Editor、Checkpoint 和完成策略继续作为唯一业务边界。任何模式一旦为本次请求选中 LangGraph，Graph 不可用或执行失败都会直接报错，不会在同一请求中隐式回退 Legacy。
 
 ```env
-AGENT_LANGGRAPH_RUNTIME_ENABLED=false
-AGENT_LANGGRAPH_READ_ONLY_MODE=off
+AGENT_LANGGRAPH_RUNTIME_ENABLED=true
+AGENT_LANGGRAPH_READ_ONLY_MODE=all
+AGENT_LANGGRAPH_WRITE_MODE=all
 ```
 
-仅在受控验证环境开启批准后兼容图，或将只读模式设为 `shadow` / `internal`。恢复上述默认值即可回退，不需要迁移任务数据。实现边界和验证命令见 `docs/langchain-langgraph/current-implementation.md`。
+上述配置用于全量 Graph 控制面。如需显式紧急回退，将三项分别设为 `false` / `off` / `off` 并重启服务，不需要迁移任务数据。实现边界和验证命令见 `docs/langchain-langgraph/current-implementation.md`。

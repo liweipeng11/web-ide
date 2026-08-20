@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "baseline": {
+    "cycleId": "replace-with-legacy-cycle-id",
+    "mode": "legacy",
+    "startedAt": "2026-01-01T00:00:00.000Z",
+    "endedAt": "2026-01-02T00:00:00.000Z",
+    "metrics": {
+      "taskCount": 0,
+      "successRate": 0,
+      "errorTerminalRate": 0,
+      "unauthorizedWriteCount": 0,
+      "scopeViolationCount": 0,
+      "duplicateSideEffectCount": 0,
+      "stateCorruptionCount": 0,
+      "incorrectCompletionCount": 0,
+      "restartRecoveryFailureCount": 0,
+      "patchApprovalRate": 0,
+      "patchApplySuccessRate": 0,
+      "rollbackRate": 0,
+      "validationSuccessRate": 0,
+      "averageSteps": 0,
+      "p95Steps": 0,
+      "averageDurationMs": 0,
+      "p95DurationMs": 0,
+      "averageTokens": 0,
+      "p95Tokens": 0,
+      "toolRecoveryRate": 0,
+      "duplicateToolCallRate": 0,
+      "replanExhaustionRate": 0,
+      "approvalRecoveryRate": 0
+    }
+  },
+  "cycles": [],
+  "thresholds": {
+    "minimumTasksPerCycle": 50,
+    "maximumSuccessRateDrop": 0.03,
+    "maximumErrorTerminalRate": 0.05,
+    "maximumP95DurationRatio": 1.25,
+    "maximumP95TokenRatio": 1.2
+  }
+}

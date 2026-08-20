@@ -22,6 +22,7 @@ import {
   type ReplanPolicyInput
 } from "./replanPolicy.js";
 import { recoverableToolObservation } from "../toolRecovery.js";
+import { requiresRepositoryEvidence } from "../../repositoryEvidence.js";
 
 export const MAX_MAIN_AGENT_STEPS = 30;
 
@@ -69,7 +70,9 @@ function fallbackRoute(userRequest: string): RouteDecision {
   const complexity: MainComplexity = COMPLEX_PATTERN.test(userRequest)
     ? "complex"
     : intent === "question" ? "simple" : "medium";
-  const route: MainRoute = complexity === "simple" ? "direct" : complexity === "complex" ? "planned" : "main_loop";
+  const route: MainRoute = requiresRepositoryEvidence(userRequest)
+    ? "main_loop"
+    : complexity === "simple" ? "direct" : complexity === "complex" ? "planned" : "main_loop";
   return { intent, complexity, route, requiredCapabilities: deriveCapabilities(intent, route) };
 }
 
@@ -84,14 +87,21 @@ function parseRouteDecision(value: unknown, userRequest: string): RouteDecision 
     intent = DEBUG_PATTERN.test(userRequest) ? "debug" : "analysis";
   }
   const complexity = value.complexity as MainComplexity;
-  const expectedRoute: MainRoute = complexity === "simple" ? "direct" : complexity === "complex" ? "planned" : "main_loop";
-  if (value.route !== expectedRoute) {
+  let route = value.route as MainRoute;
+  if (route === "direct" && requiresRepositoryEvidence(userRequest)) {
+    route = "main_loop";
+  }
+  // simple 只表示任务规模小，不代表无需仓库证据；需要读取项目的简单问题也必须允许进入 main_loop。
+  const invalidRoute = (route === "direct" && complexity !== "simple")
+    || (route === "planned" && complexity !== "complex")
+    || (route === "main_loop" && complexity === "complex");
+  if (invalidRoute) {
     throw runtimeError("INVALID_CONTRACT", "RouteDecision 的复杂度与路由不一致。", {
       complexity,
-      route: value.route
+      route
     });
   }
-  return { intent, complexity, route: expectedRoute, requiredCapabilities: deriveCapabilities(intent, expectedRoute) };
+  return { intent, complexity, route, requiredCapabilities: deriveCapabilities(intent, route) };
 }
 
 function getTaskRouteDecision(task: AgentTaskPacket) {

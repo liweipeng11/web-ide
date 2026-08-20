@@ -38,6 +38,26 @@ test("uses analysis-only workflow for inspect tasks even when goal mentions refa
   assert.equal(result.type, "analysis-only");
 });
 
+test("只读检查与普通问答不会伪称用户显式限制", () => {
+  const inspect = classifyTaskWorkflow("这是一个什么项目", {
+    intent: "inspect",
+    confidence: 0.9,
+    normalizedGoal: "这是一个什么项目",
+    reason: "repository evidence required"
+  });
+  const chat = classifyTaskWorkflow("你好", {
+    intent: "chat",
+    confidence: 0.8,
+    normalizedGoal: "你好",
+    reason: "conversation"
+  });
+
+  assert.match(inspect.reason, /只读检查工作区证据/);
+  assert.match(chat.reason, /非编辑型问答/);
+  assert.doesNotMatch(inspect.reason, /明确限制/);
+  assert.doesNotMatch(chat.reason, /明确限制/);
+});
+
 test("显式只读约束优先于修复、重构和命令关键词", () => {
   for (const goal of [
     "只分析这个报错如何修复，不要修改代码",

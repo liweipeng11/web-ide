@@ -43,6 +43,8 @@ export type MainAgentRequest = {
   allowedTools?: string[];
   /** 仅供受控灰度标记，普通请求不能自行借此扩大任何工具权限。 */
   internalTask?: boolean;
+  /** 只用于稳定灰度分桶，生产入口应传 TaskSession ID，不能传每次变化的请求 ID。 */
+  rolloutKey?: string;
   signal?: AbortSignal;
 };
 
@@ -512,7 +514,7 @@ export class MainAgentRuntime {
 
   /**
    * Planner / Explorer 的新控制流由 LangGraph 表达；off/shadow/internal 的选择继续复用统一灰度器。
-   * shadow 只对比结构化结果并返回 Legacy，Graph 失败也不会改变用户可见结果。
+   * shadow 只对比结构化结果并返回 Legacy；一旦新路径被选为结果来源，失败不会降级。
    */
   async planWithExploration(request: MainAgentRequest): Promise<MainAgentExplorationPlanningResult> {
     const graph = () => runPlanningGraph(request, {
@@ -528,6 +530,7 @@ export class MainAgentRuntime {
     return executeReadOnlyRuntimeRollout({
       mode: this.planningGraphMode,
       internalTask: request.internalTask,
+      taskKey: request.rolloutKey,
       legacy: () => this.planWithExplorationLegacy(request),
       next: graph,
       equivalent: planningResultsEquivalent,

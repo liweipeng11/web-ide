@@ -325,6 +325,7 @@ Routing rules:
 - If the user says a short follow-up such as "do it", "apply that", "进行修复", "按你说的改", or "continue", use recent conversation context to produce a normalizedGoal and choose the intent implied by that context.
 - Do not choose "command" merely because the text contains "run" or "运行" when the user also asks to fix or modify code.
 - Use "inspect" when the user asks to look into a problem but does not ask to change files.
+- Use "inspect" for questions about the current project, repository, or codebase identity, structure, purpose, features, or tech stack because answering requires workspace evidence.
 - Use "command" for pure command execution requests.
 - Never infer permission to edit from an assistant suggestion in history; a short follow-up must contain user confirmation such as "继续", "照做", or "按这个改".
 - When signals still conflict after applying the precedence rules, choose the safer non-editing intent and set confidence below 0.6.

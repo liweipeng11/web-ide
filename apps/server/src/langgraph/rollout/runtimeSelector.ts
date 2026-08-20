@@ -1,4 +1,6 @@
 import type { ReadOnlyRuntimeMode } from "./featureFlags.js";
+import { getStableRolloutBucket } from "../../featureFlags.js";
+import { runtimeError } from "../../runtime/errors.js";
 import {
   compareShadowResults,
   shadowDurationBucket,
@@ -27,26 +29,46 @@ export type ReadOnlyRuntimeObservation = {
 export function selectReadOnlyRuntime(input: {
   mode: ReadOnlyRuntimeMode;
   internalTask?: boolean;
+  taskKey?: string;
   nextAvailable: boolean;
 }): ReadOnlyRuntimeSelection {
-  if (!input.nextAvailable || input.mode === "off") {
+  if (input.mode === "off") {
     return { runLegacy: true, runNext: false, useNextResult: false };
   }
   if (input.mode === "shadow") {
+    if (!input.nextAvailable) {
+      throw runtimeError("INVALID_CONTRACT", "只读运行模式为 shadow，但当前请求没有可用的 LangGraph 执行器。");
+    }
     return { runLegacy: true, runNext: true, useNextResult: false };
   }
-  return input.internalTask
-    ? { runLegacy: false, runNext: true, useNextResult: true }
-    : { runLegacy: true, runNext: false, useNextResult: false };
+  if (input.mode === "internal") {
+    if (!input.internalTask) return { runLegacy: true, runNext: false, useNextResult: false };
+    if (!input.nextAvailable) {
+      throw runtimeError("INVALID_CONTRACT", "内部任务已选择 LangGraph，但当前请求没有可用的 LangGraph 执行器。");
+    }
+    return { runLegacy: false, runNext: true, useNextResult: true };
+  }
+
+  // 百分比灰度必须绑定稳定任务键；未命中灰度属于明确选择 Legacy，并非运行中降级。
+  const taskKey = input.taskKey?.trim();
+  const threshold = input.mode === "10" ? 10 : input.mode === "50" ? 50 : input.mode === "all" ? 100 : 0;
+  const selected = input.mode === "all" || Boolean(taskKey && getStableRolloutBucket(taskKey) < threshold);
+  if (!selected) return { runLegacy: true, runNext: false, useNextResult: false };
+  if (!input.nextAvailable) {
+    throw runtimeError("INVALID_CONTRACT", "当前请求已选择 LangGraph，但没有可用的 LangGraph 执行器。");
+  }
+  return { runLegacy: false, runNext: true, useNextResult: true };
 }
 
 /**
  * 隔离执行只读新旧路径。观测只包含固定枚举和布尔值，不接收答案、Prompt、源码或工具输出。
- * internal 新路径失败时自动执行 Legacy，保证内部验证不会把失败扩散到用户结果。
+ * 一旦选择新路径，Graph 失败会原样抛出，禁止同一请求静默切换到 Legacy。
  */
 export async function executeReadOnlyRuntimeRollout<T>(input: {
   mode: ReadOnlyRuntimeMode;
   internalTask?: boolean;
+  /** TaskSession ID 等稳定标识；百分比灰度不得使用每次请求变化的随机值。 */
+  taskKey?: string;
   legacy: () => Promise<T>;
   next?: () => Promise<T>;
   equivalent?: (legacy: T, next: T) => boolean;
@@ -56,6 +78,7 @@ export async function executeReadOnlyRuntimeRollout<T>(input: {
   const selection = selectReadOnlyRuntime({
     mode: input.mode,
     internalTask: input.internalTask,
+    taskKey: input.taskKey,
     nextAvailable: Boolean(input.next)
   });
 
@@ -66,10 +89,9 @@ export async function executeReadOnlyRuntimeRollout<T>(input: {
       const nextValue = await input.next();
       await safeObserve(input.observe, { mode: input.mode, selected: "next", legacyStatus: "not_run", nextStatus: "completed" });
       return nextValue;
-    } catch {
-      const legacyValue = await input.legacy();
-      await safeObserve(input.observe, { mode: input.mode, selected: "legacy", legacyStatus: "completed", nextStatus: "failed" });
-      return legacyValue;
+    } catch (error) {
+      await safeObserve(input.observe, { mode: input.mode, selected: "next", legacyStatus: "not_run", nextStatus: "failed" });
+      throw error;
     }
   }
 

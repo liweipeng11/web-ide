@@ -38,6 +38,8 @@ function snapshotPath(key: string) {
 }
 
 function normalizeMetricFields(metrics: RunMetrics) {
+  metrics.runtimeControlPlane ??= "unknown";
+  metrics.runtimeRolloutMode ??= "unknown";
   // 阶段 1 之前的持久化快照没有诊断字段，读取时补零以保持向后兼容。
   metrics.tools.cacheHits ??= 0;
   metrics.tools.emptyResults ??= 0;

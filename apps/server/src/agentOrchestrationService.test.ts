@@ -7,6 +7,8 @@ import type { MainOrchestrationResult, OrchestrationExecution } from "./agents/m
 import { executeApprovedAgentPipeline, executeDirectMainRequest } from "./agentOrchestrationService.js";
 import { config } from "./config.js";
 import type { ReadOnlyRuntimeObservation } from "./langgraph/rollout/runtimeSelector.js";
+import { InMemoryWriteRuntimeGate } from "./langgraph/rollout/writeRuntimeGate.js";
+import { getRuntimeObservationContext } from "./langgraph/rollout/runtimeObservationContext.js";
 import type { AgentState, Plan, RouteDecision } from "./runtime/contracts.js";
 import {
   approveTaskSessionPlan,
@@ -416,14 +418,15 @@ test("只读 shadow 同时执行新路径但仍向用户返回 Legacy 结果", a
       }
     });
     const observations: unknown[] = [];
+    const controlPlanes: string[] = [];
     const result = await executeDirectMainRequest(created, { goal: created.userGoal }, {
       runtime: {
         async plan() { return { decision: routeDecision, planning: null }; },
-        async executeDecision() { return execution("Legacy 回答"); }
+        async executeDecision() { controlPlanes.push(getRuntimeObservationContext().controlPlane); return execution("Legacy 回答"); }
       },
       readOnlyRollout: {
         mode: "shadow",
-        async execute() { return execution("新只读回答"); },
+        async execute() { controlPlanes.push(getRuntimeObservationContext().controlPlane); return execution("新只读回答"); },
         observe(value) { observations.push(value); }
       }
     });
@@ -437,6 +440,7 @@ test("只读 shadow 同时执行新路径但仍向用户返回 Legacy 结果", a
     });
     assert.equal((observations[0] as ReadOnlyRuntimeObservation).selected, "legacy");
     assert.equal(JSON.stringify(observations).includes("回答"), false);
+    assert.deepEqual(controlPlanes.sort(), ["langgraph", "legacy"]);
   });
 });
 
@@ -469,10 +473,46 @@ test("internal 只在调用方明确标记内部任务时采用只读新结果",
   });
 });
 
-test("非 direct 请求由生产服务入口交还现有链路", async () => {
+test("全量只读灰度采用新结果并向执行器传递稳定 TaskSession 键", async () => {
+  await withWorkspace(async () => {
+    const created = await createTaskSession("解释登录函数", { agentMode: "act" });
+    const routeDecision: RouteDecision = { intent: "question", complexity: "simple", route: "direct", requiredCapabilities: [] };
+    const execution = (summary: string) => ({
+      outcome: "executed" as const,
+      decision: routeDecision,
+      execution: {
+        result: { taskId: "MAIN-ALL", status: "success" as const, summary, facts: [], changedFiles: [], evidence: [], blockers: [] },
+        state: { goal: created.userGoal, completedTasks: ["MAIN-ALL"], failedTasks: [], changedFiles: [], facts: [], status: "completed" as const }
+      }
+    });
+    let receivedRolloutKey: string | undefined;
+    let runtimeContext: ReturnType<typeof getRuntimeObservationContext> | undefined;
+    const result = await executeDirectMainRequest(created, { goal: created.userGoal }, {
+      runtime: {
+        async plan() { return { decision: routeDecision, planning: null }; },
+        async executeDecision() { return execution("Legacy 回答"); }
+      },
+      readOnlyRollout: {
+        mode: "all",
+        async execute(request) {
+          receivedRolloutKey = request.rolloutKey;
+          runtimeContext = getRuntimeObservationContext();
+          return execution("LangGraph 回答");
+        }
+      }
+    });
+
+    assert.equal(result.outcome === "executed" && result.summary, "LangGraph 回答");
+    assert.equal(receivedRolloutKey, created.id);
+    assert.deepEqual(runtimeContext, { controlPlane: "langgraph", rolloutMode: "all" });
+  });
+});
+
+test("只读 main_loop 请求由生产 Main Graph 执行", async () => {
   await withWorkspace(async () => {
     const created = await createTaskSession("分析认证模块", { agentMode: "act" });
     let executionCalls = 0;
+    let runtimeContext: ReturnType<typeof getRuntimeObservationContext> | undefined;
     const result = await executeDirectMainRequest(created, { goal: created.userGoal }, {
       runtime: {
         async plan() {
@@ -486,15 +526,40 @@ test("非 direct 请求由生产服务入口交还现有链路", async () => {
             planning: null
           };
         },
-        async executeDecision() {
+        async executeDecision(_request, decision) {
           executionCalls += 1;
-          throw new Error("非 direct 请求不应在此执行");
+          runtimeContext = getRuntimeObservationContext();
+          return {
+            outcome: "executed" as const,
+            decision,
+            execution: {
+              result: {
+                taskId: "MAIN-READ",
+                status: "success" as const,
+                summary: "认证模块分析完成",
+                facts: ["认证入口位于 src/auth.ts"],
+                changedFiles: [],
+                evidence: ["src/auth.ts:1"],
+                blockers: []
+              },
+              state: {
+                goal: created.userGoal,
+                completedTasks: ["MAIN-READ"],
+                failedTasks: [],
+                changedFiles: [],
+                facts: ["认证入口位于 src/auth.ts"],
+                status: "completed" as const
+              }
+            }
+          };
         }
-      }
+      },
+      readOnlyRollout: { mode: "all" }
     });
 
-    assert.deepEqual(result, { outcome: "not_applicable" });
-    assert.equal(executionCalls, 0);
+    assert.equal(result.outcome === "executed" && result.summary, "认证模块分析完成");
+    assert.equal(executionCalls, 1);
+    assert.deepEqual(runtimeContext, { controlPlane: "langgraph", rolloutMode: "all" });
   });
 });
 
@@ -602,6 +667,117 @@ test("LangGraph Flag 开启后批准任务保持生产服务返回契约和 Task
       const graphSteps = restored.steps.filter((step) => step.id.startsWith("graph-step:"));
       assert.ok(graphSteps.length >= 4);
       assert.equal(new Set(graphSteps.map((step) => step.id)).size, graphSteps.length);
+    } finally {
+      config.featureFlags.langGraphRuntime = previous;
+    }
+  });
+});
+
+test("写任务 all 模式 Graph 在无副作用失败时也不回退 Legacy", async () => {
+  await withWorkspace(async () => {
+    const previous = config.featureFlags.langGraphRuntime;
+    config.featureFlags.langGraphRuntime = true;
+    try {
+      const created = await createTaskSession("修改认证限流", { agentMode: "act" });
+      await setTaskSessionRuntimePlanning(created.id, { status: "ready", plan: plan() });
+      const approved = await approveTaskSessionPlan(created.id);
+      assert.ok(approved);
+      const gate = new InMemoryWriteRuntimeGate();
+      let calls = 0;
+      const runtimeContexts: Array<ReturnType<typeof getRuntimeObservationContext>> = [];
+
+      await assert.rejects(executeApprovedAgentPipeline(approved, {
+        writeRollout: { mode: "all", gate },
+        orchestrator: {
+          async executePlan(): Promise<MainOrchestrationResult> {
+            calls += 1;
+            runtimeContexts.push(getRuntimeObservationContext());
+            throw new Error("Graph 控制面失败");
+          }
+        }
+      }), /Graph 控制面失败/);
+
+      assert.equal(calls, 1);
+      assert.equal(gate.reason(), "runtime_failure");
+      assert.deepEqual(runtimeContexts, [
+        { controlPlane: "langgraph", rolloutMode: "all" }
+      ]);
+    } finally {
+      config.featureFlags.langGraphRuntime = previous;
+    }
+  });
+});
+
+test("写任务 internal 模式一旦选中 Graph，失败时也不回退 Legacy", async () => {
+  await withWorkspace(async () => {
+    const previous = config.featureFlags.langGraphRuntime;
+    config.featureFlags.langGraphRuntime = true;
+    try {
+      const created = await createTaskSession("修改认证限流", { agentMode: "act" });
+      await setTaskSessionRuntimePlanning(created.id, { status: "ready", plan: plan() });
+      const approved = await approveTaskSessionPlan(created.id);
+      assert.ok(approved);
+      const gate = new InMemoryWriteRuntimeGate();
+      let calls = 0;
+
+      await assert.rejects(executeApprovedAgentPipeline(approved, {
+        writeRollout: { mode: "internal", internalTask: true, gate },
+        orchestrator: {
+          async executePlan(): Promise<MainOrchestrationResult> {
+            calls += 1;
+            throw new Error("internal graph failed");
+          }
+        }
+      }), /internal graph failed/);
+
+      assert.equal(calls, 1);
+      assert.equal(gate.reason(), "runtime_failure");
+    } finally {
+      config.featureFlags.langGraphRuntime = previous;
+    }
+  });
+});
+
+test("写任务 Graph 已报告越权文件时熔断且禁止整体重跑", async () => {
+  await withWorkspace(async () => {
+    const previous = config.featureFlags.langGraphRuntime;
+    config.featureFlags.langGraphRuntime = true;
+    try {
+      const created = await createTaskSession("修改认证限流", { agentMode: "act" });
+      await setTaskSessionRuntimePlanning(created.id, { status: "ready", plan: plan() });
+      const approved = await approveTaskSessionPlan(created.id);
+      assert.ok(approved);
+      const gate = new InMemoryWriteRuntimeGate();
+      let calls = 0;
+
+      let capturedError: unknown;
+      let capturedResult: unknown;
+      try {
+        capturedResult = await executeApprovedAgentPipeline(approved, {
+          writeRollout: { mode: "all", gate },
+          orchestrator: {
+            async executePlan(decision, currentPlan): Promise<MainOrchestrationResult> {
+              calls += 1;
+              return {
+                status: "completed",
+                decision,
+                plan: currentPlan,
+                summary: "返回了越权文件",
+                changedFiles: ["src/admin.ts"],
+                results: [],
+                executions: [],
+                trace: { calledAgents: ["main", "developer"], events: [] }
+              };
+            }
+          }
+        });
+      } catch (error) {
+        capturedError = error;
+      }
+
+      assert.ok(capturedError instanceof Error && capturedError.message.includes("批准范围外"), JSON.stringify({ calls, gate: gate.reason(), capturedResult }));
+      assert.equal(calls, 1);
+      assert.equal(gate.reason(), "scope_violation");
     } finally {
       config.featureFlags.langGraphRuntime = previous;
     }

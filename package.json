@@ -16,6 +16,8 @@
     "verify:langgraph-stage6": "powershell -ExecutionPolicy Bypass -File scripts/check-langgraph-stage6.ps1",
     "verify:langgraph-stage7": "powershell -ExecutionPolicy Bypass -File scripts/check-langgraph-stage7.ps1",
     "verify:langgraph-stage8": "powershell -ExecutionPolicy Bypass -File scripts/check-langgraph-stage8.ps1",
+    "verify:langgraph-stage9": "powershell -ExecutionPolicy Bypass -File scripts/check-langgraph-stage9.ps1",
+    "evaluate:langgraph-stage9": "powershell -ExecutionPolicy Bypass -File scripts/evaluate-langgraph-stage9.ps1",
     "verify:command-execution": "powershell -ExecutionPolicy Bypass -File scripts/check-command-execution-refactor.ps1",
     "verify:agent-new-file-stage0": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage0.ps1",
     "verify:agent-new-file-stage1": "powershell -ExecutionPolicy Bypass -File scripts/check-agent-new-file-stage1.ps1",

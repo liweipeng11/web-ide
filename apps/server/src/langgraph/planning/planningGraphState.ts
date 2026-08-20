@@ -30,7 +30,7 @@ export const PlanningGraphState = Annotation.Root({
   contextRequirements: Annotation<string[]>({ reducer: (_current, next) => [...next], default: () => [] }),
   explorationSource: Annotation<"planner_missing_context" | "planner_ready_task">,
   explorerTaskId: Annotation<string | undefined>,
-  latestFailureTaskId: Annotation<string | null>
+  latestEvaluationTaskIds: Annotation<string[]>({ reducer: (_current, next) => [...next], default: () => [] })
 });
 
 function appendReducer<T>(current: T[], next: T[]): T[] {

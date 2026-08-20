@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { config } from "./config.js";
 import { HttpError } from "./errors.js";
+import { ModelRateLimiter } from "./modelRateLimiter.js";
 import { projectRuntimeDirectory } from "./statePaths.js";
 
 type ChatCompletionResponse = {
@@ -41,6 +42,10 @@ type AiExchangeLog = {
 
 const AI_LOG_PREVIEW_CHARS = 500;
 const AI_FETCH_ATTEMPTS_PER_URL = 2;
+const modelRateLimiter = new ModelRateLimiter({
+  maxCalls: config.aiModelMaxCallsPerMinute,
+  windowMs: 60_000
+});
 const sensitiveLogFieldPattern = /(authorization|header|api[_-]?key|token|secret|password|userGoal|content|replacement|selectedText|prefix|suffix|snippet|output|requestBody|responseBody)/i;
 const sensitiveLogValuePattern = /(Bearer\s+)[^\s,;]+|((?:API[_-]?KEY|TOKEN|SECRET|PASSWORD)\s*=\s*)[^\s,;]+/gi;
 
@@ -205,6 +210,7 @@ export async function requestChatCompletion(body: unknown, signal?: AbortSignal,
       try {
         logAi("http", "request", { url, attempt, model: getBodyModel(body) });
         responseAttempt = attempt;
+        await modelRateLimiter.acquire(signal);
         response = await fetch(url, {
           method: "POST",
           headers: {
@@ -409,6 +415,7 @@ export async function requestChatCompletionStream(body: unknown, onDelta: (delta
 
     try {
       logAi("http", "stream.request", { url, model: getBodyModel(body) });
+      await modelRateLimiter.acquire(signal);
       response = await fetch(url, {
         method: "POST",
         headers: {

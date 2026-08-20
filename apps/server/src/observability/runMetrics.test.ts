@@ -7,6 +7,21 @@ import { appendRunMetrics, classifyRunFailure, createEmptyProgressiveDeliveryMet
 import { runAgentRuntime } from "../agentRuntime.js";
 import { createAgentToolRegistry } from "../agentToolRegistry.js";
 import type { RunMetrics } from "./runMetrics.js";
+import { withRuntimeObservationContext } from "../langgraph/rollout/runtimeObservationContext.js";
+
+test("运行指标记录并发隔离的 LangGraph 控制面来源", async () => {
+  let captured: RunMetrics | undefined;
+  await withRuntimeObservationContext({ controlPlane: "langgraph", rolloutMode: "all" }, async () => {
+    const tracker = new RunMetricsTracker(
+      { runId: "graph-run", taskSessionId: "graph-task", provider: "mock", model: "mock", mode: "act" },
+      async (metrics) => { captured = metrics; },
+      false
+    );
+    await tracker.finish({ status: "completed" });
+  });
+  assert.equal(captured?.runtimeControlPlane, "langgraph");
+  assert.equal(captured?.runtimeRolloutMode, "all");
+});
 
 test("运行指标包含完整基线字段且日志不接收敏感正文", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "web-ide-metrics-"));

@@ -29,13 +29,19 @@ function matchesAny(value: string, patterns: RegExp[]) {
 // 先尊重只读和诊断意图，再处理显式任务关键词，避免把“分析如何重构”误判为会修改代码的重构任务。
 export function classifyTaskWorkflow(userGoal: string, classification?: AgentRequestClassification): WorkflowSelection {
   const normalizedGoal = (classification?.normalizedGoal || userGoal).trim();
+  const explicitlyReadOnly = matchesAny(normalizedGoal, explicitReadOnlyPatterns);
 
-  if (matchesAny(normalizedGoal, explicitReadOnlyPatterns) || classification?.intent === "inspect" || classification?.intent === "chat") {
+  if (explicitlyReadOnly || classification?.intent === "inspect" || classification?.intent === "chat") {
+    const reason = explicitlyReadOnly
+      ? "当前请求明确限制为分析或说明，不应修改工作区文件或执行命令。"
+      : classification?.intent === "inspect"
+        ? "当前请求需要只读检查工作区证据，不应修改文件或执行命令。"
+        : "当前请求属于非编辑型问答，不应修改工作区文件或执行命令。";
     return {
       type: "analysis-only",
       source: classification ? "intent" : "keyword",
-      confidence: Math.max(classification?.confidence || 0, matchesAny(normalizedGoal, explicitReadOnlyPatterns) ? 0.95 : 0.7),
-      reason: "当前请求明确限制为分析或说明，不应修改工作区文件或执行命令。"
+      confidence: Math.max(classification?.confidence || 0, explicitlyReadOnly ? 0.95 : 0.7),
+      reason
     };
   }
 
